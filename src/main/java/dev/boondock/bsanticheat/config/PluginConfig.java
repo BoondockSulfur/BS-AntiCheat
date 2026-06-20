@@ -107,6 +107,9 @@ public class PluginConfig {
     public int autoClickerMinSamples() { return cfg.getInt("anticheat.autoclicker_min_samples", 20); }
     public int autoClickerMinCps() { return cfg.getInt("anticheat.autoclicker_min_cps", 8); }
     public int autoClickerMaxDeviationMs() { return cfg.getInt("anticheat.autoclicker_max_deviation_ms", 30); }
+    public double autoClickerMaxCv() { return cfg.getDouble("anticheat.autoclicker_max_cv", 0.30); }
+    public double autoClickerMaxOutlierRatio() { return cfg.getDouble("anticheat.autoclicker_max_outlier_ratio", 0.06); }
+    public int autoClickerMinSignals() { return cfg.getInt("anticheat.autoclicker_min_signals", 2); }
     public boolean badPacketsDetectionEnabled() { return cfg.getBoolean("anticheat.badpackets_detection", true); }
 
     // XRay settings

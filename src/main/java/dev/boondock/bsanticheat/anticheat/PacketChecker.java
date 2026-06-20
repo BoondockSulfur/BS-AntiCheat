@@ -97,34 +97,53 @@ public class PacketChecker implements PacketListener {
         int cps = 0;
         for (Long t : times) if (t >= now - WINDOW_MS) cps++;
 
-        // Click-interval consistency (standard deviation), needs enough samples
-        double meanInterval = -1, sd = -1;
+        // Click-interval pattern analysis. Humans jitter AND pause occasionally;
+        // autoclickers (even "humanized") usually fail at least two of three markers:
+        // low std-dev, low coefficient of variation, and near-zero long-pause outliers.
+        double meanInterval = -1, sd = -1, cv = -1, outlierRatio = -1;
+        int signals = 0;
         int minSamples = config.autoClickerMinSamples();
         if (config.autoClickerConsistencyEnabled() && n >= minSamples + 1) {
+            int m = n - 1;
+            double[] deltas = new double[m];
             double sum = 0;
-            for (int i = 1; i < n; i++) sum += (times[i] - times[i - 1]);
-            meanInterval = sum / (n - 1);
+            for (int i = 1; i < n; i++) { deltas[i - 1] = times[i] - times[i - 1]; sum += deltas[i - 1]; }
+            meanInterval = sum / m;
+
             double v = 0;
-            for (int i = 1; i < n; i++) {
-                double d = (times[i] - times[i - 1]) - meanInterval;
-                v += d * d;
-            }
-            sd = Math.sqrt(v / (n - 1));
+            for (double d : deltas) { double e = d - meanInterval; v += e * e; }
+            sd = Math.sqrt(v / m);
+            cv = meanInterval > 0 ? sd / meanInterval : 0;
+
+            double[] sorted = deltas.clone();
+            java.util.Arrays.sort(sorted);
+            double median = sorted[m / 2];
+            int outliers = 0;
+            for (double d : deltas) if (d > median * 1.5) outliers++;
+            outlierRatio = (double) outliers / m;
+
+            // Count how many "robotic" markers are present
+            if (sd <= config.autoClickerMaxDeviationMs()) signals++;
+            if (cv <= config.autoClickerMaxCv()) signals++;
+            if (outlierRatio <= config.autoClickerMaxOutlierRatio()) signals++;
         }
 
         int maxCps = config.autoClickerMaxCps();
         double derivedCps = meanInterval > 0 ? 1000.0 / meanInterval : 0;
         boolean tooFast = cps > maxCps;
-        boolean tooConsistent = sd >= 0
+        boolean tooConsistent = meanInterval > 0
                 && derivedCps >= config.autoClickerMinCps()
-                && sd <= config.autoClickerMaxDeviationMs();
+                && signals >= config.autoClickerMinSignals();
 
         if (config.debugMode()) {
-            plugin.getLogger().info(String.format("[AC-DEBUG] %s cps=%d sd=%s mean=%s (maxCps=%d, maxSd=%dms)",
+            plugin.getLogger().info(String.format(
+                    "[AC-DEBUG] %s cps=%d sd=%s cv=%s outliers=%s signals=%d/%d mean=%s",
                     user.getName(), cps,
                     sd < 0 ? "n/a" : String.format("%.1f", sd),
-                    meanInterval < 0 ? "n/a" : String.format("%.1f", meanInterval),
-                    maxCps, config.autoClickerMaxDeviationMs()));
+                    cv < 0 ? "n/a" : String.format("%.2f", cv),
+                    outlierRatio < 0 ? "n/a" : String.format("%.2f", outlierRatio),
+                    signals, config.autoClickerMinSignals(),
+                    meanInterval < 0 ? "n/a" : String.format("%.1f", meanInterval)));
         }
 
         if (tooFast || tooConsistent) {

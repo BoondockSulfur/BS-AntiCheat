@@ -53,7 +53,12 @@ anticheat:
   autoclicker_consistency: true
   autoclicker_min_samples: 20        # swings needed before judging consistency
   autoclicker_min_cps: 8             # only analyze consistency at/above this click rate
-  autoclicker_max_deviation_ms: 30   # std-dev (ms) below this => flagged as too consistent
+  # Three "robotic" markers; a player is flagged when at least min_signals of them hold.
+  # Humans usually fail ALL three (they jitter and pause); autoclickers fail at most one.
+  autoclicker_max_deviation_ms: 30   # marker 1: std-dev of intervals (ms) at/below this
+  autoclicker_max_cv: 0.30           # marker 2: std-dev / mean (consistency vs. click rate)
+  autoclicker_max_outlier_ratio: 0.06 # marker 3: share of long-pause intervals (>1.5x median)
+  autoclicker_min_signals: 2         # how many markers must hold to flag (2 = balanced)
 
   # XRay Settings
   xray_timewindow_seconds: 60
