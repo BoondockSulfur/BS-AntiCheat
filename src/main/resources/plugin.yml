@@ -1,0 +1,51 @@
+name: BSAntiCheat
+version: 1.0.0
+main: dev.boondock.bsanticheat.BSAntiCheat
+api-version: '1.21'
+author: BoondockSulfur
+description: AntiCheat plugin with Movement and XRay detection for Paper 1.21.x
+softdepend:
+  - LuckPerms
+
+commands:
+  bsac:
+    description: BSAntiCheat admin command.
+    usage: /bsac <reload|info|version> [player]
+    permission: bsanticheat.admin
+    aliases: [bsanticheat]
+  acwhitelist:
+    description: Manages the AntiCheat whitelist.
+    usage: /acwhitelist <add|remove|list> [player]
+    permission: bsanticheat.manage
+    aliases: [acwl]
+  xrayalerts:
+    description: Shows XRay suspicion alerts.
+    usage: /xrayalerts [player|clear|clearall]
+    permission: bsanticheat.admin
+    aliases: [xra]
+  xrayores:
+    description: Manages XRay ore exclusions.
+    usage: /xrayores <list|available|add|remove> [ore]
+    permission: bsanticheat.manage
+    aliases: [xro]
+  movealerts:
+    description: Shows movement/speed/fly suspicion alerts.
+    usage: /movealerts [player|clear|clearall]
+    permission: bsanticheat.admin
+    aliases: [mva]
+  acsilent:
+    description: Toggle anticheat alert notifications.
+    usage: /acsilent [all|xray|movement|list]
+    permission: bsanticheat.admin
+    aliases: [acs]
+
+permissions:
+  bsanticheat.admin:
+    description: Admin tasks for BSAntiCheat.
+    default: op
+  bsanticheat.manage:
+    description: Allows managing the AntiCheat whitelist and ore exclusions.
+    default: op
+  bsanticheat.bypass:
+    description: Bypasses all AntiCheat checks. Not granted to OPs automatically - OP bypass is controlled by 'ops_bypass' in config.yml.
+    default: false

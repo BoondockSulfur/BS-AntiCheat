@@ -1,0 +1,193 @@
+package dev.boondock.bsanticheat;
+
+import dev.boondock.bsanticheat.alerts.AlertPreferenceManager;
+import dev.boondock.bsanticheat.anticheat.*;
+import dev.boondock.bsanticheat.commands.CommandRegistry;
+import dev.boondock.bsanticheat.config.ConfigMigrator;
+import dev.boondock.bsanticheat.config.PluginConfig;
+import dev.boondock.bsanticheat.db.DatabaseManager;
+import dev.boondock.bsanticheat.integration.LuckPermsHook;
+import dev.boondock.bsanticheat.lang.LanguageManager;
+import dev.boondock.bsanticheat.util.Constants;
+import dev.boondock.bsanticheat.util.UpdateChecker;
+import com.github.retrooper.packetevents.PacketEvents;
+import com.github.retrooper.packetevents.event.PacketListenerPriority;
+import io.github.retrooper.packetevents.factory.spigot.SpigotPacketEventsBuilder;
+import org.bukkit.Bukkit;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.plugin.java.JavaPlugin;
+
+import java.util.UUID;
+
+/**
+ * BSAntiCheat - AntiCheat plugin for Paper 1.21.x
+ * Movement and XRay detection with lag compensation.
+ */
+public class BSAntiCheat extends JavaPlugin implements Listener {
+
+    private PluginConfig configAdapter;
+    private LanguageManager lang;
+    private DatabaseManager database;
+    private AlertPreferenceManager alertPreferenceManager;
+    private XRayAlertManager xrayAlertManager;
+    private MovementAlertManager movementAlertManager;
+    private MovementChecker movementChecker;
+    private XRayDetector xrayDetector;
+    private CombatChecker combatChecker;
+    private WorldChecker worldChecker;
+    private ViolationManager violationManager;
+    private PacketChecker packetChecker;
+    private boolean packetEventsActive = false;
+    private LuckPermsHook luckPerms;
+
+    @Override
+    public void onLoad() {
+        // PacketEvents must be set up in onLoad (it hooks into the server early).
+        try {
+            PacketEvents.setAPI(SpigotPacketEventsBuilder.build(this));
+            PacketEvents.getAPI().getSettings().checkForUpdates(false);
+            PacketEvents.getAPI().load();
+        } catch (Throwable t) {
+            getLogger().warning("[PacketEvents] Could not load - packet-based checks disabled: " + t.getMessage());
+        }
+    }
+
+    @Override
+    public void onEnable() {
+        // Save default config
+        saveDefaultConfig();
+
+        // Config
+        configAdapter = new PluginConfig(this);
+
+        // Migrate from old PerformanceAnalyzer if applicable
+        new ConfigMigrator(this).migrateFromPerformanceAnalyzer();
+
+        // Language
+        lang = new LanguageManager(this, configAdapter.language());
+
+        // Database
+        database = new DatabaseManager(this, configAdapter);
+        database.init();
+
+        // Alert preferences (silent mode)
+        alertPreferenceManager = new AlertPreferenceManager(this, configAdapter);
+
+        // Core anticheat components
+        xrayAlertManager = new XRayAlertManager(this, configAdapter, lang);
+        movementAlertManager = new MovementAlertManager(this, configAdapter, lang);
+
+        // Detectors
+        movementChecker = new MovementChecker(this, configAdapter, database, lang);
+        xrayDetector = new XRayDetector(this, configAdapter, database, lang);
+        combatChecker = new CombatChecker(this, configAdapter, database, lang);
+        worldChecker = new WorldChecker(this, configAdapter, database, lang);
+
+        // Wire alert managers
+        movementChecker.setAlertManager(movementAlertManager);
+        xrayDetector.setAlertManager(xrayAlertManager);
+        combatChecker.setAlertManager(movementAlertManager);
+        worldChecker.setAlertManager(movementAlertManager);
+
+        // Set alert preference managers
+        movementAlertManager.setPreferenceManager(alertPreferenceManager);
+        xrayAlertManager.setPreferenceManager(alertPreferenceManager);
+
+        // Violation level / punishment handling
+        violationManager = new ViolationManager(this, configAdapter);
+        movementChecker.setViolationManager(violationManager);
+        xrayDetector.setViolationManager(violationManager);
+        combatChecker.setViolationManager(violationManager);
+        worldChecker.setViolationManager(violationManager);
+
+        // LuckPerms integration (optional)
+        luckPerms = LuckPermsHook.tryHook(this);
+        if (luckPerms != null) {
+            movementChecker.setLuckPerms(luckPerms);
+            xrayDetector.setLuckPerms(luckPerms);
+            combatChecker.setLuckPerms(luckPerms);
+            worldChecker.setLuckPerms(luckPerms);
+        }
+
+        // Register event listeners
+        Bukkit.getPluginManager().registerEvents(movementChecker, this);
+        Bukkit.getPluginManager().registerEvents(xrayDetector, this);
+        Bukkit.getPluginManager().registerEvents(combatChecker, this);
+        Bukkit.getPluginManager().registerEvents(worldChecker, this);
+        Bukkit.getPluginManager().registerEvents(this, this);
+
+        // Packet-level checks (PacketEvents) — optional, degrades gracefully if unavailable
+        try {
+            if (PacketEvents.getAPI() != null && PacketEvents.getAPI().isLoaded()) {
+                PacketEvents.getAPI().init();
+                packetChecker = new PacketChecker(this, configAdapter, database, lang);
+                packetChecker.setLuckPerms(luckPerms);
+                packetChecker.setAlertManager(movementAlertManager);
+                packetChecker.setViolationManager(violationManager);
+                PacketEvents.getAPI().getEventManager().registerListener(packetChecker, PacketListenerPriority.NORMAL);
+                packetEventsActive = true;
+            }
+        } catch (Throwable t) {
+            getLogger().warning("[PacketEvents] Could not initialize - packet-based checks disabled: " + t.getMessage());
+        }
+
+        // Commands
+        CommandRegistry commandRegistry = new CommandRegistry(this);
+        commandRegistry.registerAll();
+
+        // Update checker (async, 3s delay)
+        Bukkit.getScheduler().runTaskLaterAsynchronously(this, () -> {
+            new UpdateChecker(this).checkForUpdates().thenAccept(result -> {
+                if (result.isUpdateAvailable()) {
+                    getLogger().warning("A new version is available: " + result.getLatestVersion()
+                            + " (current: " + getDescription().getVersion() + "). " + result.getMessage());
+                }
+            });
+        }, Constants.UPDATE_CHECKER_DELAY_TICKS);
+
+        getLogger().info("BSAntiCheat v" + getDescription().getVersion() + " enabled!");
+    }
+
+    @Override
+    public void onDisable() {
+        if (packetEventsActive) {
+            try { PacketEvents.getAPI().terminate(); } catch (Throwable ignored) {}
+        }
+        if (database != null) database.shutdown();
+        if (configAdapter != null) configAdapter.saveSyncOnShutdown();
+        getLogger().info("BSAntiCheat disabled.");
+    }
+
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        UUID playerId = event.getPlayer().getUniqueId();
+        if (movementChecker != null) movementChecker.cleanup(playerId);
+        if (xrayDetector != null) xrayDetector.cleanup(playerId);
+        if (worldChecker != null) worldChecker.cleanup(playerId);
+        if (packetChecker != null) packetChecker.cleanup(playerId);
+        if (alertPreferenceManager != null) alertPreferenceManager.cleanup(playerId);
+        if (violationManager != null) violationManager.cleanup(playerId);
+    }
+
+    public void reloadPlugin() {
+        reloadConfig();
+        configAdapter.reload();
+        // Reload the language in place so components holding a reference stay valid
+        lang.setLanguage(configAdapter.language());
+        if (xrayDetector != null) xrayDetector.reloadConfigCaches();
+        getLogger().info("BSAntiCheat reloaded.");
+    }
+
+    // Getters for commands/GUI (match method names used by copied commands)
+    public PluginConfig configAdapter() { return configAdapter; }
+    public LanguageManager lang() { return lang; }
+    public DatabaseManager database() { return database; }
+    public MovementChecker movementChecker() { return movementChecker; }
+    public XRayDetector xrayDetector() { return xrayDetector; }
+    public ViolationManager violationManager() { return violationManager; }
+    public XRayAlertManager xrayAlertManager() { return xrayAlertManager; }
+    public MovementAlertManager movementAlertManager() { return movementAlertManager; }
+    public AlertPreferenceManager alertPreferenceManager() { return alertPreferenceManager; }
+}

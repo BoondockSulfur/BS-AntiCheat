@@ -1,0 +1,113 @@
+# BSAntiCheat Configuration
+# AntiCheat plugin for Paper 1.21.x
+
+# Language: en (English) or de (German)
+language: en
+
+# Database Configuration (SQLite)
+database:
+  sqlite_file: "plugins/BSAntiCheat/anticheat.db"
+  pool:
+    max_pool_size: 5
+    minimum_idle: 1
+    connection_timeout_ms: 10000
+  retention_days: 30
+  fallback_file_logging: true
+  fallback_log_file: "plugins/BSAntiCheat/fallback.log"
+
+# Debug Mode
+debug_mode: false
+
+# AntiCheat Settings
+anticheat:
+  # Detection Toggles
+  xray_detection: true
+  movement_checks: true
+  speed_detection: true
+  fly_detection: true
+  teleport_detection: true
+  combat_checks: true
+  reach_detection: true
+  world_checks: true
+  nuker_detection: true
+  fastplace_detection: true
+  packet_checks: true
+  autoclicker_detection: true
+
+  # Combat: maximum allowed attack distance (blocks). Vanilla survival reach is ~3.0;
+  # a generous default avoids false positives from latency/hitbox. Creative is exempt.
+  reach_distance: 4.0
+
+  # World: max blocks broken/placed per second before flagging. Generous defaults so
+  # legitimate fast mining (Efficiency + Haste on instamine blocks) is not flagged.
+  nuker_max_breaks_per_second: 15
+  fastplace_max_per_second: 12
+
+  # Packet-level: max clicks per second (arm swings). Legit fast clickers reach ~14;
+  # autoclickers usually exceed this. Raise if you see false positives.
+  autoclicker_max_cps: 16
+
+  # XRay Settings
+  xray_timewindow_seconds: 60
+  xray_excluded_ores: []
+  xray_stone_ore_ratio: 0.10
+
+  # Per-Ore Thresholds (ores mined per time window)
+  xray_thresholds:
+    coal: 20
+    iron: 15
+    copper: 15
+    gold: 10
+    redstone: 10
+    lapis: 8
+    diamond: 6
+    emerald: 4
+    ancient_debris: 3
+
+  # Restricted Worlds (instant alerts when ores are mined)
+  restricted_worlds: []
+  restricted_world_ores: []
+
+  # Punishment / Violation-Level handling
+  # Each confirmed detection raises a player's violation level (VL) for that check.
+  # VL decays over time. When a check's VL reaches a tier, its commands run from console.
+  punishments:
+    enabled: false           # master switch — when false the plugin only alerts/logs
+    decay_seconds: 300       # a player loses 1 VL per this many seconds without a violation
+    setback: false           # teleport movement violators back to their last valid position
+    # Console commands per VL threshold. Placeholders: %player%, %check%, %vl%
+    # check values: SPEED, FLY, TELEPORT, XRAY_THRESHOLD, XRAY_RATIO, XRAY_RARE_ORES, RESTRICTED_ZONE
+    tiers:
+      "40":
+        - "kick %player% AntiCheat: suspicious %check% activity"
+
+  # OP Bypass
+  ops_bypass: false
+
+  # Whitelist (UUIDs)
+  whitelist_players: []
+  # LuckPerms Group Whitelist
+  whitelist_groups: []
+
+  # Movement Speed Thresholds (blocks per tick)
+  # Note: speed potions, sprinting, soul speed, ice and ping are compensated automatically.
+  speed_thresholds:
+    walk: 0.4
+    sprint: 0.6
+    fly: 1.5
+    vertical: 3.5
+    teleport: 15.0
+    violations_before_alert: 5
+    fly_violations_before_alert: 10
+
+# Discord Webhook
+discord:
+  enabled: false
+  webhook_url: ""
+  alert_types:
+    xray: true
+    movement: true
+
+# Alert Preferences
+alerts:
+  silent_players: []

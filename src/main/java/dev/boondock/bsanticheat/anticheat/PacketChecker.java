@@ -1,0 +1,116 @@
+package dev.boondock.bsanticheat.anticheat;
+
+import com.github.retrooper.packetevents.event.PacketListener;
+import com.github.retrooper.packetevents.event.PacketReceiveEvent;
+import com.github.retrooper.packetevents.protocol.packettype.PacketType;
+import com.github.retrooper.packetevents.protocol.player.User;
+import dev.boondock.bsanticheat.config.PluginConfig;
+import dev.boondock.bsanticheat.db.DatabaseManager;
+import dev.boondock.bsanticheat.integration.LuckPermsHook;
+import dev.boondock.bsanticheat.lang.LanguageManager;
+import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
+import org.bukkit.plugin.Plugin;
+
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
+
+/**
+ * Packet-level checks (via PacketEvents). Currently: AutoClicker — clicks per second
+ * derived from arm-swing (ANIMATION) packets, which a client cannot hide from the server
+ * the way it can with Bukkit events.
+ *
+ * <p>Runs on Netty threads, so all Bukkit access (alerts) is hopped back to the main
+ * thread before use.
+ */
+public class PacketChecker implements PacketListener {
+
+    private static final long WINDOW_MS = 1000L;
+
+    private final Plugin plugin;
+    private final PluginConfig config;
+    private final DatabaseManager database;
+    private final LanguageManager lang;
+    private LuckPermsHook luckPerms;
+    private MovementAlertManager alertManager;
+    private ViolationManager violationManager;
+
+    private final Map<UUID, ConcurrentLinkedDeque<Long>> clicks = new ConcurrentHashMap<>();
+
+    public PacketChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
+        this.plugin = plugin;
+        this.config = config;
+        this.database = database;
+        this.lang = lang;
+    }
+
+    public void setLuckPerms(LuckPermsHook luckPerms) {
+        this.luckPerms = luckPerms;
+    }
+
+    public void setAlertManager(MovementAlertManager alertManager) {
+        this.alertManager = alertManager;
+    }
+
+    public void setViolationManager(ViolationManager violationManager) {
+        this.violationManager = violationManager;
+    }
+
+    @Override
+    public void onPacketReceive(PacketReceiveEvent event) {
+        if (event.getPacketType() != PacketType.Play.Client.ANIMATION) return;
+        if (!config.packetChecksEnabled() || !config.autoClickerDetectionEnabled()) return;
+
+        User user = event.getUser();
+        if (user == null || user.getUUID() == null) return;
+        UUID id = user.getUUID();
+
+        int cps = recordClick(id);
+        int max = config.autoClickerMaxCps();
+        if (cps > max) {
+            ConcurrentLinkedDeque<Long> dq = clicks.get(id);
+            if (dq != null) dq.clear(); // reset so it must re-accumulate
+            // Hop to the main thread for any Bukkit access
+            Bukkit.getScheduler().runTask(plugin, () -> flag(id, cps, max));
+        }
+    }
+
+    /** Add a click timestamp, trim to the sliding window, return the current count. */
+    private int recordClick(UUID id) {
+        long now = System.currentTimeMillis();
+        long cutoff = now - WINDOW_MS;
+        ConcurrentLinkedDeque<Long> deque = clicks.computeIfAbsent(id, k -> new ConcurrentLinkedDeque<>());
+        deque.addLast(now);
+        Long head;
+        while ((head = deque.peekFirst()) != null && head < cutoff) {
+            deque.pollFirst();
+        }
+        return deque.size();
+    }
+
+    /** Runs on the main thread. */
+    private void flag(UUID id, int cps, int max) {
+        Player player = Bukkit.getPlayer(id);
+        if (player == null) return;
+        if (Exemptions.isExempt(player, config, luckPerms)) return;
+
+        String details = lang.format("alert.autoclicker", cps, max);
+        if (database != null) {
+            database.logAsync("anticheat_autoclicker", cps, player.getName() + ": " + details);
+        }
+        if (alertManager != null) {
+            alertManager.addAlert(player, "AUTOCLICKER", details, cps, player.getLocation());
+        } else if (config.debugMode()) {
+            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " AUTOCLICKER - " + details);
+        }
+        if (violationManager != null) {
+            violationManager.flag(player, "AUTOCLICKER");
+        }
+    }
+
+    public void cleanup(UUID playerId) {
+        clicks.remove(playerId);
+    }
+}
