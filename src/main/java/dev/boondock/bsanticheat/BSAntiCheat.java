@@ -120,6 +120,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
                 packetListener = PacketEvents.getAPI().getEventManager()
                         .registerListener(packetChecker, PacketListenerPriority.NORMAL);
                 packetEventsActive = true;
+                getLogger().info("[PacketEvents] hooked - packet checks active (AutoClicker, BadPackets).");
             } else {
                 getLogger().info("[PacketEvents] not found - packet checks (AutoClicker, BadPackets) disabled. "
                         + "Install the PacketEvents plugin to enable them.");

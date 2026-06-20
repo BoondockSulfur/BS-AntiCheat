@@ -81,6 +81,9 @@ public class PacketChecker implements PacketListener {
 
         int cps = recordClick(id);
         int max = config.autoClickerMaxCps();
+        if (config.debugMode()) {
+            plugin.getLogger().info("[AC-DEBUG] swing from " + user.getName() + " cps=" + cps + " (max " + max + ")");
+        }
         if (cps > max) {
             ConcurrentLinkedDeque<Long> dq = clicks.get(id);
             if (dq != null) dq.clear(); // reset so it must re-accumulate
@@ -125,8 +128,15 @@ public class PacketChecker implements PacketListener {
     /** Runs on the main thread. */
     private void flagAutoClicker(UUID id, int cps, int max) {
         Player player = Bukkit.getPlayer(id);
-        if (player == null) return;
-        if (Exemptions.isExempt(player, config, luckPerms)) return;
+        if (player == null) {
+            if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] flag skipped: player offline");
+            return;
+        }
+        if (Exemptions.isExempt(player, config, luckPerms)) {
+            if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] flag skipped: " + player.getName() + " is exempt (creative/whitelist/bypass)");
+            return;
+        }
+        if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] FLAG " + player.getName() + " cps=" + cps);
 
         String details = lang.format("alert.autoclicker", cps, max);
         if (database != null) {
