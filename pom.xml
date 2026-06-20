@@ -60,17 +60,13 @@
       <artifactId>slf4j-api</artifactId>
       <version>2.0.9</version>
     </dependency>
+    <!-- PacketEvents is used as an installed server plugin (not shaded), to avoid
+         conflicting with a standalone PacketEvents/ProtocolLib in the netty pipeline. -->
     <dependency>
       <groupId>com.github.retrooper</groupId>
       <artifactId>packetevents-spigot</artifactId>
-      <version>2.12.2</version>
-      <exclusions>
-        <!-- Adventure is provided by Paper at runtime; don't bundle it (avoids overlap). -->
-        <exclusion>
-          <groupId>net.kyori</groupId>
-          <artifactId>*</artifactId>
-        </exclusion>
-      </exclusions>
+      <version>2.12.1</version>
+      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.bstats</groupId>
@@ -102,14 +98,6 @@
               <createDependencyReducedPom>false</createDependencyReducedPom>
               <minimizeJar>true</minimizeJar>
               <filters>
-                <!-- PacketEvents loads classes reflectively; keep all of it so minimizeJar
-                     does not strip required classes. -->
-                <filter>
-                  <artifact>com.github.retrooper:*</artifact>
-                  <includes>
-                    <include>**</include>
-                  </includes>
-                </filter>
                 <filter>
                   <artifact>org.bstats:*</artifact>
                   <includes>
@@ -125,14 +113,6 @@
                 <relocation>
                   <pattern>com.zaxxer.hikari</pattern>
                   <shadedPattern>dev.boondock.bsanticheat.shaded.com.zaxxer.hikari</shadedPattern>
-                </relocation>
-                <relocation>
-                  <pattern>com.github.retrooper.packetevents</pattern>
-                  <shadedPattern>dev.boondock.bsanticheat.shaded.packetevents.api</shadedPattern>
-                </relocation>
-                <relocation>
-                  <pattern>io.github.retrooper.packetevents</pattern>
-                  <shadedPattern>dev.boondock.bsanticheat.shaded.packetevents.impl</shadedPattern>
                 </relocation>
                 <relocation>
                   <pattern>org.bstats</pattern>

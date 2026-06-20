@@ -6,6 +6,7 @@ author: BoondockSulfur
 description: AntiCheat plugin with Movement and XRay detection for Paper 1.21.x
 softdepend:
   - LuckPerms
+  - packetevents
 
 commands:
   bsac:

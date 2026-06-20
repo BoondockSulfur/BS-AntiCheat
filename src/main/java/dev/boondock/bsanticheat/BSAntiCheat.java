@@ -11,8 +11,8 @@ import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
 import dev.boondock.bsanticheat.util.UpdateChecker;
 import com.github.retrooper.packetevents.PacketEvents;
+import com.github.retrooper.packetevents.event.PacketListenerCommon;
 import com.github.retrooper.packetevents.event.PacketListenerPriority;
-import io.github.retrooper.packetevents.factory.spigot.SpigotPacketEventsBuilder;
 import org.bstats.bukkit.Metrics;
 import org.bukkit.Bukkit;
 import org.bukkit.event.EventHandler;
@@ -40,20 +40,9 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
     private WorldChecker worldChecker;
     private ViolationManager violationManager;
     private PacketChecker packetChecker;
+    private PacketListenerCommon packetListener;
     private boolean packetEventsActive = false;
     private LuckPermsHook luckPerms;
-
-    @Override
-    public void onLoad() {
-        // PacketEvents must be set up in onLoad (it hooks into the server early).
-        try {
-            PacketEvents.setAPI(SpigotPacketEventsBuilder.build(this));
-            PacketEvents.getAPI().getSettings().checkForUpdates(false);
-            PacketEvents.getAPI().load();
-        } catch (Throwable t) {
-            getLogger().warning("[PacketEvents] Could not load - packet-based checks disabled: " + t.getMessage());
-        }
-    }
 
     @Override
     public void onEnable() {
@@ -119,19 +108,24 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         Bukkit.getPluginManager().registerEvents(worldChecker, this);
         Bukkit.getPluginManager().registerEvents(this, this);
 
-        // Packet-level checks (PacketEvents) — optional, degrades gracefully if unavailable
+        // Packet-level checks — use the installed PacketEvents plugin (optional).
+        // We do NOT bundle/init PacketEvents ourselves to avoid conflicting with a
+        // standalone PacketEvents/ProtocolLib already hooking the netty pipeline.
         try {
-            if (PacketEvents.getAPI() != null && PacketEvents.getAPI().isLoaded()) {
-                PacketEvents.getAPI().init();
+            if (PacketEvents.getAPI() != null && PacketEvents.getAPI().isInitialized()) {
                 packetChecker = new PacketChecker(this, configAdapter, database, lang);
                 packetChecker.setLuckPerms(luckPerms);
                 packetChecker.setAlertManager(movementAlertManager);
                 packetChecker.setViolationManager(violationManager);
-                PacketEvents.getAPI().getEventManager().registerListener(packetChecker, PacketListenerPriority.NORMAL);
+                packetListener = PacketEvents.getAPI().getEventManager()
+                        .registerListener(packetChecker, PacketListenerPriority.NORMAL);
                 packetEventsActive = true;
+            } else {
+                getLogger().info("[PacketEvents] not found - packet checks (AutoClicker, BadPackets) disabled. "
+                        + "Install the PacketEvents plugin to enable them.");
             }
         } catch (Throwable t) {
-            getLogger().warning("[PacketEvents] Could not initialize - packet-based checks disabled: " + t.getMessage());
+            getLogger().warning("[PacketEvents] Could not hook - packet-based checks disabled: " + t.getMessage());
         }
 
         // Commands
@@ -160,8 +154,8 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
-        if (packetEventsActive) {
-            try { PacketEvents.getAPI().terminate(); } catch (Throwable ignored) {}
+        if (packetListener != null) {
+            try { PacketEvents.getAPI().getEventManager().unregisterListener(packetListener); } catch (Throwable ignored) {}
         }
         if (database != null) database.shutdown();
         if (configAdapter != null) configAdapter.saveSyncOnShutdown();
