@@ -63,6 +63,9 @@ public final class Constants {
     public static final double RIPTIDE_MAX_SPEED = 50.0;
     public static final double OTHER_VEHICLE_MAX_SPEED = 20.0;
 
+    // Consecutive impossible (on-ground while airborne) samples before flagging GroundSpoof
+    public static final int GROUNDSPOOF_VIOLATIONS = 4;
+
     // ==================== CONFIG ====================
     public static final int CONFIG_VERSION = 1;
     public static final String DEFAULT_LANGUAGE = "en";

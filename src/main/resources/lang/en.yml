@@ -118,6 +118,7 @@ alert:
   speed: "Too fast (%s): %.2f b/t (max %.2f)"
   fly: "Illegal flight: %.2f b/t (max %.2f)"
   hover: "Hovering without falling (%d checks)"
+  groundspoof: "GroundSpoof: claims on-ground while airborne"
   teleport: "Teleport-like movement: %.2f blocks"
   reach: "Reach: hit from %.2f blocks (max %.2f)"
   nuker: "Nuker: %d blocks/s broken (max %d)"

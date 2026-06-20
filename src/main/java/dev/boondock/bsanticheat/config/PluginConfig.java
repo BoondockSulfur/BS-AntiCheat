@@ -124,6 +124,7 @@ public class PluginConfig {
     public boolean movementChecksEnabled() { return cfg.getBoolean("anticheat.movement_checks", true); }
     public boolean speedDetectionEnabled() { return cfg.getBoolean("anticheat.speed_detection", true); }
     public boolean flyDetectionEnabled() { return cfg.getBoolean("anticheat.fly_detection", true); }
+    public boolean groundSpoofDetectionEnabled() { return cfg.getBoolean("anticheat.groundspoof_detection", true); }
     public boolean teleportDetectionEnabled() { return cfg.getBoolean("anticheat.teleport_detection", true); }
     public boolean combatChecksEnabled() { return cfg.getBoolean("anticheat.combat_checks", true); }
     public boolean reachDetectionEnabled() { return cfg.getBoolean("anticheat.reach_detection", true); }

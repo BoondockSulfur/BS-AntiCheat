@@ -118,6 +118,7 @@ alert:
   speed: "Zu schnell (%s): %.2f b/t (Max: %.2f)"
   fly: "Illegales Fliegen: %.2f b/t (Max: %.2f)"
   hover: "Schwebt ohne zu fallen (%d Messungen)"
+  groundspoof: "GroundSpoof: behauptet Bodenkontakt in der Luft"
   teleport: "Teleport-artige Bewegung: %.2f Bloecke"
   reach: "Reach: Treffer aus %.2f Bloecken (Max: %.2f)"
   nuker: "Nuker: %d Bloecke/s abgebaut (Max: %d)"

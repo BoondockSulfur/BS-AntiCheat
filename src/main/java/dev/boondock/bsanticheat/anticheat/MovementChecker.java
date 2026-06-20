@@ -48,6 +48,8 @@ public class MovementChecker implements Listener {
     private final Map<UUID, Integer> consecutiveFlyViolations = new ConcurrentHashMap<>();
     // Sustained-hover detection: consecutive airborne samples without falling
     private final Map<UUID, Integer> consecutiveHoverTicks = new ConcurrentHashMap<>();
+    // GroundSpoof: consecutive samples claiming on-ground while high in the air
+    private final Map<UUID, Integer> consecutiveGroundSpoof = new ConcurrentHashMap<>();
 
     // Performance optimization: Event sampling
     private final Map<UUID, Integer> moveCounter = new ConcurrentHashMap<>();
@@ -450,45 +452,62 @@ public class MovementChecker implements Listener {
                     || moveType == MovementType.SPRINTING
                     || moveType == MovementType.SNEAKING;
 
-            if (config.flyDetectionEnabled() && groundType) {
+            if (groundType) {
                 boolean flyExempt = player.hasPotionEffect(PotionEffectType.LEVITATION)
                         || player.hasPotionEffect(PotionEffectType.SLOW_FALLING)
                         || isNearLiquid(player) || isNearSlimeBlock(to) || isNearBubbleColumn(to);
 
-                // (a) Vertical burst: too much upward movement in a single step
-                if (!flyExempt && verticalDist > maxVerticalSpeed && movement.getY() > 0) {
-                    int consecutive = consecutiveFlyViolations.merge(playerId, 1, Integer::sum);
-                    if (consecutive >= config.flyViolationsThreshold()) {
-                        setBack |= handleViolation(player, "FLY",
-                            lang.format("alert.fly", verticalDist, maxVerticalSpeed),
-                            verticalDist, to);
-                        consecutiveFlyViolations.put(playerId, 0);
+                if (config.flyDetectionEnabled()) {
+                    // (a) Vertical burst: too much upward movement in a single step
+                    if (!flyExempt && verticalDist > maxVerticalSpeed && movement.getY() > 0) {
+                        int consecutive = consecutiveFlyViolations.merge(playerId, 1, Integer::sum);
+                        if (consecutive >= config.flyViolationsThreshold()) {
+                            setBack |= handleViolation(player, "FLY",
+                                lang.format("alert.fly", verticalDist, maxVerticalSpeed),
+                                verticalDist, to);
+                            consecutiveFlyViolations.put(playerId, 0);
+                        }
+                    } else if (verticalDist < maxVerticalSpeed * 0.5) {
+                        consecutiveFlyViolations.compute(playerId, (k, v) -> {
+                            if (v == null || v <= 0) return 0;
+                            return Math.max(0, v - 1);
+                        });
                     }
-                } else if (verticalDist < maxVerticalSpeed * 0.5) {
-                    consecutiveFlyViolations.compute(playerId, (k, v) -> {
-                        if (v == null || v <= 0) return 0;
-                        return Math.max(0, v - 1);
-                    });
+
+                    // (b) Sustained hover: airborne across many samples without ever
+                    // falling. Speed potions / sprinting are irrelevant here — only the
+                    // vertical state matters, so legitimate fast running is unaffected.
+                    if (!flyExempt && isClearlyAirborne(player)) {
+                        if (movement.getY() < -0.08) {
+                            // Falling under gravity → legitimate, reset
+                            consecutiveHoverTicks.remove(playerId);
+                        } else {
+                            int hover = consecutiveHoverTicks.merge(playerId, 1, Integer::sum);
+                            if (hover >= config.flyViolationsThreshold()) {
+                                setBack |= handleViolation(player, "FLY",
+                                    lang.format("alert.hover", hover),
+                                    verticalDist, to);
+                                consecutiveHoverTicks.put(playerId, 0);
+                            }
+                        }
+                    } else {
+                        consecutiveHoverTicks.remove(playerId);
+                    }
                 }
 
-                // (b) Sustained hover: airborne across many samples without ever
-                // falling. Speed potions / sprinting are irrelevant here — only the
-                // vertical state matters, so legitimate fast running is unaffected.
-                if (!flyExempt && isClearlyAirborne(player)) {
-                    if (movement.getY() < -0.08) {
-                        // Falling under gravity → legitimate, reset
-                        consecutiveHoverTicks.remove(playerId);
-                    } else {
-                        int hover = consecutiveHoverTicks.merge(playerId, 1, Integer::sum);
-                        if (hover >= config.flyViolationsThreshold()) {
-                            setBack |= handleViolation(player, "FLY",
-                                lang.format("alert.hover", hover),
-                                verticalDist, to);
-                            consecutiveHoverTicks.put(playerId, 0);
-                        }
+                // (c) GroundSpoof: the client claims it is on the ground while it is
+                // clearly several blocks up in the air. Fly/NoFall spoof the on-ground
+                // flag (which player.isOnGround() reflects) to dodge the hover check.
+                if (config.groundSpoofDetectionEnabled() && !flyExempt
+                        && player.isOnGround() && isHighAboveGround(player)) {
+                    int gs = consecutiveGroundSpoof.merge(playerId, 1, Integer::sum);
+                    if (gs >= Constants.GROUNDSPOOF_VIOLATIONS) {
+                        setBack |= handleViolation(player, "GROUNDSPOOF",
+                            lang.get("alert.groundspoof"), 0, to);
+                        consecutiveGroundSpoof.put(playerId, 0);
                     }
                 } else {
-                    consecutiveHoverTicks.remove(playerId);
+                    consecutiveGroundSpoof.remove(playerId);
                 }
             }
         }
@@ -561,6 +580,26 @@ public class MovementChecker implements Listener {
         return true;
     }
 
+    /**
+     * True when the player is clearly several blocks above any solid ground (used together
+     * with a client on-ground claim to detect GroundSpoof). Requires 3 blocks of non-solid
+     * space below so slabs, carpets, snow layers and stairs never trigger it. Climbables and
+     * webs are excluded (legitimate "hanging" states).
+     */
+    private boolean isHighAboveGround(Player player) {
+        Location loc = player.getLocation();
+        Material at = loc.getBlock().getType();
+        if (at == Material.COBWEB || at == Material.LADDER || at == Material.VINE
+                || at == Material.SCAFFOLDING || at == Material.TWISTING_VINES
+                || at == Material.WEEPING_VINES || at == Material.CAVE_VINES) {
+            return false;
+        }
+        for (int i = 1; i <= 3; i++) {
+            if (loc.getBlock().getRelative(0, -i, 0).getType().isSolid()) return false;
+        }
+        return true;
+    }
+
     private boolean isNearLiquid(Player player) {
         Location loc = player.getLocation();
         // Check current block and 6 adjacent faces (7 checks instead of 27)
@@ -609,6 +648,7 @@ public class MovementChecker implements Listener {
         consecutiveSpeedViolations.remove(playerId);
         consecutiveFlyViolations.remove(playerId);
         consecutiveHoverTicks.remove(playerId);
+        consecutiveGroundSpoof.remove(playerId);
         moveCounter.remove(playerId);
         recentKnockback.remove(playerId);
         recentTeleport.remove(playerId);

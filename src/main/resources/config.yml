@@ -25,6 +25,7 @@ anticheat:
   movement_checks: true
   speed_detection: true
   fly_detection: true
+  groundspoof_detection: true
   teleport_detection: true
   combat_checks: true
   reach_detection: true
