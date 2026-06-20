@@ -11,13 +11,13 @@ import org.bukkit.plugin.Plugin;
  * <p>TPS is sampled once a second on the main thread and cached in a volatile field, so it
  * is safe to read from any thread (including Netty packet threads).
  */
-final class ServerLoad {
+public final class ServerLoad {
 
     private static volatile double currentTps = 20.0;
 
     private ServerLoad() {}
 
-    static void start(Plugin plugin) {
+    public static void start(Plugin plugin) {
         plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
             double[] tps = Bukkit.getTPS();
             if (tps != null && tps.length > 0) {
