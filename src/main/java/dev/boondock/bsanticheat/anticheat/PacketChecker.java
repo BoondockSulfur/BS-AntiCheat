@@ -50,6 +50,9 @@ public class PacketChecker implements PacketListener {
     private ViolationManager violationManager;
 
     private final Map<UUID, ConcurrentLinkedDeque<Long>> clicks = new ConcurrentHashMap<>();
+    // Timer balance per player: [0]=balance(ms), [1]=last packet time(ms)
+    private final Map<UUID, long[]> timerState = new ConcurrentHashMap<>();
+    private static final long TICK_MS = 50L;
 
     public PacketChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -79,6 +82,32 @@ public class PacketChecker implements PacketListener {
             handleAnimation(event);
         } else if (WrapperPlayClientPlayerFlying.isFlying(type)) {
             handleFlying(event);
+            handleTimer(event.getUser());
+        }
+    }
+
+    /**
+     * Timer: each movement (flying) packet claims one tick (50ms) of game time. A balance
+     * accumulates 50ms per packet minus the real time elapsed; if the client sends packets
+     * faster than real time (game-speed/timer hack), the balance grows past the limit.
+     */
+    private void handleTimer(User user) {
+        if (!config.timerDetectionEnabled()) return;
+        if (user == null || user.getUUID() == null) return;
+        UUID id = user.getUUID();
+        long now = System.currentTimeMillis();
+
+        long[] st = timerState.computeIfAbsent(id, k -> new long[]{0L, now});
+        long balance = st[0] + TICK_MS - (now - st[1]);
+        if (balance < -1000L) balance = -1000L; // floor: don't bank unlimited credit while idle
+        st[1] = now;
+
+        if (balance > config.timerMaxBalanceMs()) {
+            st[0] = 0L; // reset after flagging
+            long bal = balance;
+            Bukkit.getScheduler().runTask(plugin, () -> flagTimer(id, bal));
+        } else {
+            st[0] = balance;
         }
     }
 
@@ -237,7 +266,28 @@ public class PacketChecker implements PacketListener {
         }
     }
 
+    /** Runs on the main thread. */
+    private void flagTimer(UUID id, long balance) {
+        Player player = Bukkit.getPlayer(id);
+        if (player == null) return;
+        if (Exemptions.isExempt(player, config, luckPerms)) return;
+
+        String details = lang.format("alert.timer", balance);
+        if (database != null) {
+            database.logAsync("anticheat_timer", balance, player.getName() + ": " + details);
+        }
+        if (alertManager != null) {
+            alertManager.addAlert(player, "TIMER", details, balance, player.getLocation());
+        } else if (config.debugMode()) {
+            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " TIMER - " + details);
+        }
+        if (violationManager != null) {
+            violationManager.flag(player, "TIMER");
+        }
+    }
+
     public void cleanup(UUID playerId) {
         clicks.remove(playerId);
+        timerState.remove(playerId);
     }
 }

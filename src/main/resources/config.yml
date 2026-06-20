@@ -41,6 +41,7 @@ anticheat:
   packet_checks: true
   autoclicker_detection: true
   badpackets_detection: true
+  timer_detection: true
 
   # Combat: maximum allowed attack distance (blocks). Vanilla survival reach is ~3.0;
   # a generous default avoids false positives from latency/hitbox. Creative is exempt.
@@ -71,6 +72,8 @@ anticheat:
   autoclicker_max_cv: 0.30           # marker 2: std-dev / mean (consistency vs. click rate)
   autoclicker_max_outlier_ratio: 0.06 # marker 3: share of long-pause intervals (>1.5x median)
   autoclicker_min_signals: 2         # how many markers must hold to flag (2 = balanced)
+  # Timer: allowed "ahead of real time" balance (ms) before flagging game-speed/timer hacks.
+  timer_max_balance_ms: 120
 
   # XRay Settings
   xray_timewindow_seconds: 60

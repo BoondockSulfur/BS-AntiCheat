@@ -130,6 +130,7 @@ alert:
   autoclicker: "AutoClicker: %d CPS (Max: %d)"
   autoclicker_pattern: "AutoClicker: zu gleichmaessig (Streuung %.1fms, %d CPS)"
   badpackets: "BadPackets: ungueltige Rotation (Pitch %.1f)"
+  timer: "Timer: Pakete schneller als Echtzeit (Balance %dms)"
   # XRay-Detektor Meldungen
   xray_threshold: "[XRay?] %s: Schwellenwert ueberschritten in %ds - %s"
   xray_ratio: "[XRay?] %s: Verdaechtiges Erz/Stein-Verhaeltnis: %.2f%% (%d wertvolle Erze, %d Steine) Schwellwert: %.2f%% - %s"

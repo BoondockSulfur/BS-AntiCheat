@@ -153,6 +153,8 @@ public class PluginConfig {
     public double autoClickerMaxOutlierRatio() { return cfg.getDouble("anticheat.autoclicker_max_outlier_ratio", 0.06); }
     public int autoClickerMinSignals() { return cfg.getInt("anticheat.autoclicker_min_signals", 2); }
     public boolean badPacketsDetectionEnabled() { return cfg.getBoolean("anticheat.badpackets_detection", true); }
+    public boolean timerDetectionEnabled() { return cfg.getBoolean("anticheat.timer_detection", true); }
+    public long timerMaxBalanceMs() { return cfg.getLong("anticheat.timer_max_balance_ms", 120L); }
 
     // XRay settings
     public int xrayTimewindowSeconds() { return cfg.getInt("anticheat.xray_timewindow_seconds", 60); }

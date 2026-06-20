@@ -130,6 +130,7 @@ alert:
   autoclicker: "AutoClicker: %d CPS (max %d)"
   autoclicker_pattern: "AutoClicker: too consistent (SD %.1fms, %d CPS)"
   badpackets: "BadPackets: invalid rotation (pitch %.1f)"
+  timer: "Timer: packets ahead of real time (balance %dms)"
   # XRay detector messages
   xray_threshold: "[XRay?] %s: threshold exceeded within %ds - %s"
   xray_ratio: "[XRay?] %s: suspicious ore/stone ratio: %.2f%% (%d valuable ores, %d stone) threshold: %.2f%% - %s"
