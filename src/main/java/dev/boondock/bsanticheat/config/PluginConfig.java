@@ -136,6 +136,7 @@ public class PluginConfig {
     public boolean killAuraDetectionEnabled() { return cfg.getBoolean("anticheat.killaura_detection", true); }
     public double killAuraMaxAngle() { return cfg.getDouble("anticheat.killaura_max_angle", 75.0); }
     public int killAuraMultiTargets() { return cfg.getInt("anticheat.killaura_multi_targets", 3); }
+    public boolean killAuraPlayersOnly() { return cfg.getBoolean("anticheat.killaura_players_only", true); }
     public boolean worldChecksEnabled() { return cfg.getBoolean("anticheat.world_checks", true); }
     public boolean nukerDetectionEnabled() { return cfg.getBoolean("anticheat.nuker_detection", true); }
     public int nukerMaxBreaksPerSecond() { return cfg.getInt("anticheat.nuker_max_breaks_per_second", 15); }

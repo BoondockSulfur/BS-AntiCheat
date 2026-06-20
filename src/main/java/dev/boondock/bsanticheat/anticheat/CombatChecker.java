@@ -11,6 +11,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.util.Vector;
 
@@ -78,6 +79,12 @@ public class CombatChecker implements Listener {
         if (Exemptions.isExempt(attacker, config, luckPerms)) return;
         if (attacker.getWorld() != victim.getWorld()) return;
 
+        // Don't run combat checks against NPCs (Citizens tags them with "NPC" metadata) —
+        // legitimate to hit and their hitboxes/positions are often unusual.
+        if (victim.hasMetadata("NPC")) return;
+
+        boolean victimIsPlayer = victim instanceof Player;
+
         // --- Reach ---
         if (config.reachDetectionEnabled()) {
             double distance = Math.max(0.0, attacker.getEyeLocation().distance(
@@ -88,8 +95,8 @@ public class CombatChecker implements Listener {
             }
         }
 
-        // --- KillAura ---
-        if (config.killAuraDetectionEnabled()) {
+        // --- KillAura --- (optionally only against player targets to avoid mob-grinding FPs)
+        if (config.killAuraDetectionEnabled() && (!config.killAuraPlayersOnly() || victimIsPlayer)) {
             // (a) Aim angle: attacker must roughly face the target
             Vector look = attacker.getEyeLocation().getDirection();
             Vector toTarget = victim.getLocation().clone().add(0, victim.getHeight() / 2.0, 0).toVector()
@@ -101,11 +108,14 @@ public class CombatChecker implements Listener {
                 }
             }
 
-            // (b) Multi-aura: several distinct targets hit within a tiny window
-            int distinct = recordTarget(attacker.getUniqueId(), victim.getUniqueId());
-            if (distinct >= config.killAuraMultiTargets()) {
-                handleViolation(attacker, "KILLAURA",
-                        lang.format("alert.killaura_multi", distinct, Constants.KILLAURA_MULTI_WINDOW_MS), distinct);
+            // (b) Multi-aura: several distinct targets hit within a tiny window.
+            // Sweeping-edge hits multiple entities per swing legitimately, so skip those.
+            if (event.getCause() != EntityDamageEvent.DamageCause.ENTITY_SWEEP_ATTACK) {
+                int distinct = recordTarget(attacker.getUniqueId(), victim.getUniqueId());
+                if (distinct >= config.killAuraMultiTargets()) {
+                    handleViolation(attacker, "KILLAURA",
+                            lang.format("alert.killaura_multi", distinct, Constants.KILLAURA_MULTI_WINDOW_MS), distinct);
+                }
             }
         }
     }
