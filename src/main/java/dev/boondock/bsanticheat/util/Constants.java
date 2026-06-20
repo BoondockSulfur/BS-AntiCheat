@@ -70,4 +70,7 @@ public final class Constants {
 
     // ==================== UPDATE CHECKER ====================
     public static final long UPDATE_CHECKER_DELAY_TICKS = 60L;
+
+    // ==================== METRICS ====================
+    public static final int BSTATS_PLUGIN_ID = 32112;
 }

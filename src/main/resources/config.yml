@@ -33,6 +33,7 @@ anticheat:
   fastplace_detection: true
   packet_checks: true
   autoclicker_detection: true
+  badpackets_detection: true
 
   # Combat: maximum allowed attack distance (blocks). Vanilla survival reach is ~3.0;
   # a generous default avoids false positives from latency/hitbox. Creative is exempt.

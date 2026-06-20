@@ -123,6 +123,7 @@ alert:
   nuker: "Nuker: %d blocks/s broken (max %d)"
   fastplace: "FastPlace: %d blocks/s placed (max %d)"
   autoclicker: "AutoClicker: %d CPS (max %d)"
+  badpackets: "BadPackets: invalid rotation (pitch %.1f)"
   # XRay detector messages
   xray_threshold: "[XRay?] %s: threshold exceeded within %ds - %s"
   xray_ratio: "[XRay?] %s: suspicious ore/stone ratio: %.2f%% (%d valuable ores, %d stone) threshold: %.2f%% - %s"

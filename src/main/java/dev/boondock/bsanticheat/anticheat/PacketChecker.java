@@ -3,7 +3,10 @@ package dev.boondock.bsanticheat.anticheat;
 import com.github.retrooper.packetevents.event.PacketListener;
 import com.github.retrooper.packetevents.event.PacketReceiveEvent;
 import com.github.retrooper.packetevents.protocol.packettype.PacketType;
+import com.github.retrooper.packetevents.protocol.packettype.PacketTypeCommon;
 import com.github.retrooper.packetevents.protocol.player.User;
+import com.github.retrooper.packetevents.protocol.world.Location;
+import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerFlying;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
@@ -60,9 +63,18 @@ public class PacketChecker implements PacketListener {
 
     @Override
     public void onPacketReceive(PacketReceiveEvent event) {
-        if (event.getPacketType() != PacketType.Play.Client.ANIMATION) return;
-        if (!config.packetChecksEnabled() || !config.autoClickerDetectionEnabled()) return;
+        if (!config.packetChecksEnabled()) return;
+        PacketTypeCommon type = event.getPacketType();
+        if (type == PacketType.Play.Client.ANIMATION) {
+            handleAnimation(event);
+        } else if (WrapperPlayClientPlayerFlying.isFlying(type)) {
+            handleFlying(event);
+        }
+    }
 
+    /** AutoClicker: clicks per second from arm-swing packets. */
+    private void handleAnimation(PacketReceiveEvent event) {
+        if (!config.autoClickerDetectionEnabled()) return;
         User user = event.getUser();
         if (user == null || user.getUUID() == null) return;
         UUID id = user.getUUID();
@@ -72,8 +84,28 @@ public class PacketChecker implements PacketListener {
         if (cps > max) {
             ConcurrentLinkedDeque<Long> dq = clicks.get(id);
             if (dq != null) dq.clear(); // reset so it must re-accumulate
-            // Hop to the main thread for any Bukkit access
-            Bukkit.getScheduler().runTask(plugin, () -> flag(id, cps, max));
+            Bukkit.getScheduler().runTask(plugin, () -> flagAutoClicker(id, cps, max));
+        }
+    }
+
+    /** BadPackets: rotation values a vanilla client can never send (pitch out of range / non-finite). */
+    private void handleFlying(PacketReceiveEvent event) {
+        if (!config.badPacketsDetectionEnabled()) return;
+        WrapperPlayClientPlayerFlying wrapper = new WrapperPlayClientPlayerFlying(event);
+        if (!wrapper.hasRotationChanged()) return;
+
+        Location loc = wrapper.getLocation();
+        if (loc == null) return;
+        float pitch = loc.getPitch();
+        float yaw = loc.getYaw();
+
+        boolean invalid = !Float.isFinite(pitch) || !Float.isFinite(yaw)
+                || pitch < -90.0f || pitch > 90.0f;
+        if (invalid) {
+            User user = event.getUser();
+            if (user == null || user.getUUID() == null) return;
+            UUID id = user.getUUID();
+            Bukkit.getScheduler().runTask(plugin, () -> flagBadPackets(id, pitch));
         }
     }
 
@@ -91,7 +123,7 @@ public class PacketChecker implements PacketListener {
     }
 
     /** Runs on the main thread. */
-    private void flag(UUID id, int cps, int max) {
+    private void flagAutoClicker(UUID id, int cps, int max) {
         Player player = Bukkit.getPlayer(id);
         if (player == null) return;
         if (Exemptions.isExempt(player, config, luckPerms)) return;
@@ -107,6 +139,26 @@ public class PacketChecker implements PacketListener {
         }
         if (violationManager != null) {
             violationManager.flag(player, "AUTOCLICKER");
+        }
+    }
+
+    /** Runs on the main thread. */
+    private void flagBadPackets(UUID id, float pitch) {
+        Player player = Bukkit.getPlayer(id);
+        if (player == null) return;
+        if (Exemptions.isExempt(player, config, luckPerms)) return;
+
+        String details = lang.format("alert.badpackets", pitch);
+        if (database != null) {
+            database.logAsync("anticheat_badpackets", pitch, player.getName() + ": " + details);
+        }
+        if (alertManager != null) {
+            alertManager.addAlert(player, "BADPACKETS", details, pitch, player.getLocation());
+        } else if (config.debugMode()) {
+            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " BADPACKETS - " + details);
+        }
+        if (violationManager != null) {
+            violationManager.flag(player, "BADPACKETS");
         }
     }
 

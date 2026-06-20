@@ -13,6 +13,7 @@ import dev.boondock.bsanticheat.util.UpdateChecker;
 import com.github.retrooper.packetevents.PacketEvents;
 import com.github.retrooper.packetevents.event.PacketListenerPriority;
 import io.github.retrooper.packetevents.factory.spigot.SpigotPacketEventsBuilder;
+import org.bstats.bukkit.Metrics;
 import org.bukkit.Bukkit;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -136,6 +137,13 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         // Commands
         CommandRegistry commandRegistry = new CommandRegistry(this);
         commandRegistry.registerAll();
+
+        // bStats metrics (optional, never fatal)
+        try {
+            new Metrics(this, Constants.BSTATS_PLUGIN_ID);
+        } catch (Throwable t) {
+            getLogger().fine("[bStats] Could not start metrics: " + t.getMessage());
+        }
 
         // Update checker (async, 3s delay)
         Bukkit.getScheduler().runTaskLaterAsynchronously(this, () -> {
