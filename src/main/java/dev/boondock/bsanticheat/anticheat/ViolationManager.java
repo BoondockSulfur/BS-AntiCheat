@@ -1,5 +1,6 @@
 package dev.boondock.bsanticheat.anticheat;
 
+import dev.boondock.bsanticheat.api.ViolationEvent;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -40,8 +41,6 @@ public class ViolationManager {
      * @return the player's new VL for this check (0 if punishments are disabled)
      */
     public int flag(Player player, String checkType) {
-        if (!config.punishmentsEnabled()) return 0;
-
         UUID id = player.getUniqueId();
         long now = System.currentTimeMillis();
         Map<String, Vl> perCheck = data.computeIfAbsent(id, k -> new ConcurrentHashMap<>());
@@ -56,10 +55,23 @@ public class ViolationManager {
             after = (int) Math.floor(vl.points);
         }
 
-        if (after > before) {
+        // VL is always tracked (for /bsac info, placeholders, the API event).
+        fireViolationEvent(player, checkType, after);
+
+        // Punishment tiers are opt-in.
+        if (config.punishmentsEnabled() && after > before) {
             runTiers(player, checkType, before, after);
         }
         return after;
+    }
+
+    private void fireViolationEvent(Player player, String checkType, int vl) {
+        ViolationEvent event = new ViolationEvent(player, checkType, vl);
+        if (Bukkit.isPrimaryThread()) {
+            Bukkit.getPluginManager().callEvent(event);
+        } else {
+            Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(event));
+        }
     }
 
     /** Current (decayed) VL for a check type, without adding a violation. */

@@ -6,6 +6,7 @@ import dev.boondock.bsanticheat.commands.CommandRegistry;
 import dev.boondock.bsanticheat.config.ConfigMigrator;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
+import dev.boondock.bsanticheat.integration.BSACPlaceholders;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
@@ -138,6 +139,16 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
             new Metrics(this, Constants.BSTATS_PLUGIN_ID);
         } catch (Throwable t) {
             getLogger().fine("[bStats] Could not start metrics: " + t.getMessage());
+        }
+
+        // PlaceholderAPI integration (optional)
+        if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
+            try {
+                new BSACPlaceholders(this).register();
+                getLogger().info("PlaceholderAPI hooked - placeholders available (%bsanticheat_total%, %bsanticheat_vl_<check>%).");
+            } catch (Throwable t) {
+                getLogger().warning("PlaceholderAPI hook failed: " + t.getMessage());
+            }
         }
 
         // Update checker (async, 3s delay)
