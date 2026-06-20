@@ -12,7 +12,7 @@
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <paperapi.version>1.21.4-R0.1-SNAPSHOT</paperapi.version>
+    <paperapi.version>1.21.10-R0.1-SNAPSHOT</paperapi.version>
     <hikaricp.version>5.1.0</hikaricp.version>
     <sqlite.version>3.46.0.0</sqlite.version>
   </properties>
