@@ -375,6 +375,14 @@ public class MovementChecker implements Listener {
         Long lastTime = lastMoveTime.get(playerId);
         boolean setBack = false;
 
+        // Skip during server lag — reset the baseline so the catch-up move afterwards
+        // isn't misread as a speed/teleport violation.
+        if (ServerLoad.isLagging(config)) {
+            lastLocations.put(playerId, to.clone());
+            lastMoveTime.put(playerId, now);
+            return;
+        }
+
         if (lastLoc != null && lastTime != null && from.getWorld().equals(to.getWorld())) {
             double timeDelta = (now - lastTime) / 1000.0;
             // Skip if time delta is too small to avoid division issues

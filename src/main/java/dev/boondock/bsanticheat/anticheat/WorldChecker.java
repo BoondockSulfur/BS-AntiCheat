@@ -62,6 +62,7 @@ public class WorldChecker implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockBreak(BlockBreakEvent event) {
         if (!config.worldChecksEnabled() || !config.nukerDetectionEnabled()) return;
+        if (ServerLoad.isLagging(config)) return;
         Player player = event.getPlayer();
         if (Exemptions.isExempt(player, config, luckPerms)) return;
 
@@ -76,6 +77,7 @@ public class WorldChecker implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockPlace(BlockPlaceEvent event) {
         if (!config.worldChecksEnabled() || !config.fastPlaceDetectionEnabled()) return;
+        if (ServerLoad.isLagging(config)) return;
         Player player = event.getPlayer();
         if (Exemptions.isExempt(player, config, luckPerms)) return;
 

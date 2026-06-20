@@ -73,6 +73,7 @@ public class PacketChecker implements PacketListener {
     @Override
     public void onPacketReceive(PacketReceiveEvent event) {
         if (!config.packetChecksEnabled()) return;
+        if (ServerLoad.isLagging(config)) return;
         PacketTypeCommon type = event.getPacketType();
         if (type == PacketType.Play.Client.ANIMATION) {
             handleAnimation(event);

@@ -53,6 +53,9 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         // Config
         configAdapter = new PluginConfig(this);
 
+        // Track server TPS for lag-aware checks
+        ServerLoad.start(this);
+
         // Migrate from old PerformanceAnalyzer if applicable
         new ConfigMigrator(this).migrateFromPerformanceAnalyzer();
 

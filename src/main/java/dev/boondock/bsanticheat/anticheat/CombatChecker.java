@@ -70,6 +70,7 @@ public class CombatChecker implements Listener {
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onEntityDamageByEntity(EntityDamageByEntityEvent event) {
         if (!config.combatChecksEnabled()) return;
+        if (ServerLoad.isLagging(config)) return;
 
         // Only direct melee from a player against a living target
         if (!(event.getDamager() instanceof Player attacker)) return;

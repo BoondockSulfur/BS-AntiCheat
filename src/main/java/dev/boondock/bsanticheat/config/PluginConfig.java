@@ -104,6 +104,9 @@ public class PluginConfig {
     // Debug
     public boolean debugMode() { return cfg.getBoolean("debug_mode", false); }
 
+    // Lag handling: skip checks while recent TPS is below this (avoids lag false positives)
+    public double lagExemptTps() { return cfg.getDouble("anticheat.lag_exempt_tps", 18.0); }
+
     // Database (SQLite only)
     public String sqliteFile() {
         String file = cfg.getString("database.sqlite_file", Constants.DEFAULT_SQLITE_PATH);

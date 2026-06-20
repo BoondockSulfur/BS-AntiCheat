@@ -20,6 +20,10 @@ debug_mode: false
 
 # AntiCheat Settings
 anticheat:
+  # Skip movement/combat/world/packet checks while recent TPS is below this value,
+  # so server lag spikes don't cause false positives.
+  lag_exempt_tps: 18.0
+
   # Detection Toggles
   xray_detection: true
   movement_checks: true
