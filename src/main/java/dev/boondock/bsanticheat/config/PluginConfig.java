@@ -3,8 +3,12 @@ package dev.boondock.bsanticheat.config;
 import dev.boondock.bsanticheat.util.Constants;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -24,13 +28,42 @@ public class PluginConfig {
         this.plugin = plugin;
         this.cfg = plugin.getConfig();
         this.asyncSaver = new AsyncConfigSaver(plugin);
+        mergeDefaults();
         validateConfig();
     }
 
     public void reload() {
         plugin.reloadConfig();
         this.cfg = plugin.getConfig();
+        mergeDefaults();
         validateConfig();
+    }
+
+    /**
+     * Add any config keys present in the bundled default config.yml but missing from the
+     * user's file (e.g. after a plugin update), keeping existing values. Mirrors how the
+     * LanguageManager merges new language keys.
+     */
+    private void mergeDefaults() {
+        try (InputStream is = plugin.getResource("config.yml")) {
+            if (is == null) return;
+            YamlConfiguration defaults = YamlConfiguration.loadConfiguration(
+                    new InputStreamReader(is, StandardCharsets.UTF_8));
+            boolean changed = false;
+            for (String key : defaults.getKeys(true)) {
+                if (defaults.isConfigurationSection(key)) continue; // only leaf values
+                if (!cfg.contains(key)) {
+                    cfg.set(key, defaults.get(key));
+                    changed = true;
+                }
+            }
+            if (changed) {
+                plugin.saveConfig();
+                plugin.getLogger().info("[Config] Added missing config keys from defaults.");
+            }
+        } catch (Exception e) {
+            plugin.getLogger().warning("[Config] Could not merge default config keys: " + e.getMessage());
+        }
     }
 
     private void validateConfig() {
