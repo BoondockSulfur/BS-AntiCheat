@@ -37,6 +37,8 @@ public class PacketChecker implements PacketListener {
     private static final long WINDOW_MS = 1000L;
     // How many recent swing timestamps to keep per player for interval analysis.
     private static final int SAMPLE_CAP = 40;
+    // Only analyse a recent, continuous clicking window so pauses don't pollute stats.
+    private static final long CONSISTENCY_WINDOW_MS = 4000L;
 
     private final Plugin plugin;
     private final PluginConfig config;
@@ -88,6 +90,11 @@ public class PacketChecker implements PacketListener {
         long now = System.currentTimeMillis();
         ConcurrentLinkedDeque<Long> buf = clicks.computeIfAbsent(id, k -> new ConcurrentLinkedDeque<>());
         buf.addLast(now);
+        // Drop samples older than the analysis window (pauses must not pollute interval
+        // stats), then cap the count.
+        long minTime = now - CONSISTENCY_WINDOW_MS;
+        Long head;
+        while ((head = buf.peekFirst()) != null && head < minTime) buf.pollFirst();
         while (buf.size() > SAMPLE_CAP) buf.pollFirst();
 
         Long[] times = buf.toArray(new Long[0]);
