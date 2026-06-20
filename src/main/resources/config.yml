@@ -51,8 +51,8 @@ anticheat:
   # flagged when click intervals vary LESS than max_deviation_ms (low std-dev), even at a
   # slow click rate. Tune max_deviation_ms with debug_mode (logs measured sd per player).
   autoclicker_consistency: true
-  autoclicker_min_samples: 20        # swings needed before judging consistency
-  autoclicker_min_cps: 8             # only analyze consistency at/above this click rate
+  autoclicker_min_samples: 15        # swings needed before judging consistency
+  autoclicker_min_cps: 2             # analyze consistency at/above this click rate (2 = also catch slow autoclickers)
   # Three "robotic" markers; a player is flagged when at least min_signals of them hold.
   # Humans usually fail ALL three (they jitter and pause); autoclickers fail at most one.
   autoclicker_max_deviation_ms: 30   # marker 1: std-dev of intervals (ms) at/below this

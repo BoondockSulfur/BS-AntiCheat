@@ -104,8 +104,8 @@ public class PluginConfig {
     public boolean autoClickerDetectionEnabled() { return cfg.getBoolean("anticheat.autoclicker_detection", true); }
     public int autoClickerMaxCps() { return cfg.getInt("anticheat.autoclicker_max_cps", 16); }
     public boolean autoClickerConsistencyEnabled() { return cfg.getBoolean("anticheat.autoclicker_consistency", true); }
-    public int autoClickerMinSamples() { return cfg.getInt("anticheat.autoclicker_min_samples", 20); }
-    public int autoClickerMinCps() { return cfg.getInt("anticheat.autoclicker_min_cps", 8); }
+    public int autoClickerMinSamples() { return cfg.getInt("anticheat.autoclicker_min_samples", 15); }
+    public int autoClickerMinCps() { return cfg.getInt("anticheat.autoclicker_min_cps", 2); }
     public int autoClickerMaxDeviationMs() { return cfg.getInt("anticheat.autoclicker_max_deviation_ms", 30); }
     public double autoClickerMaxCv() { return cfg.getDouble("anticheat.autoclicker_max_cv", 0.30); }
     public double autoClickerMaxOutlierRatio() { return cfg.getDouble("anticheat.autoclicker_max_outlier_ratio", 0.06); }

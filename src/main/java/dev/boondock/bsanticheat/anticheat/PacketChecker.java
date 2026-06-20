@@ -37,8 +37,9 @@ public class PacketChecker implements PacketListener {
     private static final long WINDOW_MS = 1000L;
     // How many recent swing timestamps to keep per player for interval analysis.
     private static final int SAMPLE_CAP = 40;
-    // Only analyse a recent, continuous clicking window so pauses don't pollute stats.
-    private static final long CONSISTENCY_WINDOW_MS = 4000L;
+    // Recent clicking window analysed for consistency. Wide enough that even slow
+    // (~2 CPS) clickers accumulate enough samples; pauses still raise the outlier signal.
+    private static final long CONSISTENCY_WINDOW_MS = 8000L;
 
     private final Plugin plugin;
     private final PluginConfig config;
