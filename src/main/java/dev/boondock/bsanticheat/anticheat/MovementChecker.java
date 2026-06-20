@@ -50,6 +50,8 @@ public class MovementChecker implements Listener {
     private final Map<UUID, Integer> consecutiveHoverTicks = new ConcurrentHashMap<>();
     // GroundSpoof: consecutive samples claiming on-ground while high in the air
     private final Map<UUID, Integer> consecutiveGroundSpoof = new ConcurrentHashMap<>();
+    // NoSlow: consecutive samples moving too fast while using an item
+    private final Map<UUID, Integer> consecutiveNoSlow = new ConcurrentHashMap<>();
 
     // Performance optimization: Event sampling
     private final Map<UUID, Integer> moveCounter = new ConcurrentHashMap<>();
@@ -418,6 +420,11 @@ public class MovementChecker implements Listener {
                 maxVerticalSpeed *= 2.0; // Double vertical speed allowance
             }
 
+            // On-foot states (vertical and item-use checks use their own physics)
+            boolean groundType = moveType == MovementType.WALKING
+                    || moveType == MovementType.SPRINTING
+                    || moveType == MovementType.SNEAKING;
+
             // Check for impossible teleportation-like movement (if enabled)
             if (config.teleportDetectionEnabled() && totalDist > config.teleportThreshold()) {
                 setBack |= handleViolation(player, "TELEPORT",
@@ -446,12 +453,27 @@ public class MovementChecker implements Listener {
                 });
             }
 
+            // NoSlow: moving too fast while using an item (eating, drawing a bow,
+            // blocking with a shield, charging a trident…) which vanilla slows down.
+            // isHandRaised() reflects the (client-influenced) item-use state.
+            if (config.noSlowDetectionEnabled() && groundType && player.isHandRaised()) {
+                double noSlowCap = getMaxSpeed(MovementType.WALKING, player) * Constants.NOSLOW_SPEED_MULTIPLIER;
+                if (horizontalDist > noSlowCap) {
+                    int c = consecutiveNoSlow.merge(playerId, 1, Integer::sum);
+                    if (c >= Constants.NOSLOW_VIOLATIONS) {
+                        setBack |= handleViolation(player, "NOSLOW",
+                            lang.format("alert.noslow", horizontalDist, noSlowCap), horizontalDist, to);
+                        consecutiveNoSlow.put(playerId, 0);
+                    }
+                } else {
+                    consecutiveNoSlow.remove(playerId);
+                }
+            } else {
+                consecutiveNoSlow.remove(playerId);
+            }
+
             // Vertical/fly checks only apply to on-foot movement. Swimming and
             // climbing have their own vertical physics and would false-positive.
-            boolean groundType = moveType == MovementType.WALKING
-                    || moveType == MovementType.SPRINTING
-                    || moveType == MovementType.SNEAKING;
-
             if (groundType) {
                 boolean flyExempt = player.hasPotionEffect(PotionEffectType.LEVITATION)
                         || player.hasPotionEffect(PotionEffectType.SLOW_FALLING)
@@ -649,6 +671,7 @@ public class MovementChecker implements Listener {
         consecutiveFlyViolations.remove(playerId);
         consecutiveHoverTicks.remove(playerId);
         consecutiveGroundSpoof.remove(playerId);
+        consecutiveNoSlow.remove(playerId);
         moveCounter.remove(playerId);
         recentKnockback.remove(playerId);
         recentTeleport.remove(playerId);

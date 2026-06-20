@@ -6,6 +6,10 @@ import dev.boondock.bsanticheat.alerts.DiscordWebhook;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
@@ -126,13 +130,19 @@ public class MovementAlertManager {
         String detail = lang.get("alert.notify_movement_detail",
                 "%type%", type, "%value%", String.format("%.2f", value), "%pos%", location);
 
+        LegacyComponentSerializer legacy = LegacyComponentSerializer.legacySection();
+        Component clickable = legacy.deserialize(message)
+                .clickEvent(ClickEvent.runCommand("/movealerts " + suspect.getName()))
+                .hoverEvent(HoverEvent.showText(legacy.deserialize(lang.get("alert.click_hint"))));
+        Component detailComp = legacy.deserialize(detail);
+
         Bukkit.getOnlinePlayers().stream()
                 .filter(p -> p.hasPermission("bsanticheat.admin"))
                 .filter(p -> preferenceManager == null ||
                         preferenceManager.shouldReceive(p, AlertPreferenceManager.AlertCategory.MOVEMENT))
                 .forEach(admin -> {
-                    admin.sendMessage(message);
-                    admin.sendMessage(detail);
+                    admin.sendMessage(clickable);
+                    admin.sendMessage(detailComp);
                 });
     }
 

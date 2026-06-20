@@ -180,6 +180,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         if (movementChecker != null) movementChecker.cleanup(playerId);
         if (xrayDetector != null) xrayDetector.cleanup(playerId);
         if (worldChecker != null) worldChecker.cleanup(playerId);
+        if (combatChecker != null) combatChecker.cleanup(playerId);
         if (packetChecker != null) packetChecker.cleanup(playerId);
         if (alertPreferenceManager != null) alertPreferenceManager.cleanup(playerId);
         if (violationManager != null) violationManager.cleanup(playerId);

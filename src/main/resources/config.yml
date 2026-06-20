@@ -26,9 +26,11 @@ anticheat:
   speed_detection: true
   fly_detection: true
   groundspoof_detection: true
+  noslow_detection: true
   teleport_detection: true
   combat_checks: true
   reach_detection: true
+  killaura_detection: true
   world_checks: true
   nuker_detection: true
   fastplace_detection: true
@@ -39,6 +41,10 @@ anticheat:
   # Combat: maximum allowed attack distance (blocks). Vanilla survival reach is ~3.0;
   # a generous default avoids false positives from latency/hitbox. Creative is exempt.
   reach_distance: 4.0
+  # KillAura: flag hits landed more than this many degrees off the attacker's aim, or
+  # hitting at least killaura_multi_targets distinct entities within a few milliseconds.
+  killaura_max_angle: 75.0
+  killaura_multi_targets: 3
 
   # World: max blocks broken/placed per second before flagging. Generous defaults so
   # legitimate fast mining (Efficiency + Haste on instamine blocks) is not flagged.

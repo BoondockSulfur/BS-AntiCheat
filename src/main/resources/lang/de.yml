@@ -112,6 +112,7 @@ movetype:
 # AntiCheat-Verstoss-Warnungen (Admin-Chat, Alert-Details, Discord)
 alert:
   none: "&7Keine Alerts fuer diesen Spieler."
+  click_hint: "&7Klicken fuer Details"
   location_unknown: "Unbekannt"
   location_summary: "Welt: %s, Bereich: X[%d-%d] Y[%d-%d] Z[%d-%d]"
   # Bewegungs-Detektor Verstoss-Details (positionale Format-Argumente)
@@ -119,8 +120,11 @@ alert:
   fly: "Illegales Fliegen: %.2f b/t (Max: %.2f)"
   hover: "Schwebt ohne zu fallen (%d Messungen)"
   groundspoof: "GroundSpoof: behauptet Bodenkontakt in der Luft"
+  noslow: "NoSlow: %.2f b/t waehrend Item-Benutzung (Max: %.2f)"
   teleport: "Teleport-artige Bewegung: %.2f Bloecke"
   reach: "Reach: Treffer aus %.2f Bloecken (Max: %.2f)"
+  killaura_angle: "KillAura: Treffer %.0f Grad neben Blickrichtung"
+  killaura_multi: "KillAura: %d Ziele in %dms"
   nuker: "Nuker: %d Bloecke/s abgebaut (Max: %d)"
   fastplace: "FastPlace: %d Bloecke/s platziert (Max: %d)"
   autoclicker: "AutoClicker: %d CPS (Max: %d)"

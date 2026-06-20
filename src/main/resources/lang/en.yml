@@ -112,6 +112,7 @@ movetype:
 # AntiCheat violation alerts (admin chat, alert details, Discord)
 alert:
   none: "&7No alerts for this player."
+  click_hint: "&7Click to view details"
   location_unknown: "Unknown"
   location_summary: "World: %s, area: X[%d-%d] Y[%d-%d] Z[%d-%d]"
   # Movement detector violation details (positional format args)
@@ -119,8 +120,11 @@ alert:
   fly: "Illegal flight: %.2f b/t (max %.2f)"
   hover: "Hovering without falling (%d checks)"
   groundspoof: "GroundSpoof: claims on-ground while airborne"
+  noslow: "NoSlow: %.2f b/t while using an item (max %.2f)"
   teleport: "Teleport-like movement: %.2f blocks"
   reach: "Reach: hit from %.2f blocks (max %.2f)"
+  killaura_angle: "KillAura: hit %.0f deg off aim"
+  killaura_multi: "KillAura: %d targets within %dms"
   nuker: "Nuker: %d blocks/s broken (max %d)"
   fastplace: "FastPlace: %d blocks/s placed (max %d)"
   autoclicker: "AutoClicker: %d CPS (max %d)"

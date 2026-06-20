@@ -125,10 +125,14 @@ public class PluginConfig {
     public boolean speedDetectionEnabled() { return cfg.getBoolean("anticheat.speed_detection", true); }
     public boolean flyDetectionEnabled() { return cfg.getBoolean("anticheat.fly_detection", true); }
     public boolean groundSpoofDetectionEnabled() { return cfg.getBoolean("anticheat.groundspoof_detection", true); }
+    public boolean noSlowDetectionEnabled() { return cfg.getBoolean("anticheat.noslow_detection", true); }
     public boolean teleportDetectionEnabled() { return cfg.getBoolean("anticheat.teleport_detection", true); }
     public boolean combatChecksEnabled() { return cfg.getBoolean("anticheat.combat_checks", true); }
     public boolean reachDetectionEnabled() { return cfg.getBoolean("anticheat.reach_detection", true); }
     public double reachDistance() { return cfg.getDouble("anticheat.reach_distance", 4.0); }
+    public boolean killAuraDetectionEnabled() { return cfg.getBoolean("anticheat.killaura_detection", true); }
+    public double killAuraMaxAngle() { return cfg.getDouble("anticheat.killaura_max_angle", 75.0); }
+    public int killAuraMultiTargets() { return cfg.getInt("anticheat.killaura_multi_targets", 3); }
     public boolean worldChecksEnabled() { return cfg.getBoolean("anticheat.world_checks", true); }
     public boolean nukerDetectionEnabled() { return cfg.getBoolean("anticheat.nuker_detection", true); }
     public int nukerMaxBreaksPerSecond() { return cfg.getInt("anticheat.nuker_max_breaks_per_second", 15); }

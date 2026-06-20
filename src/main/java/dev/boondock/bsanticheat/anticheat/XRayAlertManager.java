@@ -5,6 +5,10 @@ import dev.boondock.bsanticheat.alerts.AlertPreferenceManager;
 import dev.boondock.bsanticheat.alerts.DiscordWebhook;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.lang.LanguageManager;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
@@ -99,13 +103,17 @@ public class XRayAlertManager {
      */
     private void notifyAdmins(Player suspect, Map<String, Integer> oreBreakdown, List<String> locations) {
         String message = lang.get("alert.notify_xray", "%player%", suspect.getName());
+        LegacyComponentSerializer legacy = LegacyComponentSerializer.legacySection();
+        Component clickable = legacy.deserialize(message)
+                .clickEvent(ClickEvent.runCommand("/xrayalerts " + suspect.getName()))
+                .hoverEvent(HoverEvent.showText(legacy.deserialize(lang.get("alert.click_hint"))));
 
         Bukkit.getOnlinePlayers().stream()
                 .filter(p -> p.hasPermission("bsanticheat.admin"))
                 .filter(p -> preferenceManager == null ||
                         preferenceManager.shouldReceive(p, AlertPreferenceManager.AlertCategory.XRAY))
                 .forEach(admin -> {
-                    admin.sendMessage(message);
+                    admin.sendMessage(clickable);
                     if (oreBreakdown != null && !oreBreakdown.isEmpty()) {
                         admin.sendMessage(lang.get("alert.notify_xray_ores", "%ores%", formatOreBreakdownShort(oreBreakdown)));
                     }

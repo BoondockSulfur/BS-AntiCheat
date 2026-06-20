@@ -65,6 +65,11 @@ public final class Constants {
 
     // Consecutive impossible (on-ground while airborne) samples before flagging GroundSpoof
     public static final int GROUNDSPOOF_VIOLATIONS = 4;
+    // NoSlow: allowed fraction of walk speed while using an item, and consecutive samples
+    public static final double NOSLOW_SPEED_MULTIPLIER = 0.5;
+    public static final int NOSLOW_VIOLATIONS = 3;
+    // KillAura multi-aura: window for counting distinct targets hit
+    public static final long KILLAURA_MULTI_WINDOW_MS = 250L;
 
     // ==================== CONFIG ====================
     public static final int CONFIG_VERSION = 1;
