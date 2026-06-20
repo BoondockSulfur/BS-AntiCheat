@@ -123,6 +123,7 @@ alert:
   nuker: "Nuker: %d Bloecke/s abgebaut (Max: %d)"
   fastplace: "FastPlace: %d Bloecke/s platziert (Max: %d)"
   autoclicker: "AutoClicker: %d CPS (Max: %d)"
+  autoclicker_pattern: "AutoClicker: zu gleichmaessig (Streuung %.1fms, %d CPS)"
   badpackets: "BadPackets: ungueltige Rotation (Pitch %.1f)"
   # XRay-Detektor Meldungen
   xray_threshold: "[XRay?] %s: Schwellenwert ueberschritten in %ds - %s"

@@ -103,6 +103,10 @@ public class PluginConfig {
     public boolean packetChecksEnabled() { return cfg.getBoolean("anticheat.packet_checks", true); }
     public boolean autoClickerDetectionEnabled() { return cfg.getBoolean("anticheat.autoclicker_detection", true); }
     public int autoClickerMaxCps() { return cfg.getInt("anticheat.autoclicker_max_cps", 16); }
+    public boolean autoClickerConsistencyEnabled() { return cfg.getBoolean("anticheat.autoclicker_consistency", true); }
+    public int autoClickerMinSamples() { return cfg.getInt("anticheat.autoclicker_min_samples", 20); }
+    public int autoClickerMinCps() { return cfg.getInt("anticheat.autoclicker_min_cps", 8); }
+    public int autoClickerMaxDeviationMs() { return cfg.getInt("anticheat.autoclicker_max_deviation_ms", 30); }
     public boolean badPacketsDetectionEnabled() { return cfg.getBoolean("anticheat.badpackets_detection", true); }
 
     // XRay settings

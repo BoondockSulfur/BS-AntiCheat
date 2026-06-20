@@ -21,9 +21,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
 /**
- * Packet-level checks (via PacketEvents). Currently: AutoClicker — clicks per second
- * derived from arm-swing (ANIMATION) packets, which a client cannot hide from the server
- * the way it can with Bukkit events.
+ * Packet-level checks (via PacketEvents).
+ * <ul>
+ *   <li>AutoClicker — from arm-swing (ANIMATION) packets, using two signals: raw clicks
+ *       per second, and click-interval consistency (low standard deviation = metronomic =
+ *       autoclicker, which also catches slow-but-perfectly-regular clickers).</li>
+ *   <li>BadPackets — impossible rotation values.</li>
+ * </ul>
  *
  * <p>Runs on Netty threads, so all Bukkit access (alerts) is hopped back to the main
  * thread before use.
@@ -31,6 +35,8 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 public class PacketChecker implements PacketListener {
 
     private static final long WINDOW_MS = 1000L;
+    // How many recent swing timestamps to keep per player for interval analysis.
+    private static final int SAMPLE_CAP = 40;
 
     private final Plugin plugin;
     private final PluginConfig config;
@@ -72,22 +78,61 @@ public class PacketChecker implements PacketListener {
         }
     }
 
-    /** AutoClicker: clicks per second from arm-swing packets. */
+    /** AutoClicker: raw CPS over the cap, OR click intervals that are too consistent. */
     private void handleAnimation(PacketReceiveEvent event) {
         if (!config.autoClickerDetectionEnabled()) return;
         User user = event.getUser();
         if (user == null || user.getUUID() == null) return;
         UUID id = user.getUUID();
 
-        int cps = recordClick(id);
-        int max = config.autoClickerMaxCps();
-        if (config.debugMode()) {
-            plugin.getLogger().info("[AC-DEBUG] swing from " + user.getName() + " cps=" + cps + " (max " + max + ")");
+        long now = System.currentTimeMillis();
+        ConcurrentLinkedDeque<Long> buf = clicks.computeIfAbsent(id, k -> new ConcurrentLinkedDeque<>());
+        buf.addLast(now);
+        while (buf.size() > SAMPLE_CAP) buf.pollFirst();
+
+        Long[] times = buf.toArray(new Long[0]);
+        int n = times.length;
+
+        // CPS = swings within the last second
+        int cps = 0;
+        for (Long t : times) if (t >= now - WINDOW_MS) cps++;
+
+        // Click-interval consistency (standard deviation), needs enough samples
+        double meanInterval = -1, sd = -1;
+        int minSamples = config.autoClickerMinSamples();
+        if (config.autoClickerConsistencyEnabled() && n >= minSamples + 1) {
+            double sum = 0;
+            for (int i = 1; i < n; i++) sum += (times[i] - times[i - 1]);
+            meanInterval = sum / (n - 1);
+            double v = 0;
+            for (int i = 1; i < n; i++) {
+                double d = (times[i] - times[i - 1]) - meanInterval;
+                v += d * d;
+            }
+            sd = Math.sqrt(v / (n - 1));
         }
-        if (cps > max) {
-            ConcurrentLinkedDeque<Long> dq = clicks.get(id);
-            if (dq != null) dq.clear(); // reset so it must re-accumulate
-            Bukkit.getScheduler().runTask(plugin, () -> flagAutoClicker(id, cps, max));
+
+        int maxCps = config.autoClickerMaxCps();
+        double derivedCps = meanInterval > 0 ? 1000.0 / meanInterval : 0;
+        boolean tooFast = cps > maxCps;
+        boolean tooConsistent = sd >= 0
+                && derivedCps >= config.autoClickerMinCps()
+                && sd <= config.autoClickerMaxDeviationMs();
+
+        if (config.debugMode()) {
+            plugin.getLogger().info(String.format("[AC-DEBUG] %s cps=%d sd=%s mean=%s (maxCps=%d, maxSd=%dms)",
+                    user.getName(), cps,
+                    sd < 0 ? "n/a" : String.format("%.1f", sd),
+                    meanInterval < 0 ? "n/a" : String.format("%.1f", meanInterval),
+                    maxCps, config.autoClickerMaxDeviationMs()));
+        }
+
+        if (tooFast || tooConsistent) {
+            buf.clear(); // reset so it must re-accumulate
+            boolean pattern = !tooFast; // prefer the raw-CPS reason if both apply
+            double sdSnap = sd;
+            int cpsSnap = tooFast ? cps : (int) Math.round(derivedCps);
+            Bukkit.getScheduler().runTask(plugin, () -> flagAutoClicker(id, cpsSnap, maxCps, pattern, sdSnap));
         }
     }
 
@@ -112,21 +157,8 @@ public class PacketChecker implements PacketListener {
         }
     }
 
-    /** Add a click timestamp, trim to the sliding window, return the current count. */
-    private int recordClick(UUID id) {
-        long now = System.currentTimeMillis();
-        long cutoff = now - WINDOW_MS;
-        ConcurrentLinkedDeque<Long> deque = clicks.computeIfAbsent(id, k -> new ConcurrentLinkedDeque<>());
-        deque.addLast(now);
-        Long head;
-        while ((head = deque.peekFirst()) != null && head < cutoff) {
-            deque.pollFirst();
-        }
-        return deque.size();
-    }
-
     /** Runs on the main thread. */
-    private void flagAutoClicker(UUID id, int cps, int max) {
+    private void flagAutoClicker(UUID id, int cps, int maxCps, boolean pattern, double sd) {
         Player player = Bukkit.getPlayer(id);
         if (player == null) {
             if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] flag skipped: player offline");
@@ -136,9 +168,14 @@ public class PacketChecker implements PacketListener {
             if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] flag skipped: " + player.getName() + " is exempt (creative/whitelist/bypass)");
             return;
         }
-        if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] FLAG " + player.getName() + " cps=" + cps);
+        if (config.debugMode()) {
+            plugin.getLogger().info("[AC-DEBUG] FLAG " + player.getName()
+                    + (pattern ? " pattern sd=" + String.format("%.1f", sd) + " cps=" + cps : " cps=" + cps));
+        }
 
-        String details = lang.format("alert.autoclicker", cps, max);
+        String details = pattern
+                ? lang.format("alert.autoclicker_pattern", sd, cps)
+                : lang.format("alert.autoclicker", cps, maxCps);
         if (database != null) {
             database.logAsync("anticheat_autoclicker", cps, player.getName() + ": " + details);
         }

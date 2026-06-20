@@ -47,6 +47,13 @@ anticheat:
   # Packet-level: max clicks per second (arm swings). Legit fast clickers reach ~14;
   # autoclickers usually exceed this. Raise if you see false positives.
   autoclicker_max_cps: 16
+  # AutoClicker pattern analysis: humans jitter, autoclickers are metronomic. A player is
+  # flagged when click intervals vary LESS than max_deviation_ms (low std-dev), even at a
+  # slow click rate. Tune max_deviation_ms with debug_mode (logs measured sd per player).
+  autoclicker_consistency: true
+  autoclicker_min_samples: 20        # swings needed before judging consistency
+  autoclicker_min_cps: 8             # only analyze consistency at/above this click rate
+  autoclicker_max_deviation_ms: 30   # std-dev (ms) below this => flagged as too consistent
 
   # XRay Settings
   xray_timewindow_seconds: 60

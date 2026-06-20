@@ -123,6 +123,7 @@ alert:
   nuker: "Nuker: %d blocks/s broken (max %d)"
   fastplace: "FastPlace: %d blocks/s placed (max %d)"
   autoclicker: "AutoClicker: %d CPS (max %d)"
+  autoclicker_pattern: "AutoClicker: too consistent (SD %.1fms, %d CPS)"
   badpackets: "BadPackets: invalid rotation (pitch %.1f)"
   # XRay detector messages
   xray_threshold: "[XRay?] %s: threshold exceeded within %ds - %s"
