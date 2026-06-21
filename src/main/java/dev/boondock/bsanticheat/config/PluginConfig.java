@@ -52,7 +52,9 @@ public class PluginConfig {
             boolean changed = false;
             for (String key : defaults.getKeys(true)) {
                 if (defaults.isConfigurationSection(key)) continue; // only leaf values
-                if (!cfg.contains(key)) {
+                // contains(key, true) ignores Bukkit's auto-loaded jar defaults, so this
+                // checks the user's actual file (otherwise every key looks "present").
+                if (!cfg.contains(key, true)) {
                     cfg.set(key, defaults.get(key));
                     changed = true;
                 }
