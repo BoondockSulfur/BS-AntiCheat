@@ -52,6 +52,12 @@ anticheat:
   killaura_max_angle: 75.0
   killaura_multi_targets: 3
   killaura_players_only: true   # only run KillAura against player targets (avoids mob-grinding false positives)
+  # KillAura rotation GCD (EXPERIMENTAL): human mouse input is quantised; programmatic aim
+  # has a tiny gcd. OFF by default — enable debug_mode, watch [ROT-DEBUG] gcd= values for
+  # legit players vs cheats, set killaura_rotation_min_gcd between them, then enable.
+  killaura_rotation_detection: false
+  killaura_rotation_samples: 20
+  killaura_rotation_min_gcd: 8000
 
   # World: max blocks broken/placed per second before flagging. Generous defaults so
   # legitimate fast mining (Efficiency + Haste on instamine blocks) is not flagged.

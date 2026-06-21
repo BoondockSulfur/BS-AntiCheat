@@ -157,6 +157,10 @@ public class PluginConfig {
     public boolean badPacketsDetectionEnabled() { return cfg.getBoolean("anticheat.badpackets_detection", true); }
     public boolean timerDetectionEnabled() { return cfg.getBoolean("anticheat.timer_detection", true); }
     public long timerMaxBalanceMs() { return cfg.getLong("anticheat.timer_max_balance_ms", 120L); }
+    // KillAura rotation GCD (experimental, off by default — calibrate with debug_mode)
+    public boolean killAuraRotationDetectionEnabled() { return cfg.getBoolean("anticheat.killaura_rotation_detection", false); }
+    public int killAuraRotationSamples() { return cfg.getInt("anticheat.killaura_rotation_samples", 20); }
+    public long killAuraRotationMinGcd() { return cfg.getLong("anticheat.killaura_rotation_min_gcd", 8000L); }
 
     // XRay settings
     public int xrayTimewindowSeconds() { return cfg.getInt("anticheat.xray_timewindow_seconds", 60); }

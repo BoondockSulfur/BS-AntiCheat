@@ -15,6 +15,8 @@ import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -53,6 +55,10 @@ public class PacketChecker implements PacketListener {
     // Timer balance per player: [0]=balance(ms), [1]=last packet time(ms)
     private final Map<UUID, long[]> timerState = new ConcurrentHashMap<>();
     private static final long TICK_MS = 50L;
+    // KillAura rotation GCD analysis
+    private final Map<UUID, Float> lastYaw = new ConcurrentHashMap<>();
+    private final Map<UUID, Deque<Long>> yawDeltas = new ConcurrentHashMap<>();
+    private static final double ROT_EXPANDER = 131072.0;
 
     public PacketChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -193,25 +199,73 @@ public class PacketChecker implements PacketListener {
         }
     }
 
-    /** BadPackets: rotation values a vanilla client can never send (pitch out of range / non-finite). */
+    /** Rotation packets: BadPackets (impossible pitch) and KillAura rotation GCD. */
     private void handleFlying(PacketReceiveEvent event) {
-        if (!config.badPacketsDetectionEnabled()) return;
+        boolean bp = config.badPacketsDetectionEnabled();
+        boolean rot = config.killAuraRotationDetectionEnabled();
+        if (!bp && !rot) return;
+
         WrapperPlayClientPlayerFlying wrapper = new WrapperPlayClientPlayerFlying(event);
         if (!wrapper.hasRotationChanged()) return;
-
         Location loc = wrapper.getLocation();
         if (loc == null) return;
+        User user = event.getUser();
+        if (user == null || user.getUUID() == null) return;
+        UUID id = user.getUUID();
         float pitch = loc.getPitch();
         float yaw = loc.getYaw();
 
-        boolean invalid = !Float.isFinite(pitch) || !Float.isFinite(yaw)
-                || pitch < -90.0f || pitch > 90.0f;
-        if (invalid) {
-            User user = event.getUser();
-            if (user == null || user.getUUID() == null) return;
-            UUID id = user.getUUID();
+        // BadPackets: impossible rotation values
+        if (bp && (!Float.isFinite(pitch) || !Float.isFinite(yaw) || pitch < -90.0f || pitch > 90.0f)) {
             Bukkit.getScheduler().runTask(plugin, () -> flagBadPackets(id, pitch));
         }
+
+        // KillAura rotation GCD: human mouse input is quantised (yaw deltas share a common
+        // divisor); programmatic aim collapses the GCD toward 1. Experimental — off by
+        // default; calibrate killaura_rotation_min_gcd via debug_mode (logs measured gcd).
+        if (rot && Float.isFinite(yaw)) {
+            Float last = lastYaw.put(id, yaw);
+            if (last != null) {
+                double dyaw = Math.abs(wrapAngle(yaw - last));
+                if (dyaw > 0.05 && dyaw < 30.0) { // ignore idle noise and big snaps/spins
+                    long scaled = Math.round(dyaw * ROT_EXPANDER);
+                    Deque<Long> dq = yawDeltas.computeIfAbsent(id, k -> new ArrayDeque<>());
+                    dq.addLast(scaled);
+                    int samples = config.killAuraRotationSamples();
+                    while (dq.size() > samples) dq.pollFirst();
+                    if (dq.size() >= samples) {
+                        long g = 0;
+                        for (long v : dq) g = gcd(g, v);
+                        if (config.debugMode()) {
+                            plugin.getLogger().info("[ROT-DEBUG] " + user.getName() + " gcd=" + g);
+                        }
+                        if (g > 0 && g < config.killAuraRotationMinGcd()) {
+                            dq.clear();
+                            long flagged = g;
+                            Bukkit.getScheduler().runTask(plugin, () -> flagRotation(id, flagged));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static double wrapAngle(double a) {
+        a %= 360.0;
+        if (a >= 180.0) a -= 360.0;
+        if (a < -180.0) a += 360.0;
+        return a;
+    }
+
+    private static long gcd(long a, long b) {
+        a = Math.abs(a);
+        b = Math.abs(b);
+        while (b != 0) {
+            long t = b;
+            b = a % b;
+            a = t;
+        }
+        return a;
     }
 
     /** Runs on the main thread. */
@@ -286,8 +340,30 @@ public class PacketChecker implements PacketListener {
         }
     }
 
+    /** Runs on the main thread. */
+    private void flagRotation(UUID id, long measuredGcd) {
+        Player player = Bukkit.getPlayer(id);
+        if (player == null) return;
+        if (Exemptions.isExempt(player, config, luckPerms)) return;
+
+        String details = lang.format("alert.killaura_rotation", measuredGcd);
+        if (database != null) {
+            database.logAsync("anticheat_killaura", measuredGcd, player.getName() + ": " + details);
+        }
+        if (alertManager != null) {
+            alertManager.addAlert(player, "KILLAURA", details, measuredGcd, player.getLocation());
+        } else if (config.debugMode()) {
+            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " KILLAURA - " + details);
+        }
+        if (violationManager != null) {
+            violationManager.flag(player, "KILLAURA");
+        }
+    }
+
     public void cleanup(UUID playerId) {
         clicks.remove(playerId);
         timerState.remove(playerId);
+        lastYaw.remove(playerId);
+        yawDeltas.remove(playerId);
     }
 }

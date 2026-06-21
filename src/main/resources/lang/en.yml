@@ -125,6 +125,7 @@ alert:
   reach: "Reach: hit from %.2f blocks (max %.2f)"
   killaura_angle: "KillAura: hit %.0f deg off aim"
   killaura_multi: "KillAura: %d targets within %dms"
+  killaura_rotation: "KillAura: non-human rotation (gcd %d)"
   nuker: "Nuker: %d blocks/s broken (max %d)"
   fastplace: "FastPlace: %d blocks/s placed (max %d)"
   scaffold: "Scaffold: placing %.0f deg off aim"
