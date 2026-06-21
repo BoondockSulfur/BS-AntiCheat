@@ -6,6 +6,7 @@ import com.github.retrooper.packetevents.protocol.packettype.PacketType;
 import com.github.retrooper.packetevents.protocol.packettype.PacketTypeCommon;
 import com.github.retrooper.packetevents.protocol.player.User;
 import com.github.retrooper.packetevents.protocol.world.Location;
+import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientInteractEntity;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerFlying;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
@@ -84,8 +85,8 @@ public class PacketChecker implements PacketListener {
         if (!config.packetChecksEnabled()) return;
         if (ServerLoad.isLagging(config)) return;
         PacketTypeCommon type = event.getPacketType();
-        if (type == PacketType.Play.Client.ANIMATION) {
-            handleAnimation(event);
+        if (type == PacketType.Play.Client.INTERACT_ENTITY) {
+            handleAttack(event);
         } else if (WrapperPlayClientPlayerFlying.isFlying(type)) {
             handleFlying(event);
             handleTimer(event.getUser());
@@ -117,9 +118,15 @@ public class PacketChecker implements PacketListener {
         }
     }
 
-    /** AutoClicker: raw CPS over the cap, OR click intervals that are too consistent. */
-    private void handleAnimation(PacketReceiveEvent event) {
+    /**
+     * AutoClicker: counts ATTACK packets (not arm-swing animations). Mining/holding the
+     * button sends swings every tick but NO attack packets, so this no longer false-flags
+     * normal mining. Raw CPS over the cap, optionally plus interval-consistency.
+     */
+    private void handleAttack(PacketReceiveEvent event) {
         if (!config.autoClickerDetectionEnabled()) return;
+        WrapperPlayClientInteractEntity wrapper = new WrapperPlayClientInteractEntity(event);
+        if (wrapper.getAction() != WrapperPlayClientInteractEntity.InteractAction.ATTACK) return;
         User user = event.getUser();
         if (user == null || user.getUUID() == null) return;
         UUID id = user.getUUID();

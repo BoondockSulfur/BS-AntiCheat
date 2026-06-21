@@ -67,13 +67,13 @@ anticheat:
   # (bridging/towering "blind"), sustained over a few placements.
   scaffold_max_angle: 80.0
 
-  # Packet-level: max clicks per second (arm swings). Legit fast clickers reach ~14;
-  # autoclickers usually exceed this. Raise if you see false positives.
+  # Packet-level: max ATTACKS per second (counts attack packets, not arm swings, so mining
+  # never false-flags). Legit fast clickers reach ~14; autoclickers usually exceed this.
   autoclicker_max_cps: 16
-  # AutoClicker pattern analysis: humans jitter, autoclickers are metronomic. A player is
-  # flagged when click intervals vary LESS than max_deviation_ms (low std-dev), even at a
-  # slow click rate. Tune max_deviation_ms with debug_mode (logs measured sd per player).
-  autoclicker_consistency: true
+  # AutoClicker pattern analysis (EXPERIMENTAL, off by default): flags overly consistent
+  # attack intervals. Can false-positive on held attacks; calibrate with debug_mode before
+  # enabling.
+  autoclicker_consistency: false
   autoclicker_min_samples: 15        # swings needed before judging consistency
   autoclicker_min_cps: 2             # analyze consistency at/above this click rate (2 = also catch slow autoclickers)
   # Three "robotic" markers; a player is flagged when at least min_signals of them hold.
