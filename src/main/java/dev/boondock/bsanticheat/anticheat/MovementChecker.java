@@ -52,6 +52,10 @@ public class MovementChecker implements Listener {
     private final Map<UUID, Integer> consecutiveGroundSpoof = new ConcurrentHashMap<>();
     // NoSlow: consecutive samples moving too fast while using an item
     private final Map<UUID, Integer> consecutiveNoSlow = new ConcurrentHashMap<>();
+    // Jesus / Spider / Step
+    private final Map<UUID, Integer> consecutiveJesus = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> consecutiveSpider = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> consecutiveStep = new ConcurrentHashMap<>();
 
     // Performance optimization: Event sampling
     private final Map<UUID, Integer> moveCounter = new ConcurrentHashMap<>();
@@ -539,6 +543,43 @@ public class MovementChecker implements Listener {
                 } else {
                     consecutiveGroundSpoof.remove(playerId);
                 }
+
+                // Jesus: moving across the top of water without sinking
+                if (config.jesusDetectionEnabled() && !player.isInWater() && !player.isGliding()
+                        && horizontalDist > 0.08 && Math.abs(movement.getY()) < 0.05 && isOnWaterSurface(player)) {
+                    int c = consecutiveJesus.merge(playerId, 1, Integer::sum);
+                    if (c >= Constants.JESUS_VIOLATIONS) {
+                        setBack |= handleViolation(player, "JESUS", lang.get("alert.jesus"), horizontalDist, to);
+                        consecutiveJesus.put(playerId, 0);
+                    }
+                } else {
+                    consecutiveJesus.remove(playerId);
+                }
+
+                // Spider: climbing a wall (moving up while pressed against a solid block, not a ladder)
+                if (config.spiderDetectionEnabled() && movement.getY() > 0.0 && !player.isOnGround()
+                        && !isNearLiquid(player) && !isOnClimbable(player) && isAgainstWall(player)) {
+                    int c = consecutiveSpider.merge(playerId, 1, Integer::sum);
+                    if (c >= Constants.SPIDER_VIOLATIONS) {
+                        setBack |= handleViolation(player, "SPIDER", lang.get("alert.spider"), movement.getY(), to);
+                        consecutiveSpider.put(playerId, 0);
+                    }
+                } else {
+                    consecutiveSpider.remove(playerId);
+                }
+
+                // Step: stepping up more than the vanilla ~0.6 in one move while staying grounded
+                if (config.stepDetectionEnabled() && player.isOnGround()
+                        && movement.getY() > Constants.STEP_MAX_HEIGHT && horizontalDist > 0.05
+                        && !isNearSlimeBlock(to) && !player.hasPotionEffect(PotionEffectType.JUMP_BOOST)) {
+                    int c = consecutiveStep.merge(playerId, 1, Integer::sum);
+                    if (c >= Constants.STEP_VIOLATIONS) {
+                        setBack |= handleViolation(player, "STEP", lang.format("alert.step", movement.getY()), movement.getY(), to);
+                        consecutiveStep.put(playerId, 0);
+                    }
+                } else {
+                    consecutiveStep.remove(playerId);
+                }
             }
         }
 
@@ -630,6 +671,32 @@ public class MovementChecker implements Listener {
         return true;
     }
 
+    /** True when standing on top of a water block without being submerged (Jesus). */
+    private boolean isOnWaterSurface(Player player) {
+        Location loc = player.getLocation();
+        Material at = loc.getBlock().getType();
+        Material below = loc.getBlock().getRelative(0, -1, 0).getType();
+        return at != Material.WATER && below == Material.WATER;
+    }
+
+    /** True when the player occupies a climbable block (ladder/vine/scaffolding). */
+    private boolean isOnClimbable(Player player) {
+        Material at = player.getLocation().getBlock().getType();
+        return at == Material.LADDER || at == Material.VINE || at == Material.SCAFFOLDING
+                || at == Material.TWISTING_VINES || at == Material.WEEPING_VINES || at == Material.CAVE_VINES;
+    }
+
+    /** True when a solid block is directly next to the player (feet or head level). */
+    private boolean isAgainstWall(Player player) {
+        Location loc = player.getLocation();
+        int[][] offsets = {{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}};
+        for (int[] o : offsets) {
+            if (loc.getBlock().getRelative(o[0], o[1], o[2]).getType().isSolid()) return true;
+            if (loc.getBlock().getRelative(o[0], o[1] + 1, o[2]).getType().isSolid()) return true;
+        }
+        return false;
+    }
+
     private boolean isNearLiquid(Player player) {
         Location loc = player.getLocation();
         // Check current block and 6 adjacent faces (7 checks instead of 27)
@@ -680,6 +747,9 @@ public class MovementChecker implements Listener {
         consecutiveHoverTicks.remove(playerId);
         consecutiveGroundSpoof.remove(playerId);
         consecutiveNoSlow.remove(playerId);
+        consecutiveJesus.remove(playerId);
+        consecutiveSpider.remove(playerId);
+        consecutiveStep.remove(playerId);
         moveCounter.remove(playerId);
         recentKnockback.remove(playerId);
         recentTeleport.remove(playerId);

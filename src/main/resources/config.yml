@@ -31,6 +31,9 @@ anticheat:
   fly_detection: true
   groundspoof_detection: true
   noslow_detection: true
+  jesus_detection: true
+  spider_detection: true
+  step_detection: true
   teleport_detection: true
   combat_checks: true
   reach_detection: true

@@ -131,6 +131,9 @@ public class PluginConfig {
     public boolean flyDetectionEnabled() { return cfg.getBoolean("anticheat.fly_detection", true); }
     public boolean groundSpoofDetectionEnabled() { return cfg.getBoolean("anticheat.groundspoof_detection", true); }
     public boolean noSlowDetectionEnabled() { return cfg.getBoolean("anticheat.noslow_detection", true); }
+    public boolean jesusDetectionEnabled() { return cfg.getBoolean("anticheat.jesus_detection", true); }
+    public boolean spiderDetectionEnabled() { return cfg.getBoolean("anticheat.spider_detection", true); }
+    public boolean stepDetectionEnabled() { return cfg.getBoolean("anticheat.step_detection", true); }
     public boolean teleportDetectionEnabled() { return cfg.getBoolean("anticheat.teleport_detection", true); }
     public boolean combatChecksEnabled() { return cfg.getBoolean("anticheat.combat_checks", true); }
     public boolean reachDetectionEnabled() { return cfg.getBoolean("anticheat.reach_detection", true); }

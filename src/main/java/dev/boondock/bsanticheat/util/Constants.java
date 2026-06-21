@@ -68,6 +68,11 @@ public final class Constants {
     // NoSlow: allowed fraction of walk speed while using an item, and consecutive samples
     public static final double NOSLOW_SPEED_MULTIPLIER = 0.5;
     public static final int NOSLOW_VIOLATIONS = 3;
+    // Jesus / Spider / Step
+    public static final int JESUS_VIOLATIONS = 5;
+    public static final int SPIDER_VIOLATIONS = 3;
+    public static final double STEP_MAX_HEIGHT = 0.75; // vanilla auto-step is 0.6
+    public static final int STEP_VIOLATIONS = 2;
     // KillAura multi-aura: window for counting distinct targets hit
     public static final long KILLAURA_MULTI_WINDOW_MS = 250L;
     // Scaffold: consecutive "not looking at block" places before flagging

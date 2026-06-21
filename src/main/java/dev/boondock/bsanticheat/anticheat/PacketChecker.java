@@ -6,7 +6,6 @@ import com.github.retrooper.packetevents.protocol.packettype.PacketType;
 import com.github.retrooper.packetevents.protocol.packettype.PacketTypeCommon;
 import com.github.retrooper.packetevents.protocol.player.User;
 import com.github.retrooper.packetevents.protocol.world.Location;
-import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientInteractEntity;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerFlying;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
@@ -56,6 +55,10 @@ public class PacketChecker implements PacketListener {
     // Timer balance per player: [0]=balance(ms), [1]=last packet time(ms)
     private final Map<UUID, long[]> timerState = new ConcurrentHashMap<>();
     private static final long TICK_MS = 50L;
+    // Held-button (mining/swinging) signature to exclude from AutoClicker: ~tick-rate, ultra-regular
+    private static final int HELD_CPS_MIN = 18;
+    private static final int HELD_CPS_MAX = 22;
+    private static final double HELD_SD_MAX = 5.0;
     // KillAura rotation GCD analysis
     private final Map<UUID, Float> lastYaw = new ConcurrentHashMap<>();
     private final Map<UUID, Deque<Long>> yawDeltas = new ConcurrentHashMap<>();
@@ -88,8 +91,8 @@ public class PacketChecker implements PacketListener {
         if (!config.packetChecksEnabled()) return;
         if (ServerLoad.isLagging(config)) return;
         PacketTypeCommon type = event.getPacketType();
-        if (type == PacketType.Play.Client.INTERACT_ENTITY) {
-            handleAttack(event);
+        if (type == PacketType.Play.Client.ANIMATION) {
+            handleSwing(event);
         } else if (WrapperPlayClientPlayerFlying.isFlying(type)) {
             handleFlying(event);
             handleTimer(event.getUser());
@@ -122,14 +125,13 @@ public class PacketChecker implements PacketListener {
     }
 
     /**
-     * AutoClicker: counts ATTACK packets (not arm-swing animations). Mining/holding the
-     * button sends swings every tick but NO attack packets, so this no longer false-flags
-     * normal mining. Raw CPS over the cap, optionally plus interval-consistency.
+     * AutoClicker: clicks per second from arm-swing (ANIMATION) packets — covers clicking
+     * on air, blocks or entities. Holding the button to mine/swing sends one swing per tick
+     * (~20 CPS at near-zero jitter); that "held button" signature is excluded so normal
+     * mining/holding doesn't false-flag.
      */
-    private void handleAttack(PacketReceiveEvent event) {
+    private void handleSwing(PacketReceiveEvent event) {
         if (!config.autoClickerDetectionEnabled()) return;
-        WrapperPlayClientInteractEntity wrapper = new WrapperPlayClientInteractEntity(event);
-        if (wrapper.getAction() != WrapperPlayClientInteractEntity.InteractAction.ATTACK) return;
         User user = event.getUser();
         if (user == null || user.getUUID() == null) return;
         UUID id = user.getUUID();
@@ -137,8 +139,6 @@ public class PacketChecker implements PacketListener {
         long now = System.currentTimeMillis();
         ConcurrentLinkedDeque<Long> buf = clicks.computeIfAbsent(id, k -> new ConcurrentLinkedDeque<>());
         buf.addLast(now);
-        // Drop samples older than the analysis window (pauses must not pollute interval
-        // stats), then cap the count.
         long minTime = now - CONSISTENCY_WINDOW_MS;
         Long head;
         while ((head = buf.peekFirst()) != null && head < minTime) buf.pollFirst();
@@ -151,61 +151,30 @@ public class PacketChecker implements PacketListener {
         int cps = 0;
         for (Long t : times) if (t >= now - WINDOW_MS) cps++;
 
-        // Click-interval pattern analysis. Humans jitter AND pause occasionally;
-        // autoclickers (even "humanized") usually fail at least two of three markers:
-        // low std-dev, low coefficient of variation, and near-zero long-pause outliers.
-        double meanInterval = -1, sd = -1, cv = -1, outlierRatio = -1;
-        int signals = 0;
-        int minSamples = config.autoClickerMinSamples();
-        if (config.autoClickerConsistencyEnabled() && n >= minSamples + 1) {
-            int m = n - 1;
-            double[] deltas = new double[m];
-            double sum = 0;
-            for (int i = 1; i < n; i++) { deltas[i - 1] = times[i] - times[i - 1]; sum += deltas[i - 1]; }
-            meanInterval = sum / m;
-
-            double v = 0;
-            for (double d : deltas) { double e = d - meanInterval; v += e * e; }
-            sd = Math.sqrt(v / m);
-            cv = meanInterval > 0 ? sd / meanInterval : 0;
-
-            double[] sorted = deltas.clone();
-            java.util.Arrays.sort(sorted);
-            double median = sorted[m / 2];
-            int outliers = 0;
-            for (double d : deltas) if (d > median * 1.5) outliers++;
-            outlierRatio = (double) outliers / m;
-
-            // Count how many "robotic" markers are present
-            if (sd <= config.autoClickerMaxDeviationMs()) signals++;
-            if (cv <= config.autoClickerMaxCv()) signals++;
-            if (outlierRatio <= config.autoClickerMaxOutlierRatio()) signals++;
-        }
-
         int maxCps = config.autoClickerMaxCps();
-        double derivedCps = meanInterval > 0 ? 1000.0 / meanInterval : 0;
-        boolean tooFast = cps > maxCps;
-        boolean tooConsistent = meanInterval > 0
-                && derivedCps >= config.autoClickerMinCps()
-                && signals >= config.autoClickerMinSignals();
+
+        // Standard deviation of recent intervals (for the held-button exclusion)
+        double sd = -1;
+        if (n >= 8) {
+            double sum = 0;
+            for (int i = 1; i < n; i++) sum += times[i] - times[i - 1];
+            double mean = sum / (n - 1);
+            double v = 0;
+            for (int i = 1; i < n; i++) { double d = times[i] - times[i - 1] - mean; v += d * d; }
+            sd = Math.sqrt(v / (n - 1));
+        }
+        // Held left-click (mining/swinging) sends ~one swing per tick: ~20 CPS, ultra-regular.
+        boolean heldButton = cps >= HELD_CPS_MIN && cps <= HELD_CPS_MAX && sd >= 0 && sd < HELD_SD_MAX;
 
         if (config.debugMode()) {
-            plugin.getLogger().info(String.format(
-                    "[AC-DEBUG] %s cps=%d sd=%s cv=%s outliers=%s signals=%d/%d mean=%s",
-                    user.getName(), cps,
-                    sd < 0 ? "n/a" : String.format("%.1f", sd),
-                    cv < 0 ? "n/a" : String.format("%.2f", cv),
-                    outlierRatio < 0 ? "n/a" : String.format("%.2f", outlierRatio),
-                    signals, config.autoClickerMinSignals(),
-                    meanInterval < 0 ? "n/a" : String.format("%.1f", meanInterval)));
+            plugin.getLogger().info(String.format("[AC-DEBUG] %s cps=%d sd=%s held=%b (max %d)",
+                    user.getName(), cps, sd < 0 ? "n/a" : String.format("%.1f", sd), heldButton, maxCps));
         }
 
-        if (tooFast || tooConsistent) {
+        if (cps > maxCps && !heldButton) {
             buf.clear(); // reset so it must re-accumulate
-            boolean pattern = !tooFast; // prefer the raw-CPS reason if both apply
-            double sdSnap = sd;
-            int cpsSnap = tooFast ? cps : (int) Math.round(derivedCps);
-            Bukkit.getScheduler().runTask(plugin, () -> flagAutoClicker(id, cpsSnap, maxCps, pattern, sdSnap));
+            int cpsSnap = cps;
+            Bukkit.getScheduler().runTask(plugin, () -> flagAutoClicker(id, cpsSnap, maxCps));
         }
     }
 
@@ -324,24 +293,16 @@ public class PacketChecker implements PacketListener {
     }
 
     /** Runs on the main thread. */
-    private void flagAutoClicker(UUID id, int cps, int maxCps, boolean pattern, double sd) {
+    private void flagAutoClicker(UUID id, int cps, int maxCps) {
         Player player = Bukkit.getPlayer(id);
-        if (player == null) {
-            if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] flag skipped: player offline");
-            return;
-        }
+        if (player == null) return;
         if (Exemptions.isExempt(player, config, luckPerms)) {
-            if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] flag skipped: " + player.getName() + " is exempt (creative/whitelist/bypass)");
+            if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] flag skipped: " + player.getName() + " is exempt");
             return;
         }
-        if (config.debugMode()) {
-            plugin.getLogger().info("[AC-DEBUG] FLAG " + player.getName()
-                    + (pattern ? " pattern sd=" + String.format("%.1f", sd) + " cps=" + cps : " cps=" + cps));
-        }
+        if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] FLAG " + player.getName() + " cps=" + cps);
 
-        String details = pattern
-                ? lang.format("alert.autoclicker_pattern", sd, cps)
-                : lang.format("alert.autoclicker", cps, maxCps);
+        String details = lang.format("alert.autoclicker", cps, maxCps);
         if (database != null) {
             database.logAsync("anticheat_autoclicker", cps, player.getName() + ": " + details);
         }
