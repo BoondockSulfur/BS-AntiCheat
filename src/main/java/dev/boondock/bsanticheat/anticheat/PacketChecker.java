@@ -60,6 +60,9 @@ public class PacketChecker implements PacketListener {
     private final Map<UUID, Float> lastYaw = new ConcurrentHashMap<>();
     private final Map<UUID, Deque<Long>> yawDeltas = new ConcurrentHashMap<>();
     private static final double ROT_EXPANDER = 131072.0;
+    // AimSnap: last 3 look directions + recent snap timestamps
+    private final Map<UUID, Deque<double[]>> recentDirs = new ConcurrentHashMap<>();
+    private final Map<UUID, Deque<Long>> snapTimes = new ConcurrentHashMap<>();
 
     public PacketChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -210,7 +213,8 @@ public class PacketChecker implements PacketListener {
     private void handleFlying(PacketReceiveEvent event) {
         boolean bp = config.badPacketsDetectionEnabled();
         boolean rot = config.killAuraRotationDetectionEnabled();
-        if (!bp && !rot) return;
+        boolean snap = config.aimSnapDetectionEnabled();
+        if (!bp && !rot && !snap) return;
 
         WrapperPlayClientPlayerFlying wrapper = new WrapperPlayClientPlayerFlying(event);
         if (!wrapper.hasRotationChanged()) return;
@@ -255,6 +259,50 @@ public class PacketChecker implements PacketListener {
                 }
             }
         }
+
+        // (c) AimSnap: a robotic rotation snaps to the target and back within ~1 tick
+        // (look A -> far B -> back near A), which a mouse can't do. Catches rotation-
+        // spoofing Scaffold/KillAura even when the per-frame angle to the target is small.
+        if (snap && Float.isFinite(yaw) && Float.isFinite(pitch)) {
+            Deque<double[]> dirs = recentDirs.computeIfAbsent(id, k -> new ArrayDeque<>());
+            dirs.addLast(dirOf(yaw, pitch));
+            while (dirs.size() > 3) dirs.pollFirst();
+            if (dirs.size() == 3) {
+                double[][] d = dirs.toArray(new double[0][]);
+                double spikeIn = angleBetween(d[0], d[1]);
+                double spikeOut = angleBetween(d[1], d[2]);
+                double net = angleBetween(d[0], d[2]);
+                if (config.debugMode()) {
+                    plugin.getLogger().info(String.format("[SNAP-DEBUG] %s in=%.0f out=%.0f net=%.0f",
+                            user.getName(), spikeIn, spikeOut, net));
+                }
+                if (spikeIn > config.aimSnapMinAngle() && spikeOut > config.aimSnapMinAngle()
+                        && net < config.aimSnapReturnAngle()) {
+                    long now = System.currentTimeMillis();
+                    Deque<Long> st = snapTimes.computeIfAbsent(id, k -> new ArrayDeque<>());
+                    st.addLast(now);
+                    while (!st.isEmpty() && st.peekFirst() < now - config.aimSnapWindowMs()) st.pollFirst();
+                    if (st.size() >= config.aimSnapThreshold()) {
+                        st.clear();
+                        double angle = spikeIn;
+                        Bukkit.getScheduler().runTask(plugin, () -> flagAimSnap(id, angle));
+                    }
+                }
+            }
+        }
+    }
+
+    private static double[] dirOf(float yaw, float pitch) {
+        double y = Math.toRadians(yaw);
+        double p = Math.toRadians(pitch);
+        double cp = Math.cos(p);
+        return new double[]{ -cp * Math.sin(y), -Math.sin(p), cp * Math.cos(y) };
+    }
+
+    private static double angleBetween(double[] a, double[] b) {
+        double dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        dot = Math.max(-1.0, Math.min(1.0, dot));
+        return Math.toDegrees(Math.acos(dot));
     }
 
     private static double wrapAngle(double a) {
@@ -367,10 +415,32 @@ public class PacketChecker implements PacketListener {
         }
     }
 
+    /** Runs on the main thread. */
+    private void flagAimSnap(UUID id, double angle) {
+        Player player = Bukkit.getPlayer(id);
+        if (player == null) return;
+        if (Exemptions.isExempt(player, config, luckPerms)) return;
+
+        String details = lang.format("alert.aimsnap", angle);
+        if (database != null) {
+            database.logAsync("anticheat_aimsnap", angle, player.getName() + ": " + details);
+        }
+        if (alertManager != null) {
+            alertManager.addAlert(player, "AIMSNAP", details, angle, player.getLocation());
+        } else if (config.debugMode()) {
+            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " AIMSNAP - " + details);
+        }
+        if (violationManager != null) {
+            violationManager.flag(player, "AIMSNAP");
+        }
+    }
+
     public void cleanup(UUID playerId) {
         clicks.remove(playerId);
         timerState.remove(playerId);
         lastYaw.remove(playerId);
         yawDeltas.remove(playerId);
+        recentDirs.remove(playerId);
+        snapTimes.remove(playerId);
     }
 }

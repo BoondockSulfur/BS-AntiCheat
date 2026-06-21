@@ -43,6 +43,7 @@ anticheat:
   autoclicker_detection: true
   badpackets_detection: true
   timer_detection: true
+  aimsnap_detection: true
 
   # Combat: maximum allowed attack distance (blocks). Vanilla survival reach is ~3.0;
   # a generous default avoids false positives from latency/hitbox. Creative is exempt.
@@ -85,6 +86,14 @@ anticheat:
   # Timer: allowed "ahead of real time" balance (ms) before flagging game-speed/timer hacks.
   # 200 leaves headroom for short network/packet bursts; real timer hacks blow far past it.
   timer_max_balance_ms: 200
+  # AimSnap: catches a rotation that snaps to a target and back within ~1 tick (look A ->
+  # far B -> back near A) — robotic aim used by rotation-spoofing scaffold/killaura. Flags
+  # after this many snaps within the window. Raise min_angle / threshold if fast PvP flicks
+  # cause false positives.
+  aimsnap_min_angle: 40.0      # the snap-out and snap-back must each exceed this (degrees)
+  aimsnap_return_angle: 15.0   # ...and the net move must return within this of the start
+  aimsnap_window_ms: 3000
+  aimsnap_threshold: 3
 
   # XRay Settings
   xray_timewindow_seconds: 60

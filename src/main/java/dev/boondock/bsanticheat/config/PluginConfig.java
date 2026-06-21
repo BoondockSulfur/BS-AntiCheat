@@ -163,6 +163,12 @@ public class PluginConfig {
     public boolean killAuraRotationDetectionEnabled() { return cfg.getBoolean("anticheat.killaura_rotation_detection", false); }
     public int killAuraRotationSamples() { return cfg.getInt("anticheat.killaura_rotation_samples", 20); }
     public long killAuraRotationMinGcd() { return cfg.getLong("anticheat.killaura_rotation_min_gcd", 8000L); }
+    // AimSnap: robotic snap-to-target-and-back rotation (catches rotation-spoofing scaffold/killaura)
+    public boolean aimSnapDetectionEnabled() { return cfg.getBoolean("anticheat.aimsnap_detection", true); }
+    public double aimSnapMinAngle() { return cfg.getDouble("anticheat.aimsnap_min_angle", 40.0); }
+    public double aimSnapReturnAngle() { return cfg.getDouble("anticheat.aimsnap_return_angle", 15.0); }
+    public long aimSnapWindowMs() { return cfg.getLong("anticheat.aimsnap_window_ms", 3000L); }
+    public int aimSnapThreshold() { return cfg.getInt("anticheat.aimsnap_threshold", 3); }
 
     // XRay settings
     public int xrayTimewindowSeconds() { return cfg.getInt("anticheat.xray_timewindow_seconds", 60); }

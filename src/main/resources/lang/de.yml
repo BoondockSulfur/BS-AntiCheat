@@ -126,6 +126,7 @@ alert:
   killaura_angle: "KillAura: Treffer %.0f Grad neben Blickrichtung"
   killaura_multi: "KillAura: %d Ziele in %dms"
   killaura_rotation: "KillAura: unmenschliche Rotation (gcd %d)"
+  aimsnap: "Aim-Snap: roboterhaftes Zurueckschnappen (%.0f Grad)"
   nuker: "Nuker: %d Bloecke/s abgebaut (Max: %d)"
   fastplace: "FastPlace: %d Bloecke/s platziert (Max: %d)"
   scaffold: "Scaffold: platziert %.0f Grad neben Blickrichtung"

@@ -126,6 +126,7 @@ alert:
   killaura_angle: "KillAura: hit %.0f deg off aim"
   killaura_multi: "KillAura: %d targets within %dms"
   killaura_rotation: "KillAura: non-human rotation (gcd %d)"
+  aimsnap: "Aim snap: robotic snap-back (%.0f deg)"
   nuker: "Nuker: %d blocks/s broken (max %d)"
   fastplace: "FastPlace: %d blocks/s placed (max %d)"
   scaffold: "Scaffold: placing %.0f deg off aim"
