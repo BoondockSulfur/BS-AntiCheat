@@ -103,6 +103,10 @@ public class CombatChecker implements Listener {
                     .subtract(attacker.getEyeLocation().toVector());
             if (toTarget.lengthSquared() > 1.0e-6) {
                 double angle = Math.toDegrees(look.angle(toTarget));
+                if (config.debugMode()) {
+                    plugin.getLogger().info(String.format("[KA-DEBUG] %s angle=%.0f (max %.0f) targetPlayer=%b",
+                            attacker.getName(), angle, config.killAuraMaxAngle(), victimIsPlayer));
+                }
                 if (angle > config.killAuraMaxAngle()) {
                     handleViolation(attacker, "KILLAURA", lang.format("alert.killaura_angle", angle), angle);
                 }

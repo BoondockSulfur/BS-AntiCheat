@@ -104,6 +104,10 @@ public class WorldChecker implements Listener {
                     .subtract(player.getEyeLocation().toVector());
             if (toBlock.lengthSquared() > 1.0e-6) {
                 double angle = Math.toDegrees(look.angle(toBlock));
+                if (config.debugMode()) {
+                    plugin.getLogger().info(String.format("[SCAFFOLD-DEBUG] %s angle=%.0f (max %.0f)",
+                            player.getName(), angle, config.scaffoldMaxAngle()));
+                }
                 if (angle > config.scaffoldMaxAngle()) {
                     int c = consecutiveScaffold.merge(id, 1, Integer::sum);
                     if (c >= Constants.SCAFFOLD_VIOLATIONS) {

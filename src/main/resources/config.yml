@@ -83,7 +83,8 @@ anticheat:
   autoclicker_max_outlier_ratio: 0.06 # marker 3: share of long-pause intervals (>1.5x median)
   autoclicker_min_signals: 2         # how many markers must hold to flag (2 = balanced)
   # Timer: allowed "ahead of real time" balance (ms) before flagging game-speed/timer hacks.
-  timer_max_balance_ms: 120
+  # 200 leaves headroom for short network/packet bursts; real timer hacks blow far past it.
+  timer_max_balance_ms: 200
 
   # XRay Settings
   xray_timewindow_seconds: 60

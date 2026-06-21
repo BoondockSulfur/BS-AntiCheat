@@ -158,7 +158,7 @@ public class PluginConfig {
     public int autoClickerMinSignals() { return cfg.getInt("anticheat.autoclicker_min_signals", 2); }
     public boolean badPacketsDetectionEnabled() { return cfg.getBoolean("anticheat.badpackets_detection", true); }
     public boolean timerDetectionEnabled() { return cfg.getBoolean("anticheat.timer_detection", true); }
-    public long timerMaxBalanceMs() { return cfg.getLong("anticheat.timer_max_balance_ms", 120L); }
+    public long timerMaxBalanceMs() { return cfg.getLong("anticheat.timer_max_balance_ms", 200L); }
     // KillAura rotation GCD (experimental, off by default — calibrate with debug_mode)
     public boolean killAuraRotationDetectionEnabled() { return cfg.getBoolean("anticheat.killaura_rotation_detection", false); }
     public int killAuraRotationSamples() { return cfg.getInt("anticheat.killaura_rotation_samples", 20); }
