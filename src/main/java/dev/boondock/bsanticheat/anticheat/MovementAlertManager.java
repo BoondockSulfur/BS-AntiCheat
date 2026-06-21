@@ -90,15 +90,11 @@ public class MovementAlertManager {
             plugin.getLogger().info("[Movement] " + player.getName() + ": " + type + " - " + details);
         }
 
-        // Only send one summary notification per player (reset after 5 minutes)
-        if (!notifiedPlayers.contains(playerId)) {
-            notifiedPlayers.add(playerId);
-            notifyAdmins(player, type, details, value, locationStr);
-            sendDiscordAlert(player, type, details, value, locationStr);
-
-            // Reset notification flag after 5 minutes
-            Bukkit.getScheduler().runTaskLater(plugin, () -> notifiedPlayers.remove(playerId), 6000L);
-        }
+        // Notify per violation TYPE (the per-type cooldown above already limits spam), so
+        // a player flagged for SPEED then FLY then TELEPORT produces one chat alert each
+        // instead of only the first type.
+        notifyAdmins(player, type, details, value, locationStr);
+        sendDiscordAlert(player, type, details, value, locationStr);
     }
 
     private boolean isOnCooldown(UUID playerId, String type) {
