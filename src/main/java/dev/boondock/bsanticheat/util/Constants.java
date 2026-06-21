@@ -70,6 +70,8 @@ public final class Constants {
     public static final int NOSLOW_VIOLATIONS = 3;
     // KillAura multi-aura: window for counting distinct targets hit
     public static final long KILLAURA_MULTI_WINDOW_MS = 250L;
+    // Scaffold: consecutive "not looking at block" places before flagging
+    public static final int SCAFFOLD_VIOLATIONS = 3;
 
     // ==================== CONFIG ====================
     public static final int CONFIG_VERSION = 1;

@@ -4,6 +4,7 @@ import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
+import dev.boondock.bsanticheat.util.Constants;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -12,6 +13,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.plugin.Plugin;
+import org.bukkit.util.Vector;
 
 import java.util.Map;
 import java.util.UUID;
@@ -39,6 +41,8 @@ public class WorldChecker implements Listener {
 
     private final Map<UUID, ConcurrentLinkedDeque<Long>> breaks = new ConcurrentHashMap<>();
     private final Map<UUID, ConcurrentLinkedDeque<Long>> places = new ConcurrentHashMap<>();
+    // Scaffold: consecutive places made while not looking at the block
+    private final Map<UUID, Integer> consecutiveScaffold = new ConcurrentHashMap<>();
 
     public WorldChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -76,16 +80,41 @@ public class WorldChecker implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockPlace(BlockPlaceEvent event) {
-        if (!config.worldChecksEnabled() || !config.fastPlaceDetectionEnabled()) return;
+        if (!config.worldChecksEnabled()) return;
         if (ServerLoad.isLagging(config)) return;
         Player player = event.getPlayer();
         if (Exemptions.isExempt(player, config, luckPerms)) return;
+        UUID id = player.getUniqueId();
 
-        int rate = recordAndCount(places, player.getUniqueId());
-        int max = config.fastPlaceMaxPerSecond();
-        if (rate > max) {
-            places.get(player.getUniqueId()).clear();
-            handleViolation(player, "FASTPLACE", lang.format("alert.fastplace", rate, max), rate, event.getBlock().getLocation());
+        // FastPlace: too many blocks per second
+        if (config.fastPlaceDetectionEnabled()) {
+            int rate = recordAndCount(places, id);
+            int max = config.fastPlaceMaxPerSecond();
+            if (rate > max) {
+                places.get(id).clear();
+                handleViolation(player, "FASTPLACE", lang.format("alert.fastplace", rate, max), rate, event.getBlock().getLocation());
+            }
+        }
+
+        // Scaffold: block placed far outside the player's view (placing "blind" while
+        // bridging/towering). Legit placement looks at the block, so the angle is small.
+        if (config.scaffoldDetectionEnabled()) {
+            Vector look = player.getEyeLocation().getDirection();
+            Vector toBlock = event.getBlock().getLocation().add(0.5, 0.5, 0.5).toVector()
+                    .subtract(player.getEyeLocation().toVector());
+            if (toBlock.lengthSquared() > 1.0e-6) {
+                double angle = Math.toDegrees(look.angle(toBlock));
+                if (angle > config.scaffoldMaxAngle()) {
+                    int c = consecutiveScaffold.merge(id, 1, Integer::sum);
+                    if (c >= Constants.SCAFFOLD_VIOLATIONS) {
+                        handleViolation(player, "SCAFFOLD",
+                                lang.format("alert.scaffold", angle), angle, event.getBlock().getLocation());
+                        consecutiveScaffold.put(id, 0);
+                    }
+                } else {
+                    consecutiveScaffold.remove(id);
+                }
+            }
         }
     }
 
@@ -119,5 +148,6 @@ public class WorldChecker implements Listener {
     public void cleanup(UUID playerId) {
         breaks.remove(playerId);
         places.remove(playerId);
+        consecutiveScaffold.remove(playerId);
     }
 }

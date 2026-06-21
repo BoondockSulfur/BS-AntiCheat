@@ -38,6 +38,7 @@ anticheat:
   world_checks: true
   nuker_detection: true
   fastplace_detection: true
+  scaffold_detection: true
   packet_checks: true
   autoclicker_detection: true
   badpackets_detection: true
@@ -56,6 +57,9 @@ anticheat:
   # legitimate fast mining (Efficiency + Haste on instamine blocks) is not flagged.
   nuker_max_breaks_per_second: 15
   fastplace_max_per_second: 12
+  # Scaffold: flag placing blocks more than this many degrees off the player's aim
+  # (bridging/towering "blind"), sustained over a few placements.
+  scaffold_max_angle: 80.0
 
   # Packet-level: max clicks per second (arm swings). Legit fast clickers reach ~14;
   # autoclickers usually exceed this. Raise if you see false positives.

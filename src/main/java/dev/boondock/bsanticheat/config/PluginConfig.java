@@ -142,6 +142,8 @@ public class PluginConfig {
     public int nukerMaxBreaksPerSecond() { return cfg.getInt("anticheat.nuker_max_breaks_per_second", 15); }
     public boolean fastPlaceDetectionEnabled() { return cfg.getBoolean("anticheat.fastplace_detection", true); }
     public int fastPlaceMaxPerSecond() { return cfg.getInt("anticheat.fastplace_max_per_second", 12); }
+    public boolean scaffoldDetectionEnabled() { return cfg.getBoolean("anticheat.scaffold_detection", true); }
+    public double scaffoldMaxAngle() { return cfg.getDouble("anticheat.scaffold_max_angle", 80.0); }
     public boolean packetChecksEnabled() { return cfg.getBoolean("anticheat.packet_checks", true); }
     public boolean autoClickerDetectionEnabled() { return cfg.getBoolean("anticheat.autoclicker_detection", true); }
     public int autoClickerMaxCps() { return cfg.getInt("anticheat.autoclicker_max_cps", 16); }
