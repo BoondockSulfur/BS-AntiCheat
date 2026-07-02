@@ -48,6 +48,9 @@ public class CombatChecker implements Listener {
 
     // Recent attacks per attacker, for multi-target (multi-aura) detection.
     private final Map<UUID, Deque<TargetHit>> recentTargets = new ConcurrentHashMap<>();
+    // Criticals / AutoBlock: consecutive impossible hits
+    private final Map<UUID, Integer> consecutiveCriticals = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> consecutiveAutoBlock = new ConcurrentHashMap<>();
 
     public CombatChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -89,6 +92,34 @@ public class CombatChecker implements Listener {
         if (victim.hasMetadata("NPC")) return;
 
         boolean victimIsPlayer = victim instanceof Player;
+        UUID attackerId = attacker.getUniqueId();
+
+        // --- Criticals: a critical hit while standing on the ground. Vanilla crits
+        // require being airborne and falling; the Criticals cheat spoofs the crit
+        // condition without leaving the ground. (isOnGround is client-influenced, but a
+        // client spoofing OFF-ground to fake crits gets caught by the hover/fly checks.)
+        if (config.criticalsDetectionEnabled() && event.isCritical()
+                && attacker.isOnGround() && attacker.getFallDistance() <= 0.0f) {
+            int c = consecutiveCriticals.merge(attackerId, 1, Integer::sum);
+            if (c >= Constants.CRITICALS_VIOLATIONS) {
+                handleViolation(attacker, "CRITICALS", lang.get("alert.criticals"), c);
+                consecutiveCriticals.put(attackerId, 0);
+            }
+        } else {
+            consecutiveCriticals.remove(attackerId);
+        }
+
+        // --- AutoBlock: attacking while actively blocking with a shield. Vanilla lowers
+        // the shield to attack; only a cheat can do both in the same moment.
+        if (config.autoBlockDetectionEnabled() && attacker.isBlocking()) {
+            int c = consecutiveAutoBlock.merge(attackerId, 1, Integer::sum);
+            if (c >= Constants.AUTOBLOCK_VIOLATIONS) {
+                handleViolation(attacker, "AUTOBLOCK", lang.get("alert.autoblock"), c);
+                consecutiveAutoBlock.put(attackerId, 0);
+            }
+        } else {
+            consecutiveAutoBlock.remove(attackerId);
+        }
 
         // --- Reach ---
         if (config.reachDetectionEnabled()) {
@@ -167,6 +198,8 @@ public class CombatChecker implements Listener {
 
     public void cleanup(UUID playerId) {
         recentTargets.remove(playerId);
+        consecutiveCriticals.remove(playerId);
+        consecutiveAutoBlock.remove(playerId);
     }
 
     private static final class TargetHit {

@@ -43,15 +43,32 @@ anticheat:
   combat_checks: true
   reach_detection: true
   killaura_detection: true
+  # Criticals (crit hit while on ground) and AutoBlock (attacking while shielding)
+  criticals_detection: true
+  autoblock_detection: true
   world_checks: true
   nuker_detection: true
   fastplace_detection: true
   scaffold_detection: true
+  # FastBreak: per-block break time vs. the expected vanilla time (tool/haste included)
+  fastbreak_detection: true
+  # Inventory checks: walking with open container, ChestStealer, FastUse, BowSpam, AutoTotem
+  inventory_checks: true
+  inventorymove_detection: true
+  cheststealer_detection: true
+  fastuse_detection: true
+  bowspam_detection: true
+  autototem_detection: true
   packet_checks: true
   autoclicker_detection: true
   badpackets_detection: true
   timer_detection: true
   aimsnap_detection: true
+  # Crash protection: cancels oversized book/sign packets. Packet flood: raw
+  # packets per second per connection (vanilla stays well below 200/s).
+  crasher_detection: true
+  packetflood_detection: true
+  packetflood_max_per_second: 500
 
   # Combat: maximum allowed attack distance (blocks). Vanilla survival reach is ~3.0;
   # a generous default avoids false positives from latency/hitbox. Creative is exempt.

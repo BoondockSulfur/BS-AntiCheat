@@ -6,11 +6,14 @@ import com.github.retrooper.packetevents.protocol.packettype.PacketType;
 import com.github.retrooper.packetevents.protocol.packettype.PacketTypeCommon;
 import com.github.retrooper.packetevents.protocol.player.User;
 import com.github.retrooper.packetevents.protocol.world.Location;
+import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientEditBook;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerFlying;
+import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientUpdateSign;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
+import dev.boondock.bsanticheat.util.Constants;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
@@ -66,6 +69,8 @@ public class PacketChecker implements PacketListener {
     // AimSnap: last 3 look directions + recent snap timestamps
     private final Map<UUID, Deque<double[]>> recentDirs = new ConcurrentHashMap<>();
     private final Map<UUID, Deque<Long>> snapTimes = new ConcurrentHashMap<>();
+    // Packet flood: [0]=window start(ms), [1]=count in window
+    private final Map<UUID, long[]> packetCounts = new ConcurrentHashMap<>();
 
     public PacketChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -89,13 +94,97 @@ public class PacketChecker implements PacketListener {
     @Override
     public void onPacketReceive(PacketReceiveEvent event) {
         if (!config.packetChecksEnabled()) return;
-        if (ServerLoad.isLagging(config)) return;
+
+        // Crash protection & flood run even under lag — an attack CAUSES lag, so the
+        // lag exemption must not disable exactly these checks.
+        handleFlood(event);
         PacketTypeCommon type = event.getPacketType();
+        if (type == PacketType.Play.Client.EDIT_BOOK || type == PacketType.Play.Client.UPDATE_SIGN) {
+            handleCrasher(event, type);
+        }
+
+        if (ServerLoad.isLagging(config)) return;
         if (type == PacketType.Play.Client.ANIMATION) {
             handleSwing(event);
         } else if (WrapperPlayClientPlayerFlying.isFlying(type)) {
             handleFlying(event);
             handleTimer(event.getUser());
+        }
+    }
+
+    /**
+     * Packet flood: raw packets per second per connection. A vanilla client peaks well
+     * below 200/s even in hectic PvP; floods (crash/lag bots) send thousands.
+     */
+    private void handleFlood(PacketReceiveEvent event) {
+        if (!config.packetFloodDetectionEnabled()) return;
+        User user = event.getUser();
+        if (user == null || user.getUUID() == null) return;
+        UUID id = user.getUUID();
+
+        long now = System.currentTimeMillis();
+        long[] st = packetCounts.computeIfAbsent(id, k -> new long[]{now, 0L});
+        synchronized (st) {
+            if (now - st[0] >= WINDOW_MS) {
+                st[0] = now;
+                st[1] = 1;
+                return;
+            }
+            st[1]++;
+            if (st[1] > config.packetFloodMaxPerSecond()) {
+                st[0] = now;
+                st[1] = 0;
+                long rate = config.packetFloodMaxPerSecond() + 1;
+                Bukkit.getScheduler().runTask(plugin, () -> flagSimple(id, "PACKETFLOOD",
+                        lang.format("alert.packetflood", rate), rate));
+            }
+        }
+    }
+
+    /**
+     * Crash protection: oversized book/sign payloads (classic crasher exploits). The
+     * malicious packet is cancelled so the server never processes it; the flag is
+     * raised afterwards on the main thread.
+     */
+    private void handleCrasher(PacketReceiveEvent event, PacketTypeCommon type) {
+        if (!config.crasherDetectionEnabled()) return;
+        User user = event.getUser();
+        if (user == null || user.getUUID() == null) return;
+        UUID id = user.getUUID();
+
+        if (type == PacketType.Play.Client.EDIT_BOOK) {
+            WrapperPlayClientEditBook wrapper = new WrapperPlayClientEditBook(event);
+            var pages = wrapper.getPages();
+            int pageCount = pages != null ? pages.size() : 0;
+            long totalChars = 0;
+            boolean oversizedPage = false;
+            if (pages != null) {
+                for (String page : pages) {
+                    if (page == null) continue;
+                    totalChars += page.length();
+                    if (page.length() > Constants.CRASHER_MAX_BOOK_PAGE_CHARS) oversizedPage = true;
+                }
+            }
+            if (pageCount > Constants.CRASHER_MAX_BOOK_PAGES || oversizedPage
+                    || totalChars > Constants.CRASHER_MAX_BOOK_TOTAL_CHARS) {
+                event.setCancelled(true);
+                int pc = pageCount;
+                Bukkit.getScheduler().runTask(plugin, () -> flagSimple(id, "CRASHER",
+                        lang.format("alert.crasher_book", pc), pc));
+            }
+        } else {
+            WrapperPlayClientUpdateSign wrapper = new WrapperPlayClientUpdateSign(event);
+            String[] lines = wrapper.getTextLines();
+            if (lines != null) {
+                for (String line : lines) {
+                    if (line != null && line.length() > Constants.CRASHER_MAX_SIGN_LINE_CHARS) {
+                        event.setCancelled(true);
+                        Bukkit.getScheduler().runTask(plugin, () -> flagSimple(id, "CRASHER",
+                                lang.get("alert.crasher_sign"), line.length()));
+                        return;
+                    }
+                }
+            }
         }
     }
 
@@ -292,6 +381,25 @@ public class PacketChecker implements PacketListener {
         return a;
     }
 
+    /** Runs on the main thread. Generic flag path for the simple packet checks. */
+    private void flagSimple(UUID id, String type, String details, double value) {
+        Player player = Bukkit.getPlayer(id);
+        if (player == null) return;
+        if (Exemptions.isExempt(player, config, luckPerms)) return;
+
+        if (database != null) {
+            database.logAsync("anticheat_" + type.toLowerCase(), value, player.getName() + ": " + details);
+        }
+        if (alertManager != null) {
+            alertManager.addAlert(player, type, details, value, player.getLocation());
+        } else if (config.debugMode()) {
+            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " " + type + " - " + details);
+        }
+        if (violationManager != null) {
+            violationManager.flag(player, type);
+        }
+    }
+
     /** Runs on the main thread. */
     private void flagAutoClicker(UUID id, int cps, int maxCps) {
         Player player = Bukkit.getPlayer(id);
@@ -399,6 +507,7 @@ public class PacketChecker implements PacketListener {
     public void cleanup(UUID playerId) {
         clicks.remove(playerId);
         timerState.remove(playerId);
+        packetCounts.remove(playerId);
         lastYaw.remove(playerId);
         yawDeltas.remove(playerId);
         recentDirs.remove(playerId);

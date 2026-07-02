@@ -141,6 +141,18 @@ public class PluginConfig {
     public boolean teleportDetectionEnabled() { return cfg.getBoolean("anticheat.teleport_detection", true); }
     public boolean elytraDetectionEnabled() { return cfg.getBoolean("anticheat.elytra_detection", true); }
     public boolean vehicleChecksEnabled() { return cfg.getBoolean("anticheat.vehicle_checks", true); }
+    public boolean criticalsDetectionEnabled() { return cfg.getBoolean("anticheat.criticals_detection", true); }
+    public boolean autoBlockDetectionEnabled() { return cfg.getBoolean("anticheat.autoblock_detection", true); }
+    public boolean fastBreakDetectionEnabled() { return cfg.getBoolean("anticheat.fastbreak_detection", true); }
+    public boolean inventoryChecksEnabled() { return cfg.getBoolean("anticheat.inventory_checks", true); }
+    public boolean inventoryMoveDetectionEnabled() { return cfg.getBoolean("anticheat.inventorymove_detection", true); }
+    public boolean chestStealerDetectionEnabled() { return cfg.getBoolean("anticheat.cheststealer_detection", true); }
+    public boolean fastUseDetectionEnabled() { return cfg.getBoolean("anticheat.fastuse_detection", true); }
+    public boolean bowSpamDetectionEnabled() { return cfg.getBoolean("anticheat.bowspam_detection", true); }
+    public boolean autoTotemDetectionEnabled() { return cfg.getBoolean("anticheat.autototem_detection", true); }
+    public boolean crasherDetectionEnabled() { return cfg.getBoolean("anticheat.crasher_detection", true); }
+    public boolean packetFloodDetectionEnabled() { return cfg.getBoolean("anticheat.packetflood_detection", true); }
+    public int packetFloodMaxPerSecond() { return cfg.getInt("anticheat.packetflood_max_per_second", 500); }
     public boolean combatChecksEnabled() { return cfg.getBoolean("anticheat.combat_checks", true); }
     public boolean reachDetectionEnabled() { return cfg.getBoolean("anticheat.reach_detection", true); }
     public double reachDistance() { return cfg.getDouble("anticheat.reach_distance", 4.0); }

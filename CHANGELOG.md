@@ -10,6 +10,11 @@ All notable changes to BSAntiCheat will be documented in this file.
 - Elytra/Riptide speed-ceiling check (`elytra_detection`) — previously skipped entirely
 - VehicleChecker (`vehicle_checks`): Boat-Fly and per-type vehicle speed checks via
   VehicleMoveEvent, closing the vehicle gap (PlayerMoveEvent doesn't fire while riding)
+- Combat: Criticals (crit while on ground) and AutoBlock (attacking while shielding)
+- World: FastBreak — per-block break time vs. the expected time from Block#getBreakSpeed
+- InventoryChecker: InventoryMove, ChestStealer, FastUse, BowSpam, AutoTotem
+- Packet: crash protection (oversized book/sign packets are cancelled) and packet-flood
+  detection (`packetflood_max_per_second`); both stay active during server lag
 
 ### Fixed
 - CombatChecker: Thorns damage no longer flags the victim as KillAura; sweep hits no

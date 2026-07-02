@@ -40,6 +40,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
     private CombatChecker combatChecker;
     private WorldChecker worldChecker;
     private VehicleChecker vehicleChecker;
+    private InventoryChecker inventoryChecker;
     private ViolationManager violationManager;
     private PacketChecker packetChecker;
     private PacketListenerCommon packetListener;
@@ -80,6 +81,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         combatChecker = new CombatChecker(this, configAdapter, database, lang);
         worldChecker = new WorldChecker(this, configAdapter, database, lang);
         vehicleChecker = new VehicleChecker(this, configAdapter, database, lang);
+        inventoryChecker = new InventoryChecker(this, configAdapter, database, lang);
 
         // Wire alert managers
         movementChecker.setAlertManager(movementAlertManager);
@@ -87,6 +89,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         combatChecker.setAlertManager(movementAlertManager);
         worldChecker.setAlertManager(movementAlertManager);
         vehicleChecker.setAlertManager(movementAlertManager);
+        inventoryChecker.setAlertManager(movementAlertManager);
 
         // Set alert preference managers
         movementAlertManager.setPreferenceManager(alertPreferenceManager);
@@ -99,6 +102,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         combatChecker.setViolationManager(violationManager);
         worldChecker.setViolationManager(violationManager);
         vehicleChecker.setViolationManager(violationManager);
+        inventoryChecker.setViolationManager(violationManager);
 
         // LuckPerms integration (optional)
         luckPerms = LuckPermsHook.tryHook(this);
@@ -108,6 +112,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
             combatChecker.setLuckPerms(luckPerms);
             worldChecker.setLuckPerms(luckPerms);
             vehicleChecker.setLuckPerms(luckPerms);
+            inventoryChecker.setLuckPerms(luckPerms);
         }
 
         // Register event listeners
@@ -116,6 +121,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         Bukkit.getPluginManager().registerEvents(combatChecker, this);
         Bukkit.getPluginManager().registerEvents(worldChecker, this);
         Bukkit.getPluginManager().registerEvents(vehicleChecker, this);
+        Bukkit.getPluginManager().registerEvents(inventoryChecker, this);
         Bukkit.getPluginManager().registerEvents(this, this);
 
         // Packet-level checks — use the installed PacketEvents plugin (optional).
@@ -191,6 +197,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         if (worldChecker != null) worldChecker.cleanup(playerId);
         if (combatChecker != null) combatChecker.cleanup(playerId);
         if (vehicleChecker != null) vehicleChecker.cleanup(playerId);
+        if (inventoryChecker != null) inventoryChecker.cleanup(playerId);
         if (packetChecker != null) packetChecker.cleanup(playerId);
         if (alertPreferenceManager != null) alertPreferenceManager.cleanup(playerId);
         if (violationManager != null) violationManager.cleanup(playerId);

@@ -88,6 +88,38 @@ public final class Constants {
     public static final long KILLAURA_MULTI_WINDOW_MS = 250L;
     // Scaffold: consecutive "not looking at block" places before flagging
     public static final int SCAFFOLD_VIOLATIONS = 3;
+    // Criticals (crit while on ground) / AutoBlock (attack while shielding)
+    public static final int CRITICALS_VIOLATIONS = 3;
+    public static final int AUTOBLOCK_VIOLATIONS = 2;
+    // FastBreak: per-block break time vs. expected. Only digs expected to take at least
+    // MIN_EXPECTED are judged; flag when the actual time is below expected * TOLERANCE.
+    public static final long FASTBREAK_MIN_EXPECTED_MS = 300L;
+    public static final double FASTBREAK_TOLERANCE = 0.7;
+    public static final int FASTBREAK_VIOLATIONS = 3;
+
+    // ==================== INVENTORY CHECKER ====================
+    // InventoryMove: sustained walking speed (blocks/move) with an open container GUI
+    public static final double INVENTORYMOVE_MIN_SPEED = 0.15;
+    public static final int INVENTORYMOVE_VIOLATIONS = 8;
+    // ChestStealer: this many consecutive container clicks each under the interval
+    public static final long CHESTSTEALER_MAX_INTERVAL_MS = 40L;
+    public static final int CHESTSTEALER_MIN_CLICKS = 6;
+    // FastUse: fastest legit consumable (dried kelp) takes ~800ms
+    public static final long FASTUSE_MIN_INTERVAL_MS = 600L;
+    public static final int FASTUSE_VIOLATIONS = 2;
+    // BowSpam: a full bow draw takes 1000ms; only near-full-charge shots are counted
+    public static final long BOWSPAM_MIN_INTERVAL_MS = 700L;
+    public static final float BOWSPAM_MIN_FORCE = 0.9f;
+    public static final int BOWSPAM_VIOLATIONS = 3;
+    // AutoTotem: inventory-click totem refill faster than any human reaction after a pop
+    public static final long AUTOTOTEM_MAX_REACTION_MS = 150L;
+
+    // ==================== CRASH PROTECTION ====================
+    // Generous multiples of the vanilla limits (books: 100 pages / ~1024 chars per page)
+    public static final int CRASHER_MAX_BOOK_PAGES = 150;
+    public static final int CRASHER_MAX_BOOK_PAGE_CHARS = 2048;
+    public static final long CRASHER_MAX_BOOK_TOTAL_CHARS = 100000L;
+    public static final int CRASHER_MAX_SIGN_LINE_CHARS = 512;
 
     // ==================== CONFIG ====================
     public static final int CONFIG_VERSION = 1;
