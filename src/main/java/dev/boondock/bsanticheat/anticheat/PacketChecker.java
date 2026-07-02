@@ -135,8 +135,8 @@ public class PacketChecker implements PacketListener {
                 st[0] = now;
                 st[1] = 0;
                 long rate = config.packetFloodMaxPerSecond() + 1;
-                Bukkit.getScheduler().runTask(plugin, () -> flagSimple(id, "PACKETFLOOD",
-                        lang.format("alert.packetflood", rate), rate));
+                String name = user.getName();
+                flagSimple(id, name, "PACKETFLOOD", lang.format("alert.packetflood", rate), rate);
             }
         }
     }
@@ -169,8 +169,7 @@ public class PacketChecker implements PacketListener {
                     || totalChars > Constants.CRASHER_MAX_BOOK_TOTAL_CHARS) {
                 event.setCancelled(true);
                 int pc = pageCount;
-                Bukkit.getScheduler().runTask(plugin, () -> flagSimple(id, "CRASHER",
-                        lang.format("alert.crasher_book", pc), pc));
+                flagSimple(id, user.getName(), "CRASHER", lang.format("alert.crasher_book", pc), pc);
             }
         } else {
             WrapperPlayClientUpdateSign wrapper = new WrapperPlayClientUpdateSign(event);
@@ -179,8 +178,7 @@ public class PacketChecker implements PacketListener {
                 for (String line : lines) {
                     if (line != null && line.length() > Constants.CRASHER_MAX_SIGN_LINE_CHARS) {
                         event.setCancelled(true);
-                        Bukkit.getScheduler().runTask(plugin, () -> flagSimple(id, "CRASHER",
-                                lang.get("alert.crasher_sign"), line.length()));
+                        flagSimple(id, user.getName(), "CRASHER", lang.get("alert.crasher_sign"), line.length());
                         return;
                     }
                 }
@@ -381,23 +379,31 @@ public class PacketChecker implements PacketListener {
         return a;
     }
 
-    /** Runs on the main thread. Generic flag path for the simple packet checks. */
-    private void flagSimple(UUID id, String type, String details, double value) {
-        Player player = Bukkit.getPlayer(id);
-        if (player == null) return;
-        if (Exemptions.isExempt(player, config, luckPerms)) return;
-
+    /**
+     * Generic flag path for the simple packet checks (crasher/flood). Callable from the
+     * Netty thread: the DB log goes through the thread-safe queue immediately with the
+     * connection's name, so the record survives even when a crash/flood attempt drops the
+     * connection before the next tick. Alert + VL need Bukkit API, so they hop to the main
+     * thread and are best-effort (skipped if the player already disconnected).
+     */
+    private void flagSimple(UUID id, String name, String type, String details, double value) {
         if (database != null) {
-            database.logAsync("anticheat_" + type.toLowerCase(), value, player.getName() + ": " + details);
+            database.logAsync("anticheat_" + type.toLowerCase(), value, name + ": " + details);
         }
-        if (alertManager != null) {
-            alertManager.addAlert(player, type, details, value, player.getLocation());
-        } else if (config.debugMode()) {
-            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " " + type + " - " + details);
-        }
-        if (violationManager != null) {
-            violationManager.flag(player, type);
-        }
+        Runnable main = () -> {
+            Player player = Bukkit.getPlayer(id);
+            if (player == null || Exemptions.isExempt(player, config, luckPerms)) return;
+            if (alertManager != null) {
+                alertManager.addAlert(player, type, details, value, player.getLocation());
+            } else if (config.debugMode()) {
+                plugin.getLogger().warning("[AntiCheat] " + player.getName() + " " + type + " - " + details);
+            }
+            if (violationManager != null) {
+                violationManager.flag(player, type);
+            }
+        };
+        if (Bukkit.isPrimaryThread()) main.run();
+        else Bukkit.getScheduler().runTask(plugin, main);
     }
 
     /** Runs on the main thread. */

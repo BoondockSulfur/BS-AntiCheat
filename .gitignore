@@ -45,6 +45,8 @@ Desktop.ini
 # Plugin testing
 /test-server/
 /server/
+/testserver/server/
+/testbots/node_modules/
 *.db
 *.db-journal
 *.log
