@@ -139,6 +139,8 @@ public class PluginConfig {
     public boolean spiderDetectionEnabled() { return cfg.getBoolean("anticheat.spider_detection", true); }
     public boolean stepDetectionEnabled() { return cfg.getBoolean("anticheat.step_detection", true); }
     public boolean teleportDetectionEnabled() { return cfg.getBoolean("anticheat.teleport_detection", true); }
+    public boolean elytraDetectionEnabled() { return cfg.getBoolean("anticheat.elytra_detection", true); }
+    public boolean vehicleChecksEnabled() { return cfg.getBoolean("anticheat.vehicle_checks", true); }
     public boolean combatChecksEnabled() { return cfg.getBoolean("anticheat.combat_checks", true); }
     public boolean reachDetectionEnabled() { return cfg.getBoolean("anticheat.reach_detection", true); }
     public double reachDistance() { return cfg.getDouble("anticheat.reach_distance", 4.0); }

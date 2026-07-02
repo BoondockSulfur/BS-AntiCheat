@@ -56,6 +56,8 @@ public class MovementChecker implements Listener {
     private final Map<UUID, Integer> consecutiveJesus = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> consecutiveSpider = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> consecutiveStep = new ConcurrentHashMap<>();
+    // Elytra/Riptide: consecutive over-speed samples
+    private final Map<UUID, Integer> consecutiveElytra = new ConcurrentHashMap<>();
 
     // Performance optimization: Event sampling
     private final Map<UUID, Integer> moveCounter = new ConcurrentHashMap<>();
@@ -361,11 +363,22 @@ public class MovementChecker implements Listener {
         // Determine movement type
         MovementType moveType = getMovementType(player);
 
-        // Skip vehicles and special-physics flight entirely (they have their own
-        // movement model). On-foot states (walking/sprinting/sneaking/swimming/
+        // Elytra/Riptide get their own speed-ceiling check — vanilla physics allow far
+        // higher speeds than ground movement, so the ground checks below don't apply.
+        if (moveType == MovementType.ELYTRA || moveType == MovementType.RIPTIDE) {
+            if (config.elytraDetectionEnabled() && !ServerLoad.isLagging(config)) {
+                checkElytraSpeed(player, playerId, moveType, from, to);
+            }
+            lastLocations.put(playerId, to.clone());
+            lastMoveTime.put(playerId, System.currentTimeMillis());
+            return;
+        }
+
+        // Vehicles are handled by VehicleChecker (VehicleMoveEvent — PlayerMoveEvent
+        // does not fire while riding). Creative fly is server-granted (allowFlight),
+        // so it is trusted. On-foot states (walking/sprinting/sneaking/swimming/
         // climbing) ARE checked, each with its own speed multiplier in getMaxSpeed().
-        if (moveType == MovementType.ELYTRA || moveType == MovementType.RIPTIDE ||
-            moveType == MovementType.CREATIVE_FLY || moveType == MovementType.MINECART ||
+        if (moveType == MovementType.CREATIVE_FLY || moveType == MovementType.MINECART ||
             moveType == MovementType.BOAT || moveType.name().startsWith("RIDING_") ||
             moveType == MovementType.OTHER_VEHICLE) {
             // Reset tracking for these modes
@@ -592,6 +605,39 @@ public class MovementChecker implements Listener {
     }
 
     /**
+     * Elytra/Riptide speed-ceiling check. One move event covers ~one tick of movement,
+     * so per-event distance × 20 approximates blocks per second, compared against the
+     * per-mode ceiling (Constants) with the same ping tolerance as getMaxSpeed().
+     */
+    private void checkElytraSpeed(Player player, UUID playerId, MovementType moveType, Location from, Location to) {
+        long now = System.currentTimeMillis();
+        Long lastTeleportTime = recentTeleport.get(playerId);
+        if (lastTeleportTime != null && (now - lastTeleportTime) < TELEPORT_IMMUNITY_MS) return;
+        Long lastJoin = recentJoin.get(playerId);
+        if (lastJoin != null && (now - lastJoin) < JOIN_GRACE_MS) return;
+        if (!from.getWorld().equals(to.getWorld())) return;
+
+        double bps = from.distance(to) * 20.0;
+        double max = moveType == MovementType.ELYTRA ? Constants.ELYTRA_MAX_SPEED : Constants.RIPTIDE_MAX_SPEED;
+        int ping = player.getPing();
+        if (ping > 100) {
+            max *= 1.0 + (Math.sqrt(ping - 100) / 100.0);
+        }
+
+        if (bps > max) {
+            int c = consecutiveElytra.merge(playerId, 1, Integer::sum);
+            if (c >= Constants.ELYTRA_VIOLATIONS) {
+                boolean elytra = moveType == MovementType.ELYTRA;
+                handleViolation(player, elytra ? "ELYTRA" : "RIPTIDE",
+                        lang.format(elytra ? "alert.elytra" : "alert.riptide", bps, max), bps, to);
+                consecutiveElytra.put(playerId, 0);
+            }
+        } else {
+            consecutiveElytra.remove(playerId);
+        }
+    }
+
+    /**
      * Handle a confirmed movement violation: log, alert, raise VL and optionally set back.
      *
      * @return true if the player was set back (teleported), so the caller skips updating
@@ -750,6 +796,7 @@ public class MovementChecker implements Listener {
         consecutiveJesus.remove(playerId);
         consecutiveSpider.remove(playerId);
         consecutiveStep.remove(playerId);
+        consecutiveElytra.remove(playerId);
         moveCounter.remove(playerId);
         recentKnockback.remove(playerId);
         recentTeleport.remove(playerId);

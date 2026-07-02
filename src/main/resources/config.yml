@@ -35,6 +35,11 @@ anticheat:
   spider_detection: true
   step_detection: true
   teleport_detection: true
+  # Elytra/Riptide speed ceiling (PlayerMoveEvent-based, separate physics from ground moves)
+  elytra_detection: true
+  # Vehicle checks (Boat-Fly, vehicle speed) — run on VehicleMoveEvent, since
+  # PlayerMoveEvent does not fire while a player rides a vehicle.
+  vehicle_checks: true
   combat_checks: true
   reach_detection: true
   killaura_detection: true

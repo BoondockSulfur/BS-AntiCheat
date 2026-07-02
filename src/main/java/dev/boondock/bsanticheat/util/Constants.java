@@ -65,6 +65,15 @@ public final class Constants {
     public static final double RIPTIDE_MAX_SPEED = 50.0;
     public static final double OTHER_VEHICLE_MAX_SPEED = 20.0;
 
+    // Elytra/Riptide: consecutive over-speed samples before flagging (speeds above are b/s)
+    public static final int ELYTRA_VIOLATIONS = 3;
+    // Vehicle checks: consecutive samples before flagging Boat-Fly / vehicle speed
+    public static final int BOATFLY_VIOLATIONS = 10;
+    public static final int VEHICLE_SPEED_VIOLATIONS = 5;
+    // Ice boating is legitimately very fast (blue ice: 40+ b/s cruising, ~70 at launch)
+    public static final double VEHICLE_ICE_SPEED_MULTIPLIER = 5.0;
+    public static final double VEHICLE_BLUE_ICE_SPEED_MULTIPLIER = 8.0;
+
     // Consecutive impossible (on-ground while airborne) samples before flagging GroundSpoof
     public static final int GROUNDSPOOF_VIOLATIONS = 4;
     // NoSlow: allowed fraction of walk speed while using an item, and consecutive samples
