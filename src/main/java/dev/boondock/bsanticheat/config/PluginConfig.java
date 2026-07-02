@@ -140,16 +140,18 @@ public class PluginConfig {
     public boolean speedDetectionEnabled() { return cfg.getBoolean("anticheat.speed_detection", true); }
     public boolean flyDetectionEnabled() { return cfg.getBoolean("anticheat.fly_detection", true); }
     public boolean groundSpoofDetectionEnabled() { return cfg.getBoolean("anticheat.groundspoof_detection", true); }
-    public boolean noSlowDetectionEnabled() { return cfg.getBoolean("anticheat.noslow_detection", true); }
-    public boolean jesusDetectionEnabled() { return cfg.getBoolean("anticheat.jesus_detection", true); }
-    public boolean spiderDetectionEnabled() { return cfg.getBoolean("anticheat.spider_detection", true); }
-    public boolean stepDetectionEnabled() { return cfg.getBoolean("anticheat.step_detection", true); }
+    // FP-prone movement micro-heuristics — off by default (opt-in), see config.yml notes.
+    public boolean noSlowDetectionEnabled() { return cfg.getBoolean("anticheat.noslow_detection", false); }
+    public boolean jesusDetectionEnabled() { return cfg.getBoolean("anticheat.jesus_detection", false); }
+    public boolean spiderDetectionEnabled() { return cfg.getBoolean("anticheat.spider_detection", false); }
+    public boolean stepDetectionEnabled() { return cfg.getBoolean("anticheat.step_detection", false); }
     public boolean teleportDetectionEnabled() { return cfg.getBoolean("anticheat.teleport_detection", true); }
     public boolean elytraDetectionEnabled() { return cfg.getBoolean("anticheat.elytra_detection", true); }
     public boolean vehicleChecksEnabled() { return cfg.getBoolean("anticheat.vehicle_checks", true); }
     public boolean criticalsDetectionEnabled() { return cfg.getBoolean("anticheat.criticals_detection", true); }
     public boolean autoBlockDetectionEnabled() { return cfg.getBoolean("anticheat.autoblock_detection", true); }
-    public boolean velocityDetectionEnabled() { return cfg.getBoolean("anticheat.velocity_detection", true); }
+    // Off by default — the displacement measurement needs rework before it is FP-safe.
+    public boolean velocityDetectionEnabled() { return cfg.getBoolean("anticheat.velocity_detection", false); }
     public int velocityViolations() { return cfg.getInt("anticheat.thresholds.velocity_violations", Constants.VELOCITY_VIOLATIONS); }
     public double velocityMinApplyRatio() { return cfg.getDouble("anticheat.thresholds.velocity_min_apply_ratio", Constants.VELOCITY_MIN_APPLY_RATIO); }
     public boolean fastBreakDetectionEnabled() { return cfg.getBoolean("anticheat.fastbreak_detection", true); }

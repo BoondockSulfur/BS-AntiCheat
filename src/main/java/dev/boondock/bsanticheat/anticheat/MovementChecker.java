@@ -74,6 +74,11 @@ public class MovementChecker implements Listener {
     private final Map<UUID, Long> recentJoin = new ConcurrentHashMap<>();
     private static final long JOIN_GRACE_MS = 3000; // 3 second grace after join/respawn/world change
 
+    // Elytra/Riptide landing grace — after gliding stops the player keeps high horizontal
+    // momentum for a moment, which the ground speed check would misread as a Speed violation.
+    private final Map<UUID, Long> recentGlide = new ConcurrentHashMap<>();
+    private static final long GLIDE_GRACE_MS = 1500; // grace after gliding/riptiding ends
+
     public MovementChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
         this.config = config;
@@ -379,6 +384,7 @@ public class MovementChecker implements Listener {
             if (config.elytraDetectionEnabled() && !ServerLoad.isLagging(config)) {
                 checkElytraSpeed(player, playerId, moveType, from, to);
             }
+            recentGlide.put(playerId, System.currentTimeMillis()); // for the landing grace
             lastLocations.put(playerId, to.clone());
             lastMoveTime.put(playerId, System.currentTimeMillis());
             return;
@@ -428,6 +434,13 @@ public class MovementChecker implements Listener {
             // IMMUNITY CHECK: Skip during join/respawn/world-change grace
             Long lastJoin = recentJoin.get(playerId);
             if (lastJoin != null && (now - lastJoin) < JOIN_GRACE_MS) {
+                return;
+            }
+
+            // IMMUNITY CHECK: Skip briefly after gliding/riptiding — the residual momentum
+            // on landing would otherwise be read as a Speed/Fly violation.
+            Long lastGlide = recentGlide.get(playerId);
+            if (lastGlide != null && (now - lastGlide) < GLIDE_GRACE_MS) {
                 return;
             }
 
@@ -580,7 +593,9 @@ public class MovementChecker implements Listener {
                 }
 
                 // Spider: climbing a wall (moving up while pressed against a solid block, not a ladder)
-                if (config.spiderDetectionEnabled() && movement.getY() > 0.0 && !player.isOnGround()
+                // Require meaningful sustained upward motion (> 0.1/tick) so the tail of a
+                // normal jump next to a wall doesn't count as climbing.
+                if (config.spiderDetectionEnabled() && movement.getY() > 0.1 && !player.isOnGround()
                         && !isNearLiquid(player) && !isOnClimbable(player) && isAgainstWall(player)) {
                     int c = consecutiveSpider.merge(playerId, 1, Integer::sum);
                     if (c >= config.spiderViolations()) {
@@ -831,6 +846,7 @@ public class MovementChecker implements Listener {
         recentKnockback.remove(playerId);
         recentTeleport.remove(playerId);
         recentJoin.remove(playerId);
+        recentGlide.remove(playerId);
     }
 
     /**

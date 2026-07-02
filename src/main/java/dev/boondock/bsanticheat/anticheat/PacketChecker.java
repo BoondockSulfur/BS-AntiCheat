@@ -4,9 +4,11 @@ import com.github.retrooper.packetevents.event.PacketListener;
 import com.github.retrooper.packetevents.event.PacketReceiveEvent;
 import com.github.retrooper.packetevents.protocol.packettype.PacketType;
 import com.github.retrooper.packetevents.protocol.packettype.PacketTypeCommon;
+import com.github.retrooper.packetevents.protocol.player.DiggingAction;
 import com.github.retrooper.packetevents.protocol.player.User;
 import com.github.retrooper.packetevents.protocol.world.Location;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientEditBook;
+import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerDigging;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerFlying;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPong;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientUpdateSign;
@@ -76,6 +78,11 @@ public class PacketChecker implements PacketListener {
     private final Map<UUID, Deque<Long>> snapTimes = new ConcurrentHashMap<>();
     // Packet flood: [0]=window start(ms), [1]=count in window
     private final Map<UUID, long[]> packetCounts = new ConcurrentHashMap<>();
+    // Mining state: while a player is breaking a block the client sends a swing every tick,
+    // which would false-flag AutoClicker. Value = timestamp until which we treat the player
+    // as mining (set on START_DIGGING with a safety cap, cleared on FINISH/CANCEL).
+    private final Map<UUID, Long> miningUntil = new ConcurrentHashMap<>();
+    private static final long MINING_SAFETY_MS = 5000L;
 
     public PacketChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -129,6 +136,11 @@ public class PacketChecker implements PacketListener {
             handleCrasher(event, type);
         }
 
+        // Track mining so held-to-mine swings don't count as AutoClicker clicks.
+        if (type == PacketType.Play.Client.PLAYER_DIGGING) {
+            handleDigging(event);
+        }
+
         if (ServerLoad.isLagging(config)) return;
         if (type == PacketType.Play.Client.ANIMATION) {
             handleSwing(event);
@@ -136,6 +148,28 @@ public class PacketChecker implements PacketListener {
             handleFlying(event);
             handleTimer(event.getUser());
         }
+    }
+
+    /**
+     * Track block-mining state from PLAYER_DIGGING so held-to-mine arm swings are not
+     * counted as AutoClicker clicks (they fire once per tick while breaking a block).
+     */
+    private void handleDigging(PacketReceiveEvent event) {
+        User user = event.getUser();
+        if (user == null || user.getUUID() == null) return;
+        DiggingAction action = new WrapperPlayClientPlayerDigging(event).getAction();
+        long now = System.currentTimeMillis();
+        if (action == DiggingAction.START_DIGGING) {
+            miningUntil.put(user.getUUID(), now + MINING_SAFETY_MS); // mining until finish (safety-capped)
+        } else if (action == DiggingAction.FINISHED_DIGGING || action == DiggingAction.CANCELLED_DIGGING) {
+            miningUntil.put(user.getUUID(), now); // done
+        }
+    }
+
+    /** True while the player is (very recently) breaking a block. */
+    private boolean isMining(UUID id) {
+        Long until = miningUntil.get(id);
+        return until != null && System.currentTimeMillis() < until;
     }
 
     /**
@@ -248,6 +282,9 @@ public class PacketChecker implements PacketListener {
         User user = event.getUser();
         if (user == null || user.getUUID() == null) return;
         UUID id = user.getUUID();
+
+        // Swings sent while breaking a block are mining, not clicking — don't count them.
+        if (isMining(id)) return;
 
         long now = System.currentTimeMillis();
         ConcurrentLinkedDeque<Long> buf = clicks.computeIfAbsent(id, k -> new ConcurrentLinkedDeque<>());
@@ -539,6 +576,7 @@ public class PacketChecker implements PacketListener {
         clicks.remove(playerId);
         timerState.remove(playerId);
         packetCounts.remove(playerId);
+        miningUntil.remove(playerId);
         lastYaw.remove(playerId);
         yawDeltas.remove(playerId);
         recentDirs.remove(playerId);

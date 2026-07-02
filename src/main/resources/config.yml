@@ -41,10 +41,13 @@ anticheat:
   speed_detection: true
   fly_detection: true
   groundspoof_detection: true
-  noslow_detection: true
-  jesus_detection: true
-  spider_detection: true
-  step_detection: true
+  # NoSlow/Jesus/Spider/Step are FP-prone movement micro-heuristics — OFF by default.
+  # Enable them only if you accept occasional false positives (jumping next to a wall,
+  # walking while using an item, crossing water fast can trigger them).
+  noslow_detection: false
+  jesus_detection: false
+  spider_detection: false
+  step_detection: false
   teleport_detection: true
   # Elytra/Riptide speed ceiling (PlayerMoveEvent-based, separate physics from ground moves)
   elytra_detection: true
@@ -58,8 +61,9 @@ anticheat:
   criticals_detection: true
   autoblock_detection: true
   # Velocity / AntiKnockback: flag players who don't apply server-sent knockback.
-  # Note: items with near-total knockback resistance may need calibration/whitelisting.
-  velocity_detection: true
+  # OFF by default — the displacement measurement still needs rework before it is
+  # false-positive-safe (it can misread legit knockback as ignored). Opt-in only.
+  velocity_detection: false
   world_checks: true
   nuker_detection: true
   fastplace_detection: true
@@ -90,11 +94,11 @@ anticheat:
   thresholds:
     # Movement extras: consecutive over-threshold samples before flagging
     groundspoof_violations: 4
-    noslow_violations: 3
-    noslow_speed_multiplier: 0.5   # allowed fraction of walk speed while using an item
-    jesus_violations: 5
-    spider_violations: 3
-    step_violations: 2
+    noslow_violations: 5
+    noslow_speed_multiplier: 0.8   # allowed fraction of walk speed while using an item
+    jesus_violations: 8
+    spider_violations: 8
+    step_violations: 5
     step_max_height: 0.75          # vanilla auto-step is 0.6
     elytra_violations: 3
     scaffold_violations: 3

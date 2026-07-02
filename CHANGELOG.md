@@ -7,6 +7,17 @@ All notable changes to BSAntiCheat will be documented in this file.
 ## [Unreleased]
 
 ### Changed
+- False-positive calibration pass (from live testing on a real server):
+  - MovementChecker: 1.5s grace after gliding/riptiding ends, so elytra-landing momentum
+    is no longer misread as a Speed violation.
+  - AutoClicker: swings sent while breaking a block (tracked via PLAYER_DIGGING) no longer
+    count as clicks, fixing the false positive on normal mining/wood-chopping.
+  - Spider now requires meaningful sustained upward motion (>0.1/tick), not the tail of a
+    normal jump next to a wall.
+  - New defaults: NoSlow, Jesus, Spider, Step and Velocity/AntiKnockback ship **off by
+    default** (opt-in) — the movement micro-heuristics are FP-prone and velocity's
+    displacement measurement still needs rework. Spider/Step/NoSlow thresholds loosened for
+    servers that do enable them.
 - Phase 2 foundation: a **transaction/latency system** (`TransactionManager`) sends a play
   Ping to every player each tick and matches the Pong to measure true round-trip latency.
   Movement/vehicle/elytra lag compensation now uses this precise RTT instead of the coarse

@@ -74,14 +74,16 @@ public final class Constants {
 
     // Consecutive impossible (on-ground while airborne) samples before flagging GroundSpoof
     public static final int GROUNDSPOOF_VIOLATIONS = 4;
-    // NoSlow: allowed fraction of walk speed while using an item, and consecutive samples
-    public static final double NOSLOW_SPEED_MULTIPLIER = 0.5;
-    public static final int NOSLOW_VIOLATIONS = 3;
-    // Jesus / Spider / Step
-    public static final int JESUS_VIOLATIONS = 5;
-    public static final int SPIDER_VIOLATIONS = 3;
+    // NoSlow: allowed fraction of walk speed while using an item, and consecutive samples.
+    // Cap raised to 0.8 so normal walking-with-item (and transitions) don't false-flag.
+    public static final double NOSLOW_SPEED_MULTIPLIER = 0.8;
+    public static final int NOSLOW_VIOLATIONS = 5;
+    // Jesus / Spider / Step — thresholds raised after live testing showed jumping next to a
+    // wall / stepping up blocks false-flagged Spider/Step at the old low counts.
+    public static final int JESUS_VIOLATIONS = 8;
+    public static final int SPIDER_VIOLATIONS = 8;
     public static final double STEP_MAX_HEIGHT = 0.75; // vanilla auto-step is 0.6
-    public static final int STEP_VIOLATIONS = 2;
+    public static final int STEP_VIOLATIONS = 5;
     // KillAura multi-aura: window for counting distinct targets hit
     public static final long KILLAURA_MULTI_WINDOW_MS = 250L;
     // Scaffold: consecutive "not looking at block" places before flagging
