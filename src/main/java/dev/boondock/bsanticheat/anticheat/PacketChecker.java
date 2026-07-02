@@ -8,6 +8,7 @@ import com.github.retrooper.packetevents.protocol.player.User;
 import com.github.retrooper.packetevents.protocol.world.Location;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientEditBook;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerFlying;
+import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPong;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientUpdateSign;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
@@ -53,6 +54,7 @@ public class PacketChecker implements PacketListener {
     private LuckPermsHook luckPerms;
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
+    private TransactionManager transactionManager;
 
     private final Map<UUID, ConcurrentLinkedDeque<Long>> clicks = new ConcurrentHashMap<>();
     // Timer balance per player: [0]=balance(ms), [1]=last packet time(ms)
@@ -91,14 +93,31 @@ public class PacketChecker implements PacketListener {
         this.violationManager = violationManager;
     }
 
+    public void setTransactionManager(TransactionManager transactionManager) {
+        this.transactionManager = transactionManager;
+    }
+
     @Override
     public void onPacketReceive(PacketReceiveEvent event) {
+        PacketTypeCommon type = event.getPacketType();
+
+        // Transaction pongs feed the latency system and must run regardless of which
+        // checks are enabled — they are latency infrastructure, not a detection.
+        if (type == PacketType.Play.Client.PONG) {
+            if (transactionManager != null) {
+                User u = event.getUser();
+                if (u != null && u.getUUID() != null) {
+                    transactionManager.onPong(u.getUUID(), new WrapperPlayClientPong(event).getId(), u.getName());
+                }
+            }
+            return;
+        }
+
         if (!config.packetChecksEnabled()) return;
 
         // Crash protection & flood run even under lag — an attack CAUSES lag, so the
         // lag exemption must not disable exactly these checks.
         handleFlood(event);
-        PacketTypeCommon type = event.getPacketType();
         if (type == PacketType.Play.Client.EDIT_BOOK || type == PacketType.Play.Client.UPDATE_SIGN) {
             handleCrasher(event, type);
         }

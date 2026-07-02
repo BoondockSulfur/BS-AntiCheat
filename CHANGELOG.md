@@ -7,6 +7,12 @@ All notable changes to BSAntiCheat will be documented in this file.
 ## [Unreleased]
 
 ### Changed
+- Phase 2 foundation: a **transaction/latency system** (`TransactionManager`) sends a play
+  Ping to every player each tick and matches the Pong to measure true round-trip latency.
+  Movement/vehicle/elytra lag compensation now uses this precise RTT instead of the coarse
+  `getPing()` (falling back to `getPing()` until the first transaction completes). Verified
+  end-to-end via the harness `transaction` scenario. Consumers (velocity, lag-compensated
+  reach) build on this next.
 - Phase 1 movement pipeline: **sampling removed** — every PlayerMoveEvent is now checked
   instead of every 10th, so a cheat can no longer hide in skipped moves (regression-guarded
   by the `microspeed` harness scenario). Fly/hover now use a **server-authoritative**

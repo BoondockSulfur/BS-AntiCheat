@@ -54,6 +54,7 @@ public class VehicleChecker implements Listener {
     private LuckPermsHook luckPerms;
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
+    private TransactionManager transactionManager;
 
     // Keyed by the riding player's UUID (cleaned up on quit)
     private final Map<UUID, Integer> consecutiveBoatFly = new ConcurrentHashMap<>();
@@ -76,6 +77,19 @@ public class VehicleChecker implements Listener {
 
     public void setViolationManager(ViolationManager violationManager) {
         this.violationManager = violationManager;
+    }
+
+    public void setTransactionManager(TransactionManager transactionManager) {
+        this.transactionManager = transactionManager;
+    }
+
+    /** Precise transaction RTT (ms) when available, otherwise the coarse getPing(). */
+    private int effectivePing(Player player) {
+        if (transactionManager != null) {
+            double rtt = transactionManager.roundTripMs(player.getUniqueId());
+            if (rtt >= 0) return (int) Math.round(rtt);
+        }
+        return player.getPing();
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -122,7 +136,7 @@ public class VehicleChecker implements Listener {
         // --- Vehicle speed: per-event distance is ~one tick of movement → ×20 = b/s ---
         double bps = from.distance(to) * 20.0;
         double max = maxSpeedFor(vehicle, to);
-        int ping = player.getPing();
+        int ping = effectivePing(player);
         if (ping > 100) {
             max *= 1.0 + (Math.sqrt(ping - 100) / 100.0);
         }

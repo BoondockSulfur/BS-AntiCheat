@@ -43,6 +43,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
     private InventoryChecker inventoryChecker;
     private ViolationManager violationManager;
     private PacketChecker packetChecker;
+    private TransactionManager transactionManager;
     private PacketListenerCommon packetListener;
     private boolean packetEventsActive = false;
     private LuckPermsHook luckPerms;
@@ -133,10 +134,18 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
                 packetChecker.setLuckPerms(luckPerms);
                 packetChecker.setAlertManager(movementAlertManager);
                 packetChecker.setViolationManager(violationManager);
+
+                // Transaction/latency system (phase 2) — only meaningful with PacketEvents.
+                transactionManager = new TransactionManager(this, configAdapter, database);
+                packetChecker.setTransactionManager(transactionManager);
+                movementChecker.setTransactionManager(transactionManager);
+                vehicleChecker.setTransactionManager(transactionManager);
+
                 packetListener = PacketEvents.getAPI().getEventManager()
                         .registerListener(packetChecker, PacketListenerPriority.NORMAL);
+                transactionManager.start();
                 packetEventsActive = true;
-                getLogger().info("[PacketEvents] hooked - packet checks active (AutoClicker, BadPackets).");
+                getLogger().info("[PacketEvents] hooked - packet checks + transaction latency active.");
             } else {
                 getLogger().info("[PacketEvents] not found - packet checks (AutoClicker, BadPackets) disabled. "
                         + "Install the PacketEvents plugin to enable them.");
@@ -181,6 +190,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        if (transactionManager != null) transactionManager.stop();
         if (packetListener != null) {
             try { PacketEvents.getAPI().getEventManager().unregisterListener(packetListener); } catch (Throwable ignored) {}
         }
@@ -199,6 +209,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         if (vehicleChecker != null) vehicleChecker.cleanup(playerId);
         if (inventoryChecker != null) inventoryChecker.cleanup(playerId);
         if (packetChecker != null) packetChecker.cleanup(playerId);
+        if (transactionManager != null) transactionManager.cleanup(playerId);
         if (alertPreferenceManager != null) alertPreferenceManager.cleanup(playerId);
         if (violationManager != null) violationManager.cleanup(playerId);
     }

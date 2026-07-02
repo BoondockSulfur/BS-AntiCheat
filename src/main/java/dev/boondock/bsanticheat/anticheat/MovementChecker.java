@@ -41,6 +41,7 @@ public class MovementChecker implements Listener {
     private LuckPermsHook luckPerms;
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
+    private TransactionManager transactionManager;
 
     private final Map<UUID, Location> lastLocations = new ConcurrentHashMap<>();
     private final Map<UUID, Long> lastMoveTime = new ConcurrentHashMap<>();
@@ -93,6 +94,22 @@ public class MovementChecker implements Listener {
 
     public void setViolationManager(ViolationManager violationManager) {
         this.violationManager = violationManager;
+    }
+
+    public void setTransactionManager(TransactionManager transactionManager) {
+        this.transactionManager = transactionManager;
+    }
+
+    /**
+     * Round-trip latency (ms) for lag compensation: the precise transaction RTT when
+     * available, otherwise the coarse {@link Player#getPing()}.
+     */
+    private int effectivePing(Player player) {
+        if (transactionManager != null) {
+            double rtt = transactionManager.roundTripMs(player.getUniqueId());
+            if (rtt >= 0) return (int) Math.round(rtt);
+        }
+        return player.getPing();
     }
 
     /**
@@ -202,7 +219,7 @@ public class MovementChecker implements Listener {
         // LAG COMPENSATION: Non-linear increase based on player ping
         // Uses square root scaling so high-ping players get progressively more tolerance
         // without allowing extreme speeds at very high ping
-        int ping = player.getPing();
+        int ping = effectivePing(player);
         if (ping > 100) {
             // sqrt scaling: 200ms → +10%, 500ms → +20%, 1000ms → +30%
             double lagMultiplier = 1.0 + (Math.sqrt(ping - 100) / 100.0);
@@ -606,7 +623,7 @@ public class MovementChecker implements Listener {
 
         double bps = from.distance(to) * 20.0;
         double max = moveType == MovementType.ELYTRA ? Constants.ELYTRA_MAX_SPEED : Constants.RIPTIDE_MAX_SPEED;
-        int ping = player.getPing();
+        int ping = effectivePing(player);
         if (ping > 100) {
             max *= 1.0 + (Math.sqrt(ping - 100) / 100.0);
         }
