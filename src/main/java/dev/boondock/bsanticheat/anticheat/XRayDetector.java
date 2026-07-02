@@ -648,6 +648,10 @@ public class XRayDetector implements Listener {
             if (debug) plugin.getLogger().info("[XRay] " + name + " ist Bedrock (Geyser) -> übersprungen");
             return true;
         }
+        if (Exemptions.isLegacyExempt(player, config)) {
+            if (debug) plugin.getLogger().info("[XRay] " + name + " ist Legacy-Client (ViaVersion) -> übersprungen");
+            return true;
+        }
 
         // Check UUID whitelist
         List<String> whitelistPlayers = config.anticheatWhitelistPlayers();

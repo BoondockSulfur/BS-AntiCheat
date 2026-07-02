@@ -131,6 +131,7 @@ alert:
   vehicle_speed: "Vehicle too fast (%s): %.1f b/s (max %.1f)"
   criticals: "Criticals: critical hit while standing on the ground"
   autoblock: "AutoBlock: attacking while blocking with a shield"
+  velocity: "Velocity/AntiKB: applied %.2f of expected %.2f knockback"
   fastbreak: "FastBreak: block broken in %dms (expected %dms)"
   inventorymove: "InventoryMove: walking with an open container (%d checks)"
   cheststealer: "ChestStealer: %d container clicks at %dms intervals"

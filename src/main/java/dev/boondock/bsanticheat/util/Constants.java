@@ -89,6 +89,12 @@ public final class Constants {
     // Criticals (crit while on ground) / AutoBlock (attack while shielding)
     public static final int CRITICALS_VIOLATIONS = 3;
     public static final int AUTOBLOCK_VIOLATIONS = 2;
+    // Velocity / AntiKnockback: ignore velocities below this (b/tick, not a real knockback);
+    // evaluate displacement after this many ticks; flag when applied < expected * ratio.
+    public static final double VELOCITY_MIN_KB = 0.1;
+    public static final long VELOCITY_EVAL_DELAY_TICKS = 3L;
+    public static final int VELOCITY_VIOLATIONS = 3;
+    public static final double VELOCITY_MIN_APPLY_RATIO = 0.33;
     // FastBreak: per-block break time vs. expected. Only digs expected to take at least
     // MIN_EXPECTED are judged; flag when the actual time is below expected * TOLERANCE.
     public static final long FASTBREAK_MIN_EXPECTED_MS = 300L;

@@ -131,6 +131,7 @@ alert:
   vehicle_speed: "Fahrzeug zu schnell (%s): %.1f B/s (Max: %.1f)"
   criticals: "Criticals: kritischer Treffer am Boden stehend"
   autoblock: "AutoBlock: Angriff waehrend Schild-Block"
+  velocity: "Velocity/AntiKB: %.2f von erwartetem %.2f Rueckstoss angewandt"
   fastbreak: "FastBreak: Block in %dms abgebaut (erwartet %dms)"
   inventorymove: "InventoryMove: laeuft mit offenem Container (%d Messungen)"
   cheststealer: "ChestStealer: %d Container-Klicks im %dms-Abstand"

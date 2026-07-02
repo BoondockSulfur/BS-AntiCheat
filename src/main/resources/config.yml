@@ -29,6 +29,12 @@ anticheat:
   # otherwise flag. Requires the Geyser/Floodgate plugin to be installed to take effect.
   exempt_bedrock_players: true
 
+  # Exempt legacy clients (older than legacy_protocol_threshold) connecting through
+  # ViaVersion — their combat/movement timing differs. Off by default (opt-in), since
+  # exempting them weakens the anticheat. 767 = protocol 1.21; lower clients are exempt.
+  exempt_legacy_clients: false
+  legacy_protocol_threshold: 767
+
   # Detection Toggles
   xray_detection: true
   movement_checks: true
@@ -51,6 +57,9 @@ anticheat:
   # Criticals (crit hit while on ground) and AutoBlock (attacking while shielding)
   criticals_detection: true
   autoblock_detection: true
+  # Velocity / AntiKnockback: flag players who don't apply server-sent knockback.
+  # Note: items with near-total knockback resistance may need calibration/whitelisting.
+  velocity_detection: true
   world_checks: true
   nuker_detection: true
   fastplace_detection: true
@@ -95,6 +104,8 @@ anticheat:
     # Combat extras
     criticals_violations: 3
     autoblock_violations: 2
+    velocity_violations: 3
+    velocity_min_apply_ratio: 0.33   # flag when applied knockback < expected * this
     # World
     fastbreak_violations: 3
     fastbreak_tolerance: 0.7       # flag when dig time < expected * this

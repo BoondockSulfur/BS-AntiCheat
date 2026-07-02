@@ -69,6 +69,11 @@ public final class Scheduler {
         entity.getScheduler().run(plugin, wrap(r), null);
     }
 
+    /** Run on the entity's region thread after a delay; no-op if the entity is gone. */
+    public static void runForEntityLater(Plugin plugin, Entity entity, Runnable r, long delayTicks) {
+        entity.getScheduler().runDelayed(plugin, wrap(r), null, Math.max(1L, delayTicks));
+    }
+
     /** Resolve an online player by UUID and run on its region thread; no-op if offline. */
     public static void runForPlayer(Plugin plugin, UUID id, Runnable r) {
         Player player = Bukkit.getPlayer(id);

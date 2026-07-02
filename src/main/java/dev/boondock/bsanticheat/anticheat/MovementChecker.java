@@ -837,8 +837,9 @@ public class MovementChecker implements Listener {
      * Check if player is whitelisted (UUID or LuckPerms group).
      */
     public boolean isPlayerWhitelisted(Player player) {
-        // Bedrock (Geyser/Floodgate) players use different movement physics
+        // Bedrock (Geyser/Floodgate) and legacy (ViaVersion) clients use different physics
         if (Exemptions.isBedrockExempt(player, config, geyser)) return true;
+        if (Exemptions.isLegacyExempt(player, config)) return true;
 
         // Check UUID whitelist
         List<String> whitelistPlayers = config.anticheatWhitelistPlayers();

@@ -115,6 +115,9 @@ public class PluginConfig {
 
     // Exempt Bedrock (Geyser/Floodgate) players from checks — their client physics differ
     public boolean exemptBedrockPlayers() { return cfg.getBoolean("anticheat.exempt_bedrock_players", true); }
+    // Exempt legacy clients (via ViaVersion) below the given protocol — opt-in, off by default
+    public boolean exemptLegacyClients() { return cfg.getBoolean("anticheat.exempt_legacy_clients", false); }
+    public int legacyProtocolThreshold() { return cfg.getInt("anticheat.legacy_protocol_threshold", 767); }
 
     // Database (SQLite only)
     public String sqliteFile() {
@@ -146,6 +149,9 @@ public class PluginConfig {
     public boolean vehicleChecksEnabled() { return cfg.getBoolean("anticheat.vehicle_checks", true); }
     public boolean criticalsDetectionEnabled() { return cfg.getBoolean("anticheat.criticals_detection", true); }
     public boolean autoBlockDetectionEnabled() { return cfg.getBoolean("anticheat.autoblock_detection", true); }
+    public boolean velocityDetectionEnabled() { return cfg.getBoolean("anticheat.velocity_detection", true); }
+    public int velocityViolations() { return cfg.getInt("anticheat.thresholds.velocity_violations", Constants.VELOCITY_VIOLATIONS); }
+    public double velocityMinApplyRatio() { return cfg.getDouble("anticheat.thresholds.velocity_min_apply_ratio", Constants.VELOCITY_MIN_APPLY_RATIO); }
     public boolean fastBreakDetectionEnabled() { return cfg.getBoolean("anticheat.fastbreak_detection", true); }
     public boolean inventoryChecksEnabled() { return cfg.getBoolean("anticheat.inventory_checks", true); }
     public boolean inventoryMoveDetectionEnabled() { return cfg.getBoolean("anticheat.inventorymove_detection", true); }

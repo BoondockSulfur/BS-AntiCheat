@@ -6,9 +6,11 @@ import dev.boondock.bsanticheat.commands.CommandRegistry;
 import dev.boondock.bsanticheat.config.ConfigMigrator;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
+import dev.boondock.bsanticheat.anticheat.Exemptions;
 import dev.boondock.bsanticheat.integration.BSACPlaceholders;
 import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
+import dev.boondock.bsanticheat.integration.ViaVersionHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
 import dev.boondock.bsanticheat.util.UpdateChecker;
@@ -42,6 +44,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
     private WorldChecker worldChecker;
     private VehicleChecker vehicleChecker;
     private InventoryChecker inventoryChecker;
+    private VelocityChecker velocityChecker;
     private ViolationManager violationManager;
     private PacketChecker packetChecker;
     private TransactionManager transactionManager;
@@ -85,6 +88,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         worldChecker = new WorldChecker(this, configAdapter, database, lang);
         vehicleChecker = new VehicleChecker(this, configAdapter, database, lang);
         inventoryChecker = new InventoryChecker(this, configAdapter, database, lang);
+        velocityChecker = new VelocityChecker(this, configAdapter, database, lang);
 
         // Wire alert managers
         movementChecker.setAlertManager(movementAlertManager);
@@ -93,6 +97,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         worldChecker.setAlertManager(movementAlertManager);
         vehicleChecker.setAlertManager(movementAlertManager);
         inventoryChecker.setAlertManager(movementAlertManager);
+        velocityChecker.setAlertManager(movementAlertManager);
 
         // Set alert preference managers
         movementAlertManager.setPreferenceManager(alertPreferenceManager);
@@ -106,6 +111,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         worldChecker.setViolationManager(violationManager);
         vehicleChecker.setViolationManager(violationManager);
         inventoryChecker.setViolationManager(violationManager);
+        velocityChecker.setViolationManager(violationManager);
 
         // LuckPerms integration (optional)
         luckPerms = LuckPermsHook.tryHook(this);
@@ -116,6 +122,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
             worldChecker.setLuckPerms(luckPerms);
             vehicleChecker.setLuckPerms(luckPerms);
             inventoryChecker.setLuckPerms(luckPerms);
+            velocityChecker.setLuckPerms(luckPerms);
         }
 
         // Geyser/Floodgate: exempt Bedrock players from checks (they use different physics)
@@ -126,6 +133,10 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         worldChecker.setGeyser(geyser);
         vehicleChecker.setGeyser(geyser);
         inventoryChecker.setGeyser(geyser);
+        velocityChecker.setGeyser(geyser);
+
+        // ViaVersion: optional legacy-client exemption (shared statically via Exemptions).
+        Exemptions.setViaVersion(ViaVersionHook.tryHook(this));
 
         // Register event listeners
         Bukkit.getPluginManager().registerEvents(movementChecker, this);
@@ -134,6 +145,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         Bukkit.getPluginManager().registerEvents(worldChecker, this);
         Bukkit.getPluginManager().registerEvents(vehicleChecker, this);
         Bukkit.getPluginManager().registerEvents(inventoryChecker, this);
+        Bukkit.getPluginManager().registerEvents(velocityChecker, this);
         Bukkit.getPluginManager().registerEvents(this, this);
 
         // Packet-level checks — use the installed PacketEvents plugin (optional).
@@ -152,6 +164,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
                 packetChecker.setTransactionManager(transactionManager);
                 movementChecker.setTransactionManager(transactionManager);
                 vehicleChecker.setTransactionManager(transactionManager);
+                velocityChecker.setTransactionManager(transactionManager);
 
                 packetListener = PacketEvents.getAPI().getEventManager()
                         .registerListener(packetChecker, PacketListenerPriority.NORMAL);
@@ -220,6 +233,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         if (combatChecker != null) combatChecker.cleanup(playerId);
         if (vehicleChecker != null) vehicleChecker.cleanup(playerId);
         if (inventoryChecker != null) inventoryChecker.cleanup(playerId);
+        if (velocityChecker != null) velocityChecker.cleanup(playerId);
         if (packetChecker != null) packetChecker.cleanup(playerId);
         if (transactionManager != null) transactionManager.cleanup(playerId);
         if (alertPreferenceManager != null) alertPreferenceManager.cleanup(playerId);

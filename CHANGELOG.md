@@ -22,6 +22,15 @@ All notable changes to BSAntiCheat will be documented in this file.
   baseline stays clean.
 
 ### Added
+- Velocity/AntiKnockback check (`velocity_detection`, phase 2.3): flags clients that don't
+  apply server-sent knockback (measured as displacement along the knockback direction a few
+  ticks later, on the player's region thread). Guards: water/vehicle/gliding/riptide/
+  climbable/wall exemptions and 3 consecutive full ignores. Harness-verified to flag a
+  frozen (AntiKB) client; false-positive safety for a real applying client needs a live PvP
+  test (mineflayer has no knockback physics to simulate it).
+- ViaVersion legacy-client detection + optional exemption (`exempt_legacy_clients`, off by
+  default; phase 4.2): reads a player's protocol version via the ViaVersion API (reflection,
+  no hard dependency) and can exempt clients below `legacy_protocol_threshold`.
 - Folia support (phase 4.3): a `util.Scheduler` abstraction over Paper's region/async
   scheduler API replaces every `Bukkit.getScheduler()` call — async work stays async,
   global tasks use the global region, and per-player packet flags run on the owning
