@@ -88,7 +88,7 @@ public class FallbackLogger {
             return;
         }
 
-        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+        dev.boondock.bsanticheat.util.Scheduler.runAsync(plugin, () -> {
             try {
                 flush();
             } catch (IOException e) {

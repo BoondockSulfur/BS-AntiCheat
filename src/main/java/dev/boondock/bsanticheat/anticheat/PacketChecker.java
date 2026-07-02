@@ -16,6 +16,7 @@ import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
+import dev.boondock.bsanticheat.util.Scheduler;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
@@ -230,7 +231,7 @@ public class PacketChecker implements PacketListener {
         if (balance > config.timerMaxBalanceMs()) {
             st[0] = 0L; // reset after flagging
             long bal = balance;
-            Bukkit.getScheduler().runTask(plugin, () -> flagTimer(id, bal));
+            Scheduler.runForPlayer(plugin, id, () ->flagTimer(id, bal));
         } else {
             st[0] = balance;
         }
@@ -286,7 +287,7 @@ public class PacketChecker implements PacketListener {
         if (cps > maxCps && !heldButton) {
             buf.clear(); // reset so it must re-accumulate
             int cpsSnap = cps;
-            Bukkit.getScheduler().runTask(plugin, () -> flagAutoClicker(id, cpsSnap, maxCps));
+            Scheduler.runForPlayer(plugin, id, () ->flagAutoClicker(id, cpsSnap, maxCps));
         }
     }
 
@@ -309,7 +310,7 @@ public class PacketChecker implements PacketListener {
 
         // BadPackets: impossible rotation values
         if (bp && (!Float.isFinite(pitch) || !Float.isFinite(yaw) || pitch < -90.0f || pitch > 90.0f)) {
-            Bukkit.getScheduler().runTask(plugin, () -> flagBadPackets(id, pitch));
+            Scheduler.runForPlayer(plugin, id, () ->flagBadPackets(id, pitch));
         }
 
         // KillAura rotation GCD: human mouse input is quantised (yaw deltas share a common
@@ -334,7 +335,7 @@ public class PacketChecker implements PacketListener {
                         if (g > 0 && g < config.killAuraRotationMinGcd()) {
                             dq.clear();
                             long flagged = g;
-                            Bukkit.getScheduler().runTask(plugin, () -> flagRotation(id, flagged));
+                            Scheduler.runForPlayer(plugin, id, () ->flagRotation(id, flagged));
                         }
                     }
                 }
@@ -366,7 +367,7 @@ public class PacketChecker implements PacketListener {
                     if (st.size() >= config.aimSnapThreshold()) {
                         st.clear();
                         double angle = spikeIn;
-                        Bukkit.getScheduler().runTask(plugin, () -> flagAimSnap(id, angle));
+                        Scheduler.runForPlayer(plugin, id, () ->flagAimSnap(id, angle));
                     }
                 }
             }
@@ -427,8 +428,7 @@ public class PacketChecker implements PacketListener {
                 violationManager.flag(player, type);
             }
         };
-        if (Bukkit.isPrimaryThread()) main.run();
-        else Bukkit.getScheduler().runTask(plugin, main);
+        Scheduler.runForPlayer(plugin, id, main);
     }
 
     /** Runs on the main thread. */

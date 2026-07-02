@@ -188,14 +188,14 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         }
 
         // Update checker (async, 3s delay)
-        Bukkit.getScheduler().runTaskLaterAsynchronously(this, () -> {
+        dev.boondock.bsanticheat.util.Scheduler.runAsyncLater(this, () -> {
             new UpdateChecker(this).checkForUpdates().thenAccept(result -> {
                 if (result.isUpdateAvailable()) {
                     getLogger().warning("A new version is available: " + result.getLatestVersion()
                             + " (current: " + getDescription().getVersion() + "). " + result.getMessage());
                 }
             });
-        }, Constants.UPDATE_CHECKER_DELAY_TICKS);
+        }, Constants.UPDATE_CHECKER_DELAY_TICKS / 20L, java.util.concurrent.TimeUnit.SECONDS);
 
         getLogger().info("BSAntiCheat v" + getDescription().getVersion() + " enabled!");
     }

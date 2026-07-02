@@ -1,6 +1,7 @@
 package dev.boondock.bsanticheat.anticheat;
 
 import dev.boondock.bsanticheat.config.PluginConfig;
+import dev.boondock.bsanticheat.util.Scheduler;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 
@@ -18,7 +19,7 @@ public final class ServerLoad {
     private ServerLoad() {}
 
     public static void start(Plugin plugin) {
-        plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
+        Scheduler.runGlobalTimer(plugin, () -> {
             double[] tps = Bukkit.getTPS();
             if (tps != null && tps.length > 0) {
                 currentTps = tps[0];

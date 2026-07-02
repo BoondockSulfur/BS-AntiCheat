@@ -94,7 +94,7 @@ public class DiscordWebhook {
     private synchronized void startQueueProcessor() {
         if (processorRunning) return;
         processorRunning = true;
-        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, this::processQueue);
+        dev.boondock.bsanticheat.util.Scheduler.runAsync(plugin, this::processQueue);
     }
 
     private void processQueue() {

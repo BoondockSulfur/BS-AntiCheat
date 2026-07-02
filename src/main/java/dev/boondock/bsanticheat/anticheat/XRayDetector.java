@@ -120,8 +120,8 @@ public class XRayDetector implements Listener {
      * Also enforces size limits to prevent unbounded memory growth.
      */
     private void startPeriodicCleanup() {
-        // Run cleanup every 5 minutes
-        plugin.getServer().getScheduler().runTaskTimerAsynchronously(plugin, () -> {
+        // Run cleanup every 5 minutes (async, real-time interval)
+        dev.boondock.bsanticheat.util.Scheduler.runAsyncTimer(plugin, () -> {
             long cutoff = System.currentTimeMillis() - (config.xrayTimewindowSeconds() * 1000L);
             int totalCleaned = 0;
             int playersWithData = 0;
@@ -191,7 +191,8 @@ public class XRayDetector implements Listener {
                 plugin.getLogger().info(String.format("[XRay Cleanup] Removed %d old mining events, %d placed blocks. Active players: %d, Maps size: ore=%d, stone=%d",
                     totalCleaned, placedBlocksCleaned, playersWithData, playerOreMines.size(), playerStoneMines.size()));
             }
-        }, Constants.XRAY_CLEANUP_INTERVAL_TICKS, Constants.XRAY_CLEANUP_INTERVAL_TICKS);
+        }, Constants.XRAY_CLEANUP_INTERVAL_TICKS / 20L, Constants.XRAY_CLEANUP_INTERVAL_TICKS / 20L,
+                java.util.concurrent.TimeUnit.SECONDS);
     }
 
     public void setLuckPerms(LuckPermsHook luckPerms) {

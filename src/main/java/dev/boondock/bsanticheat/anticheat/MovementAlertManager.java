@@ -55,7 +55,7 @@ public class MovementAlertManager {
         this.discordWebhook = new DiscordWebhook(plugin, config, lang);
 
         // Schedule cleanup of old alerts every 10 minutes
-        Bukkit.getScheduler().runTaskTimer(plugin, this::cleanupOldAlerts, 12000L, 12000L);
+        dev.boondock.bsanticheat.util.Scheduler.runGlobalTimer(plugin, this::cleanupOldAlerts, 12000L, 12000L);
     }
 
     /**

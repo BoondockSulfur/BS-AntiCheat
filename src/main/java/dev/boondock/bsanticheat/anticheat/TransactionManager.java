@@ -5,6 +5,8 @@ import com.github.retrooper.packetevents.protocol.player.User;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerPing;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
+import dev.boondock.bsanticheat.util.Scheduler;
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
@@ -43,7 +45,7 @@ public class TransactionManager {
     private final Map<UUID, Boolean> markerLogged = new ConcurrentHashMap<>();
 
     private final AtomicInteger idGen = new AtomicInteger(1);
-    private int taskId = -1;
+    private ScheduledTask pingTask;
 
     private static final int MAX_PENDING_PER_PLAYER = 60;
 
@@ -55,11 +57,11 @@ public class TransactionManager {
 
     /** Begin sending a transaction ping to every online player each tick. */
     public void start() {
-        taskId = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, 20L, 1L).getTaskId();
+        pingTask = Scheduler.runGlobalTimer(plugin, this::tick, 20L, 1L);
     }
 
     public void stop() {
-        if (taskId != -1) Bukkit.getScheduler().cancelTask(taskId);
+        if (pingTask != null) pingTask.cancel();
     }
 
     private void tick() {

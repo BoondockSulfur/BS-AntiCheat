@@ -2,6 +2,7 @@ package dev.boondock.bsanticheat.anticheat;
 
 import dev.boondock.bsanticheat.api.ViolationEvent;
 import dev.boondock.bsanticheat.config.PluginConfig;
+import dev.boondock.bsanticheat.util.Scheduler;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
@@ -67,11 +68,8 @@ public class ViolationManager {
 
     private void fireViolationEvent(Player player, String checkType, int vl) {
         ViolationEvent event = new ViolationEvent(player, checkType, vl);
-        if (Bukkit.isPrimaryThread()) {
-            Bukkit.getPluginManager().callEvent(event);
-        } else {
-            Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(event));
-        }
+        // Fire on the global region (Folia-safe); on Paper this is the main thread.
+        Scheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(event));
     }
 
     /** Current (decayed) VL for a check type, without adding a violation. */
@@ -154,11 +152,8 @@ public class ViolationManager {
                 plugin.getLogger().warning("[Punishment] Failed to run command '" + command + "': " + e.getMessage());
             }
         };
-        if (Bukkit.isPrimaryThread()) {
-            task.run();
-        } else {
-            Bukkit.getScheduler().runTask(plugin, task);
-        }
+        // Console command dispatch on the global region (Folia-safe).
+        Scheduler.runGlobal(plugin, task);
     }
 
     /** Per-check violation-level state. */

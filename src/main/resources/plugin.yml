@@ -2,12 +2,15 @@ name: BSAntiCheat
 version: 1.0.0
 main: dev.boondock.bsanticheat.BSAntiCheat
 api-version: '1.21'
+folia-supported: true
 author: BoondockSulfur
 description: AntiCheat plugin with Movement and XRay detection for Paper 1.21.x
 softdepend:
   - LuckPerms
   - packetevents
   - PlaceholderAPI
+  - floodgate
+  - Geyser-Spigot
 
 commands:
   bsac:

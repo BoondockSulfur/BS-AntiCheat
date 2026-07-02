@@ -48,7 +48,7 @@ public class XRayAlertManager {
         this.discordWebhook = new DiscordWebhook(plugin, config, lang);
 
         // Schedule cleanup of old alerts every 10 minutes
-        Bukkit.getScheduler().runTaskTimer(plugin, this::cleanupOldAlerts, 12000L, 12000L);
+        dev.boondock.bsanticheat.util.Scheduler.runGlobalTimer(plugin, this::cleanupOldAlerts, 12000L, 12000L);
     }
 
     /**
@@ -94,7 +94,7 @@ public class XRayAlertManager {
             sendDiscordAlert(player, type, details, oreCount, oreBreakdown, locations);
 
             // Reset notification flag after 5 minutes
-            Bukkit.getScheduler().runTaskLater(plugin, () -> notifiedPlayers.remove(playerId), 6000L);
+            dev.boondock.bsanticheat.util.Scheduler.runGlobalLater(plugin, () -> notifiedPlayers.remove(playerId), 6000L);
         }
     }
 

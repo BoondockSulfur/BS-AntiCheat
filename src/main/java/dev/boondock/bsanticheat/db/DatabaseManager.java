@@ -4,7 +4,8 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.util.Constants;
-import org.bukkit.Bukkit;
+import dev.boondock.bsanticheat.util.Scheduler;
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import org.bukkit.plugin.Plugin;
 
 import java.io.File;
@@ -14,6 +15,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
 
 /**
  * SQLite database manager for BSAntiCheat.
@@ -24,8 +26,8 @@ public class DatabaseManager {
     private final PluginConfig config;
     private HikariDataSource ds;
     private final ConcurrentLinkedQueue<LogEntry> queue = new ConcurrentLinkedQueue<>();
-    private int taskId = -1;
-    private int cleanupTaskId = -1;
+    private ScheduledTask flushTask;
+    private ScheduledTask cleanupTask;
     private FallbackLogger fallbackLogger;
     private volatile boolean databaseAvailable = true;
     private int consecutiveFailures = 0;
@@ -60,20 +62,20 @@ public class DatabaseManager {
         run("CREATE INDEX IF NOT EXISTS idx_ac_logs_type_ts ON anticheat_logs(log_type, ts)");
         run("CREATE INDEX IF NOT EXISTS idx_ac_logs_ts ON anticheat_logs(ts)");
 
-        long periodTicks = Constants.DB_FLUSH_INTERVAL_SECONDS * 20L;
-        this.taskId = Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::flushBatchSafe, periodTicks, periodTicks).getTaskId();
+        this.flushTask = Scheduler.runAsyncTimer(plugin, this::flushBatchSafe,
+                Constants.DB_FLUSH_INTERVAL_SECONDS, Constants.DB_FLUSH_INTERVAL_SECONDS, TimeUnit.SECONDS);
         startAutoCleanup();
     }
 
     private void startAutoCleanup() {
         int retentionDays = config.databaseRetentionDays();
         if (retentionDays <= 0) return;
-        long initialDelay = 20L * 60 * 60;
-        long period = 20L * 60 * 60 * 24;
-        this.cleanupTaskId = Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
+        long initialDelaySec = 60L * 60;       // 1 hour
+        long periodSec = 60L * 60 * 24;        // 24 hours
+        this.cleanupTask = Scheduler.runAsyncTimer(plugin, () -> {
             try { cleanOldData(retentionDays); }
             catch (Exception e) { plugin.getLogger().severe("[Database] Auto-cleanup failed: " + e.getMessage()); }
-        }, initialDelay, period).getTaskId();
+        }, initialDelaySec, periodSec, TimeUnit.SECONDS);
     }
 
     public void logAsync(String type, double value, String description) {
@@ -138,13 +140,13 @@ public class DatabaseManager {
      * runs on the main thread with the total number of deleted rows.
      */
     public void deleteAntiCheatLogsAsync(String playerName, List<String> logTypePrefixes, java.util.function.IntConsumer callback) {
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+        Scheduler.runAsync(plugin, () -> {
             int deleted = 0;
             for (String prefix : logTypePrefixes) {
                 deleted += deleteAntiCheatLogs(playerName, prefix);
             }
             int total = deleted;
-            Bukkit.getScheduler().runTask(plugin, () -> callback.accept(total));
+            Scheduler.runGlobal(plugin, () -> callback.accept(total));
         });
     }
 
@@ -173,8 +175,8 @@ public class DatabaseManager {
 
     public void shutdown() {
         try {
-            if (taskId != -1) Bukkit.getScheduler().cancelTask(taskId);
-            if (cleanupTaskId != -1) Bukkit.getScheduler().cancelTask(cleanupTaskId);
+            if (flushTask != null) flushTask.cancel();
+            if (cleanupTask != null) cleanupTask.cancel();
             // One flush writes at most one batch — loop until the queue is drained,
             // bailing out when no progress is made (DB not accepting writes).
             do {

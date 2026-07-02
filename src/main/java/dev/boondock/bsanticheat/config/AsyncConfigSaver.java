@@ -42,8 +42,8 @@ public class AsyncConfigSaver {
 
         CompletableFuture<Void> future = new CompletableFuture<>();
 
-        // Schedule save on main thread (Bukkit's saveConfig is NOT thread-safe!)
-        plugin.getServer().getScheduler().runTask(plugin, () -> {
+        // Schedule save on the global region (Bukkit's saveConfig is NOT thread-safe!)
+        dev.boondock.bsanticheat.util.Scheduler.runGlobal(plugin, () -> {
             try {
                 // Reset pending flag before saving — any new request after this
                 // point will set it again and trigger a follow-up save
@@ -54,9 +54,7 @@ public class AsyncConfigSaver {
                 // Check if another save was requested during this save
                 if (pendingSave.compareAndSet(true, false)) {
                     // Schedule follow-up save
-                    plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-                        plugin.saveConfig();
-                    }, 20L); // 1 second delay
+                    dev.boondock.bsanticheat.util.Scheduler.runGlobalLater(plugin, () -> plugin.saveConfig(), 20L);
                 }
 
                 future.complete(null);

@@ -22,6 +22,13 @@ All notable changes to BSAntiCheat will be documented in this file.
   baseline stays clean.
 
 ### Added
+- Folia support (phase 4.3): a `util.Scheduler` abstraction over Paper's region/async
+  scheduler API replaces every `Bukkit.getScheduler()` call — async work stays async,
+  global tasks use the global region, and per-player packet flags run on the owning
+  entity's region thread. `folia-supported: true`. Verified end-to-end against a real
+  Folia 1.21.11 server (harness via `BSAC_SERVER_JAR=folia.jar`): clean enable, all core
+  scenarios green, zero scheduler exceptions — identical to Paper. Behaviour on Paper is
+  unchanged (the region API runs on the main thread there).
 - Configurable calibration thresholds (`anticheat.thresholds.*`, phase 4.4): the consecutive
   violation counts and primary numeric thresholds for the movement-extra, vehicle, combat-extra
   and inventory checks are now tunable in config.yml (25 values) and applied via `/bsac reload`
