@@ -148,9 +148,9 @@ anticheat:
   # (bridging/towering "blind"), sustained over a few placements.
   scaffold_max_angle: 80.0
 
-  # Packet-level: max ATTACKS per second (counts attack packets, not arm swings, so mining
-  # never false-flags). Legit fast clickers reach ~14; autoclickers usually exceed this.
-  autoclicker_max_cps: 16
+  # Packet-level: max clicks per second from arm-swings (mining swings are excluded).
+  # Skilled humans reach ~17-20 (butterfly/jitter); autoclickers usually exceed this.
+  autoclicker_max_cps: 20
   # AutoClicker pattern analysis (EXPERIMENTAL, off by default): flags overly consistent
   # attack intervals. Can false-positive on held attacks; calibrate with debug_mode before
   # enabling.
