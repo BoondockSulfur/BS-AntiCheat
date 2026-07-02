@@ -5,6 +5,7 @@ import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
+import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
@@ -16,6 +17,7 @@ import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.plugin.Plugin;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -153,17 +155,33 @@ public class XRayDetector implements Listener {
             playerPlacedBlocks.entrySet().removeIf(entry -> entry.getValue() < placedBlockCutoff);
             int placedBlocksCleaned = placedBlocksBeforeCleanup - playerPlacedBlocks.size();
 
-            // Enforce size limits to prevent memory issues on large servers
+            // Enforce size limits to prevent memory issues on large servers.
+            // Evict only the entries with the oldest recent activity — clearing the
+            // whole map would throw away the evidence of every active suspect at once.
             boolean hitLimit = false;
             if (playerOreMines.size() > Constants.XRAY_MAX_PLAYER_ENTRIES) {
-                plugin.getLogger().warning("[XRay] playerOreMines exceeded size limit (" + playerOreMines.size() + " > " + Constants.XRAY_MAX_PLAYER_ENTRIES + "), clearing oldest entries");
-                // Clear players without recent activity
-                playerOreMines.clear();
+                int toRemove = playerOreMines.size() - Constants.XRAY_MAX_PLAYER_ENTRIES;
+                plugin.getLogger().warning("[XRay] playerOreMines exceeded size limit (" + playerOreMines.size() + " > " + Constants.XRAY_MAX_PLAYER_ENTRIES + "), evicting " + toRemove + " oldest entries");
+                playerOreMines.entrySet().stream()
+                    .sorted(Comparator.comparingLong(e -> newestOreTimestamp(e.getValue())))
+                    .limit(toRemove)
+                    .map(Map.Entry::getKey)
+                    .toList()
+                    .forEach(playerOreMines::remove);
                 hitLimit = true;
             }
             if (playerStoneMines.size() > Constants.XRAY_MAX_PLAYER_ENTRIES) {
-                plugin.getLogger().warning("[XRay] playerStoneMines exceeded size limit (" + playerStoneMines.size() + " > " + Constants.XRAY_MAX_PLAYER_ENTRIES + "), clearing entries");
-                playerStoneMines.clear();
+                int toRemove = playerStoneMines.size() - Constants.XRAY_MAX_PLAYER_ENTRIES;
+                plugin.getLogger().warning("[XRay] playerStoneMines exceeded size limit (" + playerStoneMines.size() + " > " + Constants.XRAY_MAX_PLAYER_ENTRIES + "), evicting " + toRemove + " oldest entries");
+                playerStoneMines.entrySet().stream()
+                    .sorted(Comparator.comparingLong(e -> {
+                        Long last = e.getValue().peekLast();
+                        return last != null ? last : 0L;
+                    }))
+                    .limit(toRemove)
+                    .map(Map.Entry::getKey)
+                    .toList()
+                    .forEach(playerStoneMines::remove);
                 hitLimit = true;
             }
 
@@ -312,6 +330,12 @@ public class XRayDetector implements Listener {
             return;
         }
 
+        // Creative/Spectator are exempt (consistent with all other checks) — a builder
+        // instamining an area with ores would otherwise be flagged guaranteed.
+        if (player.getGameMode() == GameMode.CREATIVE || player.getGameMode() == GameMode.SPECTATOR) {
+            return;
+        }
+
         // Track stone mining (time-windowed)
         if (STONE_TYPES.contains(type)) {
             long now = System.currentTimeMillis();
@@ -411,8 +435,10 @@ public class XRayDetector implements Listener {
                     " | Restricted World: " + isInRestrictedWorld);
             }
 
-            // Check for suspicious patterns (normal XRay detection)
-            checkSuspiciousPattern(player, playerId, mines);
+            // Check for suspicious patterns (normal XRay detection).
+            // Pass an immutable snapshot: the async cleanup task shrinks the live
+            // COW list concurrently, which would break index-based reads.
+            checkSuspiciousPattern(player, playerId, List.copyOf(mines));
         } else if (VALUABLE_ORES.contains(type) && isOreExcluded(type)) {
             if (config.debugMode()) {
                 plugin.getLogger().info("[XRay] " + player.getName() + " mined excluded ore: " + type.name());
@@ -466,6 +492,12 @@ public class XRayDetector implements Listener {
             if (database != null) {
                 database.logAsync("anticheat_xray", mines.size(), message);
             }
+
+            // Reset evidence after flagging — otherwise every further ore break in the
+            // window re-triggers a violation for the same mining events and a single
+            // (possibly legitimate) threshold crossing walks through all punishment tiers.
+            resetEvidence(playerId);
+            return;
         } else if (config.debugMode()) {
             plugin.getLogger().info("[XRay] " + player.getName() + " - Kein Schwellenwert ueberschritten. Breakdown: " + oreBreakdown);
         }
@@ -491,6 +523,9 @@ public class XRayDetector implements Listener {
                 if (database != null) {
                     database.logAsync("anticheat_xray_ratio", relevantOreCount, message);
                 }
+
+                resetEvidence(playerId);
+                return;
             }
         }
 
@@ -517,8 +552,22 @@ public class XRayDetector implements Listener {
                 if (database != null) {
                     database.logAsync("anticheat_xray_rare_ores", rareMines.size(), message);
                 }
+
+                resetEvidence(playerId);
             }
         }
+    }
+
+    /**
+     * Clear a player's collected mining evidence after a violation was flagged, so
+     * detection restarts fresh instead of re-flagging the same events on every
+     * subsequent block break within the time window.
+     */
+    private void resetEvidence(UUID playerId) {
+        List<OreMineEvent> mines = playerOreMines.get(playerId);
+        if (mines != null) mines.clear();
+        ConcurrentLinkedDeque<Long> stone = playerStoneMines.get(playerId);
+        if (stone != null) stone.clear();
     }
 
     /**
@@ -651,6 +700,12 @@ public class XRayDetector implements Listener {
     public void cleanup(UUID playerId) {
         playerOreMines.remove(playerId);
         playerStoneMines.remove(playerId);
+    }
+
+    /** Timestamp of a player's most recent ore mine, 0 if none (snapshot-safe for COW lists). */
+    private static long newestOreTimestamp(List<OreMineEvent> mines) {
+        OreMineEvent[] arr = mines.toArray(new OreMineEvent[0]);
+        return arr.length == 0 ? 0L : arr[arr.length - 1].timestamp;
     }
 
     /**
