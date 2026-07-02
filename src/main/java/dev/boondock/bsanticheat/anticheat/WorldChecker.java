@@ -2,6 +2,7 @@ package dev.boondock.bsanticheat.anticheat;
 
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
+import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
@@ -39,6 +40,7 @@ public class WorldChecker implements Listener {
     private final DatabaseManager database;
     private final LanguageManager lang;
     private LuckPermsHook luckPerms;
+    private GeyserHook geyser;
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
 
@@ -66,6 +68,10 @@ public class WorldChecker implements Listener {
 
     public void setLuckPerms(LuckPermsHook luckPerms) {
         this.luckPerms = luckPerms;
+    }
+
+    public void setGeyser(GeyserHook geyser) {
+        this.geyser = geyser;
     }
 
     public void setAlertManager(MovementAlertManager alertManager) {
@@ -101,7 +107,7 @@ public class WorldChecker implements Listener {
         Player player = event.getPlayer();
         UUID id = player.getUniqueId();
         DigState dig = digStart.remove(id);
-        if (Exemptions.isExempt(player, config, luckPerms)) return;
+        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
 
         // Nuker: too many blocks per second
         if (config.nukerDetectionEnabled()) {
@@ -147,7 +153,7 @@ public class WorldChecker implements Listener {
         if (!config.worldChecksEnabled()) return;
         if (ServerLoad.isLagging(config)) return;
         Player player = event.getPlayer();
-        if (Exemptions.isExempt(player, config, luckPerms)) return;
+        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
         UUID id = player.getUniqueId();
 
         // FastPlace: too many blocks per second

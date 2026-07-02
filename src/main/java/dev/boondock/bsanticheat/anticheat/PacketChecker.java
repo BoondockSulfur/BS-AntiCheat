@@ -12,6 +12,7 @@ import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPo
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientUpdateSign;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
+import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
@@ -52,6 +53,7 @@ public class PacketChecker implements PacketListener {
     private final DatabaseManager database;
     private final LanguageManager lang;
     private LuckPermsHook luckPerms;
+    private GeyserHook geyser;
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
     private TransactionManager transactionManager;
@@ -83,6 +85,10 @@ public class PacketChecker implements PacketListener {
 
     public void setLuckPerms(LuckPermsHook luckPerms) {
         this.luckPerms = luckPerms;
+    }
+
+    public void setGeyser(GeyserHook geyser) {
+        this.geyser = geyser;
     }
 
     public void setAlertManager(MovementAlertManager alertManager) {
@@ -411,7 +417,7 @@ public class PacketChecker implements PacketListener {
         }
         Runnable main = () -> {
             Player player = Bukkit.getPlayer(id);
-            if (player == null || Exemptions.isExempt(player, config, luckPerms)) return;
+            if (player == null || Exemptions.isExempt(player, config, luckPerms, geyser)) return;
             if (alertManager != null) {
                 alertManager.addAlert(player, type, details, value, player.getLocation());
             } else if (config.debugMode()) {
@@ -429,7 +435,7 @@ public class PacketChecker implements PacketListener {
     private void flagAutoClicker(UUID id, int cps, int maxCps) {
         Player player = Bukkit.getPlayer(id);
         if (player == null) return;
-        if (Exemptions.isExempt(player, config, luckPerms)) {
+        if (Exemptions.isExempt(player, config, luckPerms, geyser)) {
             if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] flag skipped: " + player.getName() + " is exempt");
             return;
         }
@@ -453,7 +459,7 @@ public class PacketChecker implements PacketListener {
     private void flagBadPackets(UUID id, float pitch) {
         Player player = Bukkit.getPlayer(id);
         if (player == null) return;
-        if (Exemptions.isExempt(player, config, luckPerms)) return;
+        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
 
         String details = lang.format("alert.badpackets", pitch);
         if (database != null) {
@@ -473,7 +479,7 @@ public class PacketChecker implements PacketListener {
     private void flagTimer(UUID id, long balance) {
         Player player = Bukkit.getPlayer(id);
         if (player == null) return;
-        if (Exemptions.isExempt(player, config, luckPerms)) return;
+        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
 
         String details = lang.format("alert.timer", balance);
         if (database != null) {
@@ -493,7 +499,7 @@ public class PacketChecker implements PacketListener {
     private void flagRotation(UUID id, long measuredGcd) {
         Player player = Bukkit.getPlayer(id);
         if (player == null) return;
-        if (Exemptions.isExempt(player, config, luckPerms)) return;
+        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
 
         String details = lang.format("alert.killaura_rotation", measuredGcd);
         if (database != null) {
@@ -513,7 +519,7 @@ public class PacketChecker implements PacketListener {
     private void flagAimSnap(UUID id, double angle) {
         Player player = Bukkit.getPlayer(id);
         if (player == null) return;
-        if (Exemptions.isExempt(player, config, luckPerms)) return;
+        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
 
         String details = lang.format("alert.aimsnap", angle);
         if (database != null) {

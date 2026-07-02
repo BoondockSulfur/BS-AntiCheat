@@ -2,6 +2,7 @@ package dev.boondock.bsanticheat.anticheat;
 
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
+import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
@@ -40,6 +41,7 @@ public class CombatChecker implements Listener {
     private final DatabaseManager database;
     private final LanguageManager lang;
     private LuckPermsHook luckPerms;
+    private GeyserHook geyser;
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
 
@@ -63,6 +65,10 @@ public class CombatChecker implements Listener {
         this.luckPerms = luckPerms;
     }
 
+    public void setGeyser(GeyserHook geyser) {
+        this.geyser = geyser;
+    }
+
     public void setAlertManager(MovementAlertManager alertManager) {
         this.alertManager = alertManager;
     }
@@ -84,7 +90,7 @@ public class CombatChecker implements Listener {
         if (event.getCause() != EntityDamageEvent.DamageCause.ENTITY_ATTACK) return;
         if (!(event.getDamager() instanceof Player attacker)) return;
         if (!(event.getEntity() instanceof LivingEntity victim)) return;
-        if (Exemptions.isExempt(attacker, config, luckPerms)) return;
+        if (Exemptions.isExempt(attacker, config, luckPerms, geyser)) return;
         if (attacker.getWorld() != victim.getWorld()) return;
 
         // Don't run combat checks against NPCs (Citizens tags them with "NPC" metadata) —

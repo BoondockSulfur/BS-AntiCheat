@@ -2,6 +2,7 @@ package dev.boondock.bsanticheat.anticheat;
 
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
+import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
@@ -52,6 +53,7 @@ public class VehicleChecker implements Listener {
     private final DatabaseManager database;
     private final LanguageManager lang;
     private LuckPermsHook luckPerms;
+    private GeyserHook geyser;
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
     private TransactionManager transactionManager;
@@ -69,6 +71,10 @@ public class VehicleChecker implements Listener {
 
     public void setLuckPerms(LuckPermsHook luckPerms) {
         this.luckPerms = luckPerms;
+    }
+
+    public void setGeyser(GeyserHook geyser) {
+        this.geyser = geyser;
     }
 
     public void setAlertManager(MovementAlertManager alertManager) {
@@ -112,7 +118,7 @@ public class VehicleChecker implements Listener {
         Location to = event.getTo();
         if (!from.getWorld().equals(to.getWorld())) return;
 
-        if (Exemptions.isExempt(player, config, luckPerms)) return;
+        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
         if (ServerLoad.isLagging(config)) {
             consecutiveBoatFly.remove(playerId);
             consecutiveVehicleSpeed.remove(playerId);

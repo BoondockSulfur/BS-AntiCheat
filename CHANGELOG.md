@@ -22,6 +22,10 @@ All notable changes to BSAntiCheat will be documented in this file.
   baseline stays clean.
 
 ### Added
+- Bedrock exemption (`exempt_bedrock_players`, phase 4.1): a `GeyserHook` detects players
+  connecting through Geyser/Floodgate (Floodgate API via reflection, UUID-prefix fallback,
+  gated on a Geyser/Floodgate plugin being present) and exempts them from all checks —
+  their client physics differ and would otherwise be flagged. Fails safe to "not Bedrock".
 - Elytra/Riptide speed-ceiling check (`elytra_detection`) — previously skipped entirely
 - VehicleChecker (`vehicle_checks`): Boat-Fly and per-type vehicle speed checks via
   VehicleMoveEvent, closing the vehicle gap (PlayerMoveEvent doesn't fire while riding)

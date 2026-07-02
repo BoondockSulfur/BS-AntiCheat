@@ -24,6 +24,11 @@ anticheat:
   # so server lag spikes don't cause false positives.
   lag_exempt_tps: 18.0
 
+  # Exempt Bedrock players connecting through Geyser/Floodgate. Their client uses
+  # different movement physics (jump/sprint/step), which a Java-tuned anticheat would
+  # otherwise flag. Requires the Geyser/Floodgate plugin to be installed to take effect.
+  exempt_bedrock_players: true
+
   # Detection Toggles
   xray_detection: true
   movement_checks: true

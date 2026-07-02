@@ -7,6 +7,7 @@ import dev.boondock.bsanticheat.config.ConfigMigrator;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.integration.BSACPlaceholders;
+import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
@@ -47,6 +48,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
     private PacketListenerCommon packetListener;
     private boolean packetEventsActive = false;
     private LuckPermsHook luckPerms;
+    private GeyserHook geyser;
 
     @Override
     public void onEnable() {
@@ -116,6 +118,15 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
             inventoryChecker.setLuckPerms(luckPerms);
         }
 
+        // Geyser/Floodgate: exempt Bedrock players from checks (they use different physics)
+        geyser = GeyserHook.tryHook(this);
+        movementChecker.setGeyser(geyser);
+        xrayDetector.setGeyser(geyser);
+        combatChecker.setGeyser(geyser);
+        worldChecker.setGeyser(geyser);
+        vehicleChecker.setGeyser(geyser);
+        inventoryChecker.setGeyser(geyser);
+
         // Register event listeners
         Bukkit.getPluginManager().registerEvents(movementChecker, this);
         Bukkit.getPluginManager().registerEvents(xrayDetector, this);
@@ -132,6 +143,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
             if (PacketEvents.getAPI() != null && PacketEvents.getAPI().isInitialized()) {
                 packetChecker = new PacketChecker(this, configAdapter, database, lang);
                 packetChecker.setLuckPerms(luckPerms);
+                packetChecker.setGeyser(geyser);
                 packetChecker.setAlertManager(movementAlertManager);
                 packetChecker.setViolationManager(violationManager);
 

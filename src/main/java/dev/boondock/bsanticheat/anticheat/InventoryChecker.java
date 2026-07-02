@@ -2,6 +2,7 @@ package dev.boondock.bsanticheat.anticheat;
 
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
+import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
@@ -50,6 +51,7 @@ public class InventoryChecker implements Listener {
     private final DatabaseManager database;
     private final LanguageManager lang;
     private LuckPermsHook luckPerms;
+    private GeyserHook geyser;
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
 
@@ -77,6 +79,10 @@ public class InventoryChecker implements Listener {
 
     public void setLuckPerms(LuckPermsHook luckPerms) {
         this.luckPerms = luckPerms;
+    }
+
+    public void setGeyser(GeyserHook geyser) {
+        this.geyser = geyser;
     }
 
     public void setAlertManager(MovementAlertManager alertManager) {
@@ -138,7 +144,7 @@ public class InventoryChecker implements Listener {
             return;
         }
 
-        if (Exemptions.isExempt(player, config, luckPerms)) return;
+        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
 
         int c = consecutiveInvMove.merge(id, 1, Integer::sum);
         if (c >= Constants.INVENTORYMOVE_VIOLATIONS) {
@@ -164,7 +170,7 @@ public class InventoryChecker implements Listener {
                 long sincePop = System.currentTimeMillis() - pop;
                 if (sincePop <= Constants.AUTOTOTEM_MAX_REACTION_MS && isTotemToOffhand(event)) {
                     lastTotemPop.remove(id);
-                    if (!Exemptions.isExempt(player, config, luckPerms)) {
+                    if (!Exemptions.isExempt(player, config, luckPerms, geyser)) {
                         handleViolation(player, "AUTOTOTEM",
                                 lang.format("alert.autototem", sincePop), sincePop, player.getLocation());
                     }
@@ -189,7 +195,7 @@ public class InventoryChecker implements Listener {
         long interval = now - last;
         if (interval <= Constants.CHESTSTEALER_MAX_INTERVAL_MS) {
             int streak = fastClickStreak.merge(id, 1, Integer::sum);
-            if (streak >= Constants.CHESTSTEALER_MIN_CLICKS && !Exemptions.isExempt(player, config, luckPerms)) {
+            if (streak >= Constants.CHESTSTEALER_MIN_CLICKS && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
                 handleViolation(player, "CHESTSTEALER",
                         lang.format("alert.cheststealer", streak + 1, interval), streak, player.getLocation());
                 fastClickStreak.put(id, 0);
@@ -237,7 +243,7 @@ public class InventoryChecker implements Listener {
         // Fastest legit consumable (dried kelp) takes ~800ms; everything else 1.6s+.
         if (interval < Constants.FASTUSE_MIN_INTERVAL_MS) {
             int c = consecutiveFastUse.merge(id, 1, Integer::sum);
-            if (c >= Constants.FASTUSE_VIOLATIONS && !Exemptions.isExempt(player, config, luckPerms)) {
+            if (c >= Constants.FASTUSE_VIOLATIONS && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
                 handleViolation(player, "FASTUSE",
                         lang.format("alert.fastuse", interval, Constants.FASTUSE_MIN_INTERVAL_MS),
                         interval, player.getLocation());
@@ -268,7 +274,7 @@ public class InventoryChecker implements Listener {
 
         if (interval < Constants.BOWSPAM_MIN_INTERVAL_MS) {
             int c = consecutiveBowSpam.merge(id, 1, Integer::sum);
-            if (c >= Constants.BOWSPAM_VIOLATIONS && !Exemptions.isExempt(player, config, luckPerms)) {
+            if (c >= Constants.BOWSPAM_VIOLATIONS && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
                 handleViolation(player, "BOWSPAM",
                         lang.format("alert.bowspam", interval), interval, player.getLocation());
                 consecutiveBowSpam.put(id, 0);

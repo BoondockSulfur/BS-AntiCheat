@@ -113,6 +113,9 @@ public class PluginConfig {
     // Lag handling: skip checks while recent TPS is below this (avoids lag false positives)
     public double lagExemptTps() { return cfg.getDouble("anticheat.lag_exempt_tps", 18.0); }
 
+    // Exempt Bedrock (Geyser/Floodgate) players from checks — their client physics differ
+    public boolean exemptBedrockPlayers() { return cfg.getBoolean("anticheat.exempt_bedrock_players", true); }
+
     // Database (SQLite only)
     public String sqliteFile() {
         String file = cfg.getString("database.sqlite_file", Constants.DEFAULT_SQLITE_PATH);

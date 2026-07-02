@@ -2,6 +2,7 @@ package dev.boondock.bsanticheat.anticheat;
 
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
+import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
@@ -43,6 +44,7 @@ public class XRayDetector implements Listener {
     private final DatabaseManager database;
     private final LanguageManager lang;
     private LuckPermsHook luckPerms;
+    private GeyserHook geyser;
     private XRayAlertManager alertManager;
     private ViolationManager violationManager;
 
@@ -194,6 +196,10 @@ public class XRayDetector implements Listener {
 
     public void setLuckPerms(LuckPermsHook luckPerms) {
         this.luckPerms = luckPerms;
+    }
+
+    public void setGeyser(GeyserHook geyser) {
+        this.geyser = geyser;
     }
 
     public void setAlertManager(XRayAlertManager alertManager) {
@@ -635,6 +641,12 @@ public class XRayDetector implements Listener {
     private boolean isPlayerWhitelisted(Player player) {
         String name = player.getName();
         boolean debug = config.debugMode();
+
+        // Bedrock (Geyser/Floodgate) players use different mining timing/instamine
+        if (Exemptions.isBedrockExempt(player, config, geyser)) {
+            if (debug) plugin.getLogger().info("[XRay] " + name + " ist Bedrock (Geyser) -> übersprungen");
+            return true;
+        }
 
         // Check UUID whitelist
         List<String> whitelistPlayers = config.anticheatWhitelistPlayers();

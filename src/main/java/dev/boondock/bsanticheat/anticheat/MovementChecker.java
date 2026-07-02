@@ -2,6 +2,7 @@ package dev.boondock.bsanticheat.anticheat;
 
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
+import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
@@ -39,6 +40,7 @@ public class MovementChecker implements Listener {
     private final DatabaseManager database;
     private final LanguageManager lang;
     private LuckPermsHook luckPerms;
+    private GeyserHook geyser;
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
     private TransactionManager transactionManager;
@@ -86,6 +88,10 @@ public class MovementChecker implements Listener {
 
     public void setLuckPerms(LuckPermsHook luckPerms) {
         this.luckPerms = luckPerms;
+    }
+
+    public void setGeyser(GeyserHook geyser) {
+        this.geyser = geyser;
     }
 
     public void setAlertManager(MovementAlertManager alertManager) {
@@ -831,6 +837,9 @@ public class MovementChecker implements Listener {
      * Check if player is whitelisted (UUID or LuckPerms group).
      */
     public boolean isPlayerWhitelisted(Player player) {
+        // Bedrock (Geyser/Floodgate) players use different movement physics
+        if (Exemptions.isBedrockExempt(player, config, geyser)) return true;
+
         // Check UUID whitelist
         List<String> whitelistPlayers = config.anticheatWhitelistPlayers();
         if (whitelistPlayers.contains(player.getUniqueId().toString())) {
