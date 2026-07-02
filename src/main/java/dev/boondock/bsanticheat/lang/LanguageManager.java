@@ -19,7 +19,9 @@ import java.util.Map;
 public class LanguageManager {
 
     private final JavaPlugin plugin;
-    private final Map<String, String> messages = new HashMap<>();
+    // volatile + atomic swap: messages are read from async threads (e.g. the Discord
+    // queue processor) while /bsac reload rebuilds the map on the main thread.
+    private volatile Map<String, String> messages = Map.of();
     private String currentLanguage;
 
     // Supported languages
@@ -36,7 +38,6 @@ public class LanguageManager {
      */
     public void loadLanguage(String language) {
         this.currentLanguage = language;
-        messages.clear();
 
         // Create lang folder if it doesn't exist
         File langFolder = new File(plugin.getDataFolder(), "lang");
@@ -77,14 +78,16 @@ public class LanguageManager {
         // Reload after merge
         langConfig = YamlConfiguration.loadConfiguration(langFile);
 
-        // Load all messages into the map
+        // Build the new map completely, then swap — readers never see a half-filled map
+        Map<String, String> loaded = new HashMap<>();
         for (String key : langConfig.getKeys(true)) {
             if (langConfig.isString(key)) {
-                messages.put(key, langConfig.getString(key));
+                loaded.put(key, langConfig.getString(key));
             }
         }
+        this.messages = loaded;
 
-        plugin.getLogger().info("[Lang] Loaded language: " + language + " (" + messages.size() + " messages)");
+        plugin.getLogger().info("[Lang] Loaded language: " + language + " (" + loaded.size() + " messages)");
     }
 
     /**

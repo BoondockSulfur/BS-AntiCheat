@@ -61,9 +61,11 @@ public class XRayAlertsCommand implements CommandExecutor, TabCompleter {
         // Clear specific player
         if (action.equals("clear") && args.length >= 2) {
             String playerName = args[1];
-            OfflinePlayer target = Bukkit.getOfflinePlayer(playerName);
+            // Cache-only lookup — getOfflinePlayer(String) does a blocking Mojang
+            // web request on the main thread for names the server doesn't know.
+            OfflinePlayer target = Bukkit.getOfflinePlayerIfCached(playerName);
 
-            if (target.hasPlayedBefore() || target.isOnline()) {
+            if (target != null && (target.hasPlayedBefore() || target.isOnline())) {
                 alertManager.clearAlerts(target.getUniqueId());
 
                 // Check for --db flag to also delete database entries
@@ -71,10 +73,10 @@ public class XRayAlertsCommand implements CommandExecutor, TabCompleter {
                 if (clearDb) {
                     DatabaseManager db = plugin.database();
                     if (db != null) {
-                        int deleted = db.deleteAntiCheatLogs(playerName, "anticheat_xray")
-                                + db.deleteAntiCheatLogs(playerName, "anticheat_restricted_zone");
-                        sender.sendMessage(lang().get("xray.db_cleared",
-                                "%player%", playerName, "%count%", String.valueOf(deleted)));
+                        db.deleteAntiCheatLogsAsync(playerName,
+                                List.of("anticheat_xray", "anticheat_restricted_zone"),
+                                deleted -> sender.sendMessage(lang().get("xray.db_cleared",
+                                        "%player%", playerName, "%count%", String.valueOf(deleted))));
                     }
                 } else {
                     sender.sendMessage(lang().get("xray.alerts_cleared_player", "%player%", playerName));
@@ -86,11 +88,11 @@ public class XRayAlertsCommand implements CommandExecutor, TabCompleter {
             return true;
         }
 
-        // Show alerts for specific player
+        // Show alerts for specific player (cache-only lookup, see above)
         String playerName = args[0];
-        OfflinePlayer target = Bukkit.getOfflinePlayer(playerName);
+        OfflinePlayer target = Bukkit.getOfflinePlayerIfCached(playerName);
 
-        if (!target.hasPlayedBefore() && !target.isOnline()) {
+        if (target == null || (!target.hasPlayedBefore() && !target.isOnline())) {
             sender.sendMessage(lang().get("general.player_not_found", "%player%", playerName));
             return true;
         }

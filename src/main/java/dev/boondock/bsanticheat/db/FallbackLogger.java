@@ -74,6 +74,20 @@ public class FallbackLogger {
             return; // Already writing
         }
 
+        // During plugin disable the scheduler rejects new tasks with an
+        // IllegalPluginAccessException (which would abort the caller's shutdown
+        // sequence) — write synchronously instead.
+        if (!plugin.isEnabled()) {
+            try {
+                flush();
+            } catch (IOException e) {
+                plugin.getLogger().severe("[Fallback] Failed to write to fallback log: " + e.getMessage());
+            } finally {
+                isWriting.set(false);
+            }
+            return;
+        }
+
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
                 flush();

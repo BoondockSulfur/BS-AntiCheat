@@ -70,11 +70,11 @@ public class ACWhitelistCommand implements CommandExecutor, TabCompleter {
             return;
         }
 
-        // It's a player
-        @SuppressWarnings("deprecation")
-        OfflinePlayer player = Bukkit.getOfflinePlayer(target);
+        // It's a player. Cache-only lookup — getOfflinePlayer(String) does a blocking
+        // Mojang web request on the main thread for names the server doesn't know.
+        OfflinePlayer player = Bukkit.getOfflinePlayerIfCached(target);
 
-        if (player == null || !player.hasPlayedBefore()) {
+        if (player == null || (!player.hasPlayedBefore() && !player.isOnline())) {
             sender.sendMessage(lang().get("general.player_not_found", "%player%", target));
             return;
         }
@@ -99,9 +99,8 @@ public class ACWhitelistCommand implements CommandExecutor, TabCompleter {
             return;
         }
 
-        // It's a player
-        @SuppressWarnings("deprecation")
-        OfflinePlayer player = Bukkit.getOfflinePlayer(target);
+        // It's a player (cache-only lookup, see handleAdd)
+        OfflinePlayer player = Bukkit.getOfflinePlayerIfCached(target);
 
         if (player == null) {
             sender.sendMessage(lang().get("general.player_not_found", "%player%", target));

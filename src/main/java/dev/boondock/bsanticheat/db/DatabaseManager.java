@@ -97,11 +97,11 @@ public class DatabaseManager {
                 databaseAvailable = false;
             }
             if (fallbackLogger != null && !databaseAvailable) {
-                List<LogEntry> failedEntries = new ArrayList<>(queue);
-                for (LogEntry entry : failedEntries) {
+                // Drain via poll() — copy+clear would drop entries added in between
+                LogEntry entry;
+                while ((entry = queue.poll()) != null) {
                     fallbackLogger.log(entry.type(), entry.value(), entry.description());
                 }
-                queue.clear();
             }
         }
     }
@@ -109,7 +109,9 @@ public class DatabaseManager {
     private void flushBatch() throws SQLException {
         List<LogEntry> batch = new ArrayList<>();
         LogEntry e;
-        while ((e = queue.poll()) != null && batch.size() < Constants.DB_MAX_BATCH_SIZE) {
+        // Size check BEFORE poll() — the other way round the entry that overflows
+        // the batch is already removed from the queue and silently lost.
+        while (batch.size() < Constants.DB_MAX_BATCH_SIZE && (e = queue.poll()) != null) {
             batch.add(e);
         }
         if (batch.isEmpty()) return;
@@ -122,7 +124,28 @@ public class DatabaseManager {
                 ps.addBatch();
             }
             ps.executeBatch();
+        } catch (SQLException ex) {
+            // Hand the polled entries back — otherwise a failed insert loses the whole
+            // batch and the fallback logger only ever sees what was left in the queue.
+            queue.addAll(batch);
+            throw ex;
         }
+    }
+
+    /**
+     * Delete log entries asynchronously — the synchronous variant can block up to the
+     * pool connection timeout on the main thread when the pool is busy. The callback
+     * runs on the main thread with the total number of deleted rows.
+     */
+    public void deleteAntiCheatLogsAsync(String playerName, List<String> logTypePrefixes, java.util.function.IntConsumer callback) {
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            int deleted = 0;
+            for (String prefix : logTypePrefixes) {
+                deleted += deleteAntiCheatLogs(playerName, prefix);
+            }
+            int total = deleted;
+            Bukkit.getScheduler().runTask(plugin, () -> callback.accept(total));
+        });
     }
 
     public int deleteAntiCheatLogs(String playerName, String logTypePrefix) {
@@ -152,7 +175,20 @@ public class DatabaseManager {
         try {
             if (taskId != -1) Bukkit.getScheduler().cancelTask(taskId);
             if (cleanupTaskId != -1) Bukkit.getScheduler().cancelTask(cleanupTaskId);
-            flushBatchSafe();
+            // One flush writes at most one batch — loop until the queue is drained,
+            // bailing out when no progress is made (DB not accepting writes).
+            do {
+                int before = queue.size();
+                flushBatchSafe();
+                if (queue.size() >= before && !queue.isEmpty()) break;
+            } while (!queue.isEmpty());
+            // Last resort: never drop what is still queued at shutdown
+            if (!queue.isEmpty() && fallbackLogger != null) {
+                LogEntry le;
+                while ((le = queue.poll()) != null) {
+                    fallbackLogger.log(le.type(), le.value(), le.description());
+                }
+            }
             if (fallbackLogger != null) fallbackLogger.shutdown();
         } finally {
             if (ds != null && !ds.isClosed()) ds.close();

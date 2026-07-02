@@ -54,15 +54,22 @@
       <artifactId>HikariCP</artifactId>
       <version>${hikaricp.version}</version>
     </dependency>
+    <!-- Paper bundles sqlite-jdbc — shading it breaks: minimizeJar strips the
+         reflectively-loaded driver classes and relocating org.sqlite would break
+         the JNI symbols of the native library. -->
     <dependency>
       <groupId>org.xerial</groupId>
       <artifactId>sqlite-jdbc</artifactId>
       <version>${sqlite.version}</version>
+      <scope>provided</scope>
     </dependency>
+    <!-- Paper bundles slf4j; shading an unrelocated copy gives HikariCP a
+         binding-less (NOP) logger via the child-first plugin classloader. -->
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-api</artifactId>
       <version>2.0.9</version>
+      <scope>provided</scope>
     </dependency>
     <!-- PacketEvents is used as an installed server plugin (not shaded), to avoid
          conflicting with a standalone PacketEvents/ProtocolLib in the netty pipeline. -->
@@ -116,10 +123,6 @@
                 </filter>
               </filters>
               <relocations>
-                <relocation>
-                  <pattern>org.sqlite</pattern>
-                  <shadedPattern>dev.boondock.bsanticheat.shaded.org.sqlite</shadedPattern>
-                </relocation>
                 <relocation>
                   <pattern>com.zaxxer.hikari</pattern>
                   <shadedPattern>dev.boondock.bsanticheat.shaded.com.zaxxer.hikari</shadedPattern>

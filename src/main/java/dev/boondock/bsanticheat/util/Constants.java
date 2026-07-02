@@ -18,6 +18,8 @@ public final class Constants {
     // ==================== DISCORD WEBHOOK ====================
     public static final long DISCORD_MIN_REQUEST_DELAY_MS = 2000L;
     public static final int DISCORD_MAX_QUEUE_SIZE = 50;
+    public static final int DISCORD_CONNECT_TIMEOUT_MS = 5000;
+    public static final int DISCORD_READ_TIMEOUT_MS = 10000;
 
     // ==================== MOVEMENT CHECKER ====================
     public static final int MOVEMENT_SAMPLE_RATE = 10;

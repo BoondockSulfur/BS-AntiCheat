@@ -132,17 +132,19 @@ public class XRayAlertManager {
 
         String oreInfo = "";
         if (oreBreakdown != null && !oreBreakdown.isEmpty()) {
-            oreInfo = "\\n**" + lang.get("alert.discord_ores") + ":** " + formatOreBreakdownShort(oreBreakdown);
+            oreInfo = "\n**" + lang.get("alert.discord_ores") + ":** " + formatOreBreakdownShort(oreBreakdown);
         }
 
         String locationInfo = "";
         if (locations != null && !locations.isEmpty()) {
-            locationInfo = "\\n**" + lang.get("alert.discord_positions") + ":**\\n" + String.join("\\n", locations);
+            locationInfo = "\n**" + lang.get("alert.discord_positions") + ":**\n" + String.join("\n", locations);
         }
 
+        // Real newlines here — escapeJson() in DiscordWebhook converts them to \n in
+        // the JSON; a pre-escaped "\\n" would get double-escaped and show literally.
         String description = "**" + lang.get("alert.discord_player") + ":** " + player.getName()
-                + "\\n**" + lang.get("alert.discord_type") + ":** " + type
-                + "\\n**" + lang.get("alert.discord_details") + ":** " + details
+                + "\n**" + lang.get("alert.discord_type") + ":** " + type
+                + "\n**" + lang.get("alert.discord_details") + ":** " + details
                 + oreInfo + locationInfo;
 
         discordWebhook.sendAlert(

@@ -21,22 +21,26 @@ import java.util.TreeMap;
 public class PluginConfig {
 
     private final JavaPlugin plugin;
-    private FileConfiguration cfg;
+    // volatile + publish-after-prepare: config values are read from async tasks and
+    // Netty threads; without this a /bsac reload could expose a half-merged config.
+    private volatile FileConfiguration cfg;
     private final AsyncConfigSaver asyncSaver;
 
     public PluginConfig(JavaPlugin plugin) {
         this.plugin = plugin;
-        this.cfg = plugin.getConfig();
         this.asyncSaver = new AsyncConfigSaver(plugin);
-        mergeDefaults();
-        validateConfig();
+        FileConfiguration fresh = plugin.getConfig();
+        mergeDefaults(fresh);
+        validateConfig(fresh);
+        this.cfg = fresh;
     }
 
     public void reload() {
         plugin.reloadConfig();
-        this.cfg = plugin.getConfig();
-        mergeDefaults();
-        validateConfig();
+        FileConfiguration fresh = plugin.getConfig();
+        mergeDefaults(fresh);
+        validateConfig(fresh);
+        this.cfg = fresh;
     }
 
     /**
@@ -44,7 +48,7 @@ public class PluginConfig {
      * user's file (e.g. after a plugin update), keeping existing values. Mirrors how the
      * LanguageManager merges new language keys.
      */
-    private void mergeDefaults() {
+    private void mergeDefaults(FileConfiguration cfg) {
         try (InputStream is = plugin.getResource("config.yml")) {
             if (is == null) return;
             YamlConfiguration defaults = YamlConfiguration.loadConfiguration(
@@ -68,7 +72,7 @@ public class PluginConfig {
         }
     }
 
-    private void validateConfig() {
+    private void validateConfig(FileConfiguration cfg) {
         boolean hasErrors = false;
 
         double ratio = cfg.getDouble("anticheat.xray_stone_ore_ratio", 0.10);

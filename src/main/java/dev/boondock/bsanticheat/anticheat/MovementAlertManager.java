@@ -148,11 +148,13 @@ public class MovementAlertManager {
     private void sendDiscordAlert(Player player, String type, String details, double value, String location) {
         if (!config.discordEnabled()) return;
 
+        // Real newlines here — escapeJson() in DiscordWebhook converts them to \n in
+        // the JSON; a pre-escaped "\\n" would get double-escaped and show literally.
         String description = "**" + lang.get("alert.discord_player") + ":** " + player.getName()
-                + "\\n**" + lang.get("alert.discord_type") + ":** " + type
-                + "\\n**" + lang.get("alert.discord_details") + ":** " + details
-                + "\\n**" + lang.get("alert.discord_value") + ":** " + String.format("%.2f", value)
-                + "\\n**" + lang.get("alert.discord_position") + ":** " + location;
+                + "\n**" + lang.get("alert.discord_type") + ":** " + type
+                + "\n**" + lang.get("alert.discord_details") + ":** " + details
+                + "\n**" + lang.get("alert.discord_value") + ":** " + String.format("%.2f", value)
+                + "\n**" + lang.get("alert.discord_position") + ":** " + location;
 
         discordWebhook.sendAlert(
                 DiscordWebhook.AlertType.MOVEMENT,

@@ -155,6 +155,10 @@ public class DiscordWebhook {
             connection.setRequestMethod("POST");
             connection.setRequestProperty("Content-Type", "application/json");
             connection.setRequestProperty("User-Agent", "BSAntiCheat/" + plugin.getDescription().getVersion());
+            // Without timeouts a hanging Discord/network connection blocks the single
+            // queue-processor thread forever and all further alerts are dropped.
+            connection.setConnectTimeout(Constants.DISCORD_CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(Constants.DISCORD_READ_TIMEOUT_MS);
             connection.setDoOutput(true);
             try (OutputStream os = connection.getOutputStream()) {
                 os.write(json.getBytes(StandardCharsets.UTF_8));
