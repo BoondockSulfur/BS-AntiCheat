@@ -6,6 +6,15 @@ All notable changes to BSAntiCheat will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Phase 1 movement pipeline: **sampling removed** — every PlayerMoveEvent is now checked
+  instead of every 10th, so a cheat can no longer hide in skipped moves (regression-guarded
+  by the `microspeed` harness scenario). Fly/hover now use a **server-authoritative**
+  on-ground test (`isOnGroundServer`, bounding-box vs. the world) instead of the
+  client-sent flag, hardening against NoFall/Fly spoofing. Consecutive-violation counters
+  are now per-tick. Verified via the harness: all core cheat scenarios still flag, legit
+  baseline stays clean.
+
 ### Added
 - Elytra/Riptide speed-ceiling check (`elytra_detection`) — previously skipped entirely
 - VehicleChecker (`vehicle_checks`): Boat-Fly and per-type vehicle speed checks via

@@ -22,9 +22,7 @@ public final class Constants {
     public static final int DISCORD_READ_TIMEOUT_MS = 10000;
 
     // ==================== MOVEMENT CHECKER ====================
-    public static final int MOVEMENT_SAMPLE_RATE = 10;
-    public static final double MOVEMENT_MIN_DISTANCE_THRESHOLD = 2.0;
-    public static final int MOVEMENT_COUNTER_RESET_THRESHOLD = 1000;
+    // Phase 1: event sampling removed — every PlayerMoveEvent is checked.
     public static final double MOVEMENT_MIN_TIME_DELTA = 0.01;
 
     // ==================== XRAY DETECTOR ====================

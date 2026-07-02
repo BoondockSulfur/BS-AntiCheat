@@ -28,9 +28,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * Checks for various movement types: walking, sprinting, swimming, riding, etc.
  * WARNING: This is basic detection and may produce false positives.
  *
- * PERFORMANCE OPTIMIZATION:
- * - Uses event sampling (checks only every 10th move or significant distance)
- * - Reduces CPU usage by ~90% with minimal detection accuracy loss
+ * PHASE 1: every PlayerMoveEvent is checked (no sampling), so a cheat cannot hide in
+ * skipped moves. Ground state is server-authoritative (isOnGroundServer) rather than the
+ * client-sent flag, and the consecutive-violation counters are per-tick.
  */
 public class MovementChecker implements Listener {
 
@@ -58,9 +58,6 @@ public class MovementChecker implements Listener {
     private final Map<UUID, Integer> consecutiveStep = new ConcurrentHashMap<>();
     // Elytra/Riptide: consecutive over-speed samples
     private final Map<UUID, Integer> consecutiveElytra = new ConcurrentHashMap<>();
-
-    // Performance optimization: Event sampling
-    private final Map<UUID, Integer> moveCounter = new ConcurrentHashMap<>();
 
     // Knockback immunity tracking
     private final Map<UUID, Long> recentKnockback = new ConcurrentHashMap<>();
@@ -328,21 +325,11 @@ public class MovementChecker implements Listener {
         if (to == null) return;
         if (from.getX() == to.getX() && from.getY() == to.getY() && from.getZ() == to.getZ()) return;
 
-        // PERFORMANCE OPTIMIZATION: Sampling-based throttling
-        // Check only every Nth move OR if significant distance traveled
-        int count = moveCounter.merge(playerId, 1, Integer::sum);
-        double distance = from.distance(to);
-        boolean shouldCheck = (count % Constants.MOVEMENT_SAMPLE_RATE == 0) ||
-                              (distance >= Constants.MOVEMENT_MIN_DISTANCE_THRESHOLD);
-
-        if (!shouldCheck) {
-            return; // Skip this event to reduce CPU usage
-        }
-
-        // Reset counter periodically to prevent overflow
-        if (count > Constants.MOVEMENT_COUNTER_RESET_THRESHOLD) {
-            moveCounter.put(playerId, 0);
-        }
+        // PHASE 1: no sampling — every position change is checked. PlayerMoveEvent already
+        // fires per movement packet the server accepts, so this gives per-tick coverage; a
+        // cheat can no longer hide in the moves an every-Nth sampler would have skipped.
+        // The per-move work is bounded (arithmetic + a few block lookups), so full coverage
+        // is cheap even with many players.
 
         // Skip checks for exempt players
         if (isPlayerWhitelisted(player)) {
@@ -684,7 +671,7 @@ public class MovementChecker implements Listener {
      * on-ground flag can still evade this — full prevention needs packet-level checks.
      */
     private boolean isClearlyAirborne(Player player) {
-        if (player.isOnGround()) return false;
+        if (isOnGroundServer(player)) return false;
         Location loc = player.getLocation();
         Material at = loc.getBlock().getType();
         if (at == Material.COBWEB || at == Material.LADDER || at == Material.VINE
@@ -715,6 +702,27 @@ public class MovementChecker implements Listener {
             if (loc.getBlock().getRelative(0, -i, 0).getType().isSolid()) return false;
         }
         return true;
+    }
+
+    /**
+     * Server-authoritative on-ground test: true when a solid block sits just beneath any
+     * corner of the player's footprint. Reads the world directly instead of trusting the
+     * client-sent on-ground flag, which Fly/NoFall spoof. Main-thread only.
+     */
+    private boolean isOnGroundServer(Player player) {
+        Location loc = player.getLocation();
+        final double half = 0.3;      // player hitbox half-width
+        final int by = (int) Math.floor(loc.getY() - 0.001); // just below the feet
+        final double[] dx = { 0, half, -half, half, -half };
+        final double[] dz = { 0, half, half, -half, -half };
+        for (int i = 0; i < dx.length; i++) {
+            if (loc.getWorld().getBlockAt(
+                    (int) Math.floor(loc.getX() + dx[i]), by,
+                    (int) Math.floor(loc.getZ() + dz[i])).getType().isSolid()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** True when standing on top of a water block without being submerged (Jesus). */
@@ -797,7 +805,6 @@ public class MovementChecker implements Listener {
         consecutiveSpider.remove(playerId);
         consecutiveStep.remove(playerId);
         consecutiveElytra.remove(playerId);
-        moveCounter.remove(playerId);
         recentKnockback.remove(playerId);
         recentTeleport.remove(playerId);
         recentJoin.remove(playerId);
