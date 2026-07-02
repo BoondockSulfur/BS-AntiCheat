@@ -492,10 +492,10 @@ public class MovementChecker implements Listener {
             // blocking with a shield, charging a trident…) which vanilla slows down.
             // isHandRaised() reflects the (client-influenced) item-use state.
             if (config.noSlowDetectionEnabled() && groundType && player.isHandRaised()) {
-                double noSlowCap = getMaxSpeed(MovementType.WALKING, player) * Constants.NOSLOW_SPEED_MULTIPLIER;
+                double noSlowCap = getMaxSpeed(MovementType.WALKING, player) * config.noSlowSpeedMultiplier();
                 if (horizontalDist > noSlowCap) {
                     int c = consecutiveNoSlow.merge(playerId, 1, Integer::sum);
-                    if (c >= Constants.NOSLOW_VIOLATIONS) {
+                    if (c >= config.noSlowViolations()) {
                         setBack |= handleViolation(player, "NOSLOW",
                             lang.format("alert.noslow", horizontalDist, noSlowCap), horizontalDist, to);
                         consecutiveNoSlow.put(playerId, 0);
@@ -558,7 +558,7 @@ public class MovementChecker implements Listener {
                 if (config.groundSpoofDetectionEnabled() && !flyExempt
                         && player.isOnGround() && isHighAboveGround(player)) {
                     int gs = consecutiveGroundSpoof.merge(playerId, 1, Integer::sum);
-                    if (gs >= Constants.GROUNDSPOOF_VIOLATIONS) {
+                    if (gs >= config.groundSpoofViolations()) {
                         setBack |= handleViolation(player, "GROUNDSPOOF",
                             lang.get("alert.groundspoof"), 0, to);
                         consecutiveGroundSpoof.put(playerId, 0);
@@ -571,7 +571,7 @@ public class MovementChecker implements Listener {
                 if (config.jesusDetectionEnabled() && !player.isInWater() && !player.isGliding()
                         && horizontalDist > 0.08 && Math.abs(movement.getY()) < 0.05 && isOnWaterSurface(player)) {
                     int c = consecutiveJesus.merge(playerId, 1, Integer::sum);
-                    if (c >= Constants.JESUS_VIOLATIONS) {
+                    if (c >= config.jesusViolations()) {
                         setBack |= handleViolation(player, "JESUS", lang.get("alert.jesus"), horizontalDist, to);
                         consecutiveJesus.put(playerId, 0);
                     }
@@ -583,7 +583,7 @@ public class MovementChecker implements Listener {
                 if (config.spiderDetectionEnabled() && movement.getY() > 0.0 && !player.isOnGround()
                         && !isNearLiquid(player) && !isOnClimbable(player) && isAgainstWall(player)) {
                     int c = consecutiveSpider.merge(playerId, 1, Integer::sum);
-                    if (c >= Constants.SPIDER_VIOLATIONS) {
+                    if (c >= config.spiderViolations()) {
                         setBack |= handleViolation(player, "SPIDER", lang.get("alert.spider"), movement.getY(), to);
                         consecutiveSpider.put(playerId, 0);
                     }
@@ -593,10 +593,10 @@ public class MovementChecker implements Listener {
 
                 // Step: stepping up more than the vanilla ~0.6 in one move while staying grounded
                 if (config.stepDetectionEnabled() && player.isOnGround()
-                        && movement.getY() > Constants.STEP_MAX_HEIGHT && horizontalDist > 0.05
+                        && movement.getY() > config.stepMaxHeight() && horizontalDist > 0.05
                         && !isNearSlimeBlock(to) && !player.hasPotionEffect(PotionEffectType.JUMP_BOOST)) {
                     int c = consecutiveStep.merge(playerId, 1, Integer::sum);
-                    if (c >= Constants.STEP_VIOLATIONS) {
+                    if (c >= config.stepViolations()) {
                         setBack |= handleViolation(player, "STEP", lang.format("alert.step", movement.getY()), movement.getY(), to);
                         consecutiveStep.put(playerId, 0);
                     }
@@ -636,7 +636,7 @@ public class MovementChecker implements Listener {
 
         if (bps > max) {
             int c = consecutiveElytra.merge(playerId, 1, Integer::sum);
-            if (c >= Constants.ELYTRA_VIOLATIONS) {
+            if (c >= config.elytraViolations()) {
                 boolean elytra = moveType == MovementType.ELYTRA;
                 handleViolation(player, elytra ? "ELYTRA" : "RIPTIDE",
                         lang.format(elytra ? "alert.elytra" : "alert.riptide", bps, max), bps, to);

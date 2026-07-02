@@ -129,13 +129,13 @@ public class WorldChecker implements Listener {
                 long expectedMs = (long) Math.ceil(1.0 / breakSpeed) * 50L;
                 long actualMs = System.currentTimeMillis() - dig.startMs();
                 if (expectedMs >= Constants.FASTBREAK_MIN_EXPECTED_MS
-                        && actualMs < (long) (expectedMs * Constants.FASTBREAK_TOLERANCE)) {
+                        && actualMs < (long) (expectedMs * config.fastBreakTolerance())) {
                     int c = consecutiveFastBreak.merge(id, 1, Integer::sum);
                     if (config.debugMode()) {
                         plugin.getLogger().info(String.format("[FASTBREAK-DEBUG] %s actual=%dms expected=%dms (%d/%d)",
-                                player.getName(), actualMs, expectedMs, c, Constants.FASTBREAK_VIOLATIONS));
+                                player.getName(), actualMs, expectedMs, c, config.fastBreakViolations()));
                     }
-                    if (c >= Constants.FASTBREAK_VIOLATIONS) {
+                    if (c >= config.fastBreakViolations()) {
                         handleViolation(player, "FASTBREAK",
                                 lang.format("alert.fastbreak", actualMs, expectedMs), actualMs,
                                 event.getBlock().getLocation());
@@ -180,7 +180,7 @@ public class WorldChecker implements Listener {
                 }
                 if (angle > config.scaffoldMaxAngle()) {
                     int c = consecutiveScaffold.merge(id, 1, Integer::sum);
-                    if (c >= Constants.SCAFFOLD_VIOLATIONS) {
+                    if (c >= config.scaffoldViolations()) {
                         handleViolation(player, "SCAFFOLD",
                                 lang.format("alert.scaffold", angle), angle, event.getBlock().getLocation());
                         consecutiveScaffold.put(id, 0);

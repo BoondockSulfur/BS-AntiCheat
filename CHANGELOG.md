@@ -22,6 +22,10 @@ All notable changes to BSAntiCheat will be documented in this file.
   baseline stays clean.
 
 ### Added
+- Configurable calibration thresholds (`anticheat.thresholds.*`, phase 4.4): the consecutive
+  violation counts and primary numeric thresholds for the movement-extra, vehicle, combat-extra
+  and inventory checks are now tunable in config.yml (25 values) and applied via `/bsac reload`
+  — no rebuild. Each defaults to its previous hardcoded value, so behaviour is unchanged.
 - Bedrock exemption (`exempt_bedrock_players`, phase 4.1): a `GeyserHook` detects players
   connecting through Geyser/Floodgate (Floodgate API via reflection, UUID-prefix fallback,
   gated on a Geyser/Floodgate plugin being present) and exempts them from all checks —

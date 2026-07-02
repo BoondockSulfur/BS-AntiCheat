@@ -107,7 +107,7 @@ public class CombatChecker implements Listener {
         if (config.criticalsDetectionEnabled() && event.isCritical()
                 && attacker.isOnGround() && attacker.getFallDistance() <= 0.0f) {
             int c = consecutiveCriticals.merge(attackerId, 1, Integer::sum);
-            if (c >= Constants.CRITICALS_VIOLATIONS) {
+            if (c >= config.criticalsViolations()) {
                 handleViolation(attacker, "CRITICALS", lang.get("alert.criticals"), c);
                 consecutiveCriticals.put(attackerId, 0);
             }
@@ -119,7 +119,7 @@ public class CombatChecker implements Listener {
         // the shield to attack; only a cheat can do both in the same moment.
         if (config.autoBlockDetectionEnabled() && attacker.isBlocking()) {
             int c = consecutiveAutoBlock.merge(attackerId, 1, Integer::sum);
-            if (c >= Constants.AUTOBLOCK_VIOLATIONS) {
+            if (c >= config.autoBlockViolations()) {
                 handleViolation(attacker, "AUTOBLOCK", lang.get("alert.autoblock"), c);
                 consecutiveAutoBlock.put(attackerId, 0);
             }

@@ -130,7 +130,7 @@ public class VehicleChecker implements Listener {
             double dy = to.getY() - from.getY();
             if (dy > -0.01 && isAirborne(to)) {
                 int c = consecutiveBoatFly.merge(playerId, 1, Integer::sum);
-                if (c >= Constants.BOATFLY_VIOLATIONS) {
+                if (c >= config.boatFlyViolations()) {
                     handleViolation(player, "BOATFLY", lang.format("alert.boatfly", c), dy, to);
                     consecutiveBoatFly.put(playerId, 0);
                 }
@@ -149,7 +149,7 @@ public class VehicleChecker implements Listener {
 
         if (bps > max) {
             int c = consecutiveVehicleSpeed.merge(playerId, 1, Integer::sum);
-            if (c >= Constants.VEHICLE_SPEED_VIOLATIONS) {
+            if (c >= config.vehicleSpeedViolations()) {
                 handleViolation(player, "VEHICLE_SPEED",
                         lang.format("alert.vehicle_speed", vehicle.getType().name(), bps, max), bps, to);
                 consecutiveVehicleSpeed.put(playerId, 0);

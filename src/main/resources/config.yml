@@ -75,6 +75,41 @@ anticheat:
   packetflood_detection: true
   packetflood_max_per_second: 500
 
+  # Calibration thresholds. Each value is the default; lower a *_violations count for
+  # faster/stricter detection, raise it to reduce false positives. Tune with debug_mode
+  # on and punishments off, then apply with /bsac reload — no restart or rebuild needed.
+  thresholds:
+    # Movement extras: consecutive over-threshold samples before flagging
+    groundspoof_violations: 4
+    noslow_violations: 3
+    noslow_speed_multiplier: 0.5   # allowed fraction of walk speed while using an item
+    jesus_violations: 5
+    spider_violations: 3
+    step_violations: 2
+    step_max_height: 0.75          # vanilla auto-step is 0.6
+    elytra_violations: 3
+    scaffold_violations: 3
+    # Vehicle
+    boatfly_violations: 10
+    vehicle_speed_violations: 5
+    # Combat extras
+    criticals_violations: 3
+    autoblock_violations: 2
+    # World
+    fastbreak_violations: 3
+    fastbreak_tolerance: 0.7       # flag when dig time < expected * this
+    # Inventory / item timing
+    inventorymove_violations: 8
+    inventorymove_min_speed: 0.15  # blocks/move counted as walking with a GUI open
+    cheststealer_min_clicks: 6
+    cheststealer_max_interval_ms: 40
+    fastuse_violations: 2
+    fastuse_min_interval_ms: 600
+    bowspam_violations: 3
+    bowspam_min_interval_ms: 700
+    bowspam_min_force: 0.9         # only near-full-charge shots are counted
+    autototem_max_reaction_ms: 150
+
   # Combat: maximum allowed attack distance (blocks). Vanilla survival reach is ~3.0;
   # a generous default avoids false positives from latency/hitbox. Creative is exempt.
   reach_distance: 4.0

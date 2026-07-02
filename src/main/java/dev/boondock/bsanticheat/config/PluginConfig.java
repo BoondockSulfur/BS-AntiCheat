@@ -156,6 +156,34 @@ public class PluginConfig {
     public boolean crasherDetectionEnabled() { return cfg.getBoolean("anticheat.crasher_detection", true); }
     public boolean packetFloodDetectionEnabled() { return cfg.getBoolean("anticheat.packetflood_detection", true); }
     public int packetFloodMaxPerSecond() { return cfg.getInt("anticheat.packetflood_max_per_second", 500); }
+
+    // ---- Calibration thresholds (phase 4.4): each defaults to its Constants value, so the
+    // behaviour is unchanged unless an admin overrides it in config.yml (no rebuild needed).
+    public int groundSpoofViolations() { return cfg.getInt("anticheat.thresholds.groundspoof_violations", Constants.GROUNDSPOOF_VIOLATIONS); }
+    public int noSlowViolations() { return cfg.getInt("anticheat.thresholds.noslow_violations", Constants.NOSLOW_VIOLATIONS); }
+    public double noSlowSpeedMultiplier() { return cfg.getDouble("anticheat.thresholds.noslow_speed_multiplier", Constants.NOSLOW_SPEED_MULTIPLIER); }
+    public int jesusViolations() { return cfg.getInt("anticheat.thresholds.jesus_violations", Constants.JESUS_VIOLATIONS); }
+    public int spiderViolations() { return cfg.getInt("anticheat.thresholds.spider_violations", Constants.SPIDER_VIOLATIONS); }
+    public int stepViolations() { return cfg.getInt("anticheat.thresholds.step_violations", Constants.STEP_VIOLATIONS); }
+    public double stepMaxHeight() { return cfg.getDouble("anticheat.thresholds.step_max_height", Constants.STEP_MAX_HEIGHT); }
+    public int elytraViolations() { return cfg.getInt("anticheat.thresholds.elytra_violations", Constants.ELYTRA_VIOLATIONS); }
+    public int scaffoldViolations() { return cfg.getInt("anticheat.thresholds.scaffold_violations", Constants.SCAFFOLD_VIOLATIONS); }
+    public int boatFlyViolations() { return cfg.getInt("anticheat.thresholds.boatfly_violations", Constants.BOATFLY_VIOLATIONS); }
+    public int vehicleSpeedViolations() { return cfg.getInt("anticheat.thresholds.vehicle_speed_violations", Constants.VEHICLE_SPEED_VIOLATIONS); }
+    public int criticalsViolations() { return cfg.getInt("anticheat.thresholds.criticals_violations", Constants.CRITICALS_VIOLATIONS); }
+    public int autoBlockViolations() { return cfg.getInt("anticheat.thresholds.autoblock_violations", Constants.AUTOBLOCK_VIOLATIONS); }
+    public int fastBreakViolations() { return cfg.getInt("anticheat.thresholds.fastbreak_violations", Constants.FASTBREAK_VIOLATIONS); }
+    public double fastBreakTolerance() { return cfg.getDouble("anticheat.thresholds.fastbreak_tolerance", Constants.FASTBREAK_TOLERANCE); }
+    public int inventoryMoveViolations() { return cfg.getInt("anticheat.thresholds.inventorymove_violations", Constants.INVENTORYMOVE_VIOLATIONS); }
+    public double inventoryMoveMinSpeed() { return cfg.getDouble("anticheat.thresholds.inventorymove_min_speed", Constants.INVENTORYMOVE_MIN_SPEED); }
+    public int chestStealerMinClicks() { return cfg.getInt("anticheat.thresholds.cheststealer_min_clicks", Constants.CHESTSTEALER_MIN_CLICKS); }
+    public long chestStealerMaxIntervalMs() { return cfg.getLong("anticheat.thresholds.cheststealer_max_interval_ms", Constants.CHESTSTEALER_MAX_INTERVAL_MS); }
+    public int fastUseViolations() { return cfg.getInt("anticheat.thresholds.fastuse_violations", Constants.FASTUSE_VIOLATIONS); }
+    public long fastUseMinIntervalMs() { return cfg.getLong("anticheat.thresholds.fastuse_min_interval_ms", Constants.FASTUSE_MIN_INTERVAL_MS); }
+    public int bowSpamViolations() { return cfg.getInt("anticheat.thresholds.bowspam_violations", Constants.BOWSPAM_VIOLATIONS); }
+    public long bowSpamMinIntervalMs() { return cfg.getLong("anticheat.thresholds.bowspam_min_interval_ms", Constants.BOWSPAM_MIN_INTERVAL_MS); }
+    public double bowSpamMinForce() { return cfg.getDouble("anticheat.thresholds.bowspam_min_force", Constants.BOWSPAM_MIN_FORCE); }
+    public long autoTotemMaxReactionMs() { return cfg.getLong("anticheat.thresholds.autototem_max_reaction_ms", Constants.AUTOTOTEM_MAX_REACTION_MS); }
     public boolean combatChecksEnabled() { return cfg.getBoolean("anticheat.combat_checks", true); }
     public boolean reachDetectionEnabled() { return cfg.getBoolean("anticheat.reach_detection", true); }
     public double reachDistance() { return cfg.getDouble("anticheat.reach_distance", 4.0); }

@@ -139,7 +139,7 @@ public class InventoryChecker implements Listener {
         double dx = to.getX() - from.getX();
         double dz = to.getZ() - from.getZ();
         double horizontal = Math.sqrt(dx * dx + dz * dz);
-        if (horizontal < Constants.INVENTORYMOVE_MIN_SPEED) {
+        if (horizontal < config.inventoryMoveMinSpeed()) {
             consecutiveInvMove.remove(id);
             return;
         }
@@ -147,7 +147,7 @@ public class InventoryChecker implements Listener {
         if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
 
         int c = consecutiveInvMove.merge(id, 1, Integer::sum);
-        if (c >= Constants.INVENTORYMOVE_VIOLATIONS) {
+        if (c >= config.inventoryMoveViolations()) {
             handleViolation(player, "INVENTORYMOVE", lang.format("alert.inventorymove", c), horizontal, to);
             consecutiveInvMove.put(id, 0);
         }
@@ -168,13 +168,13 @@ public class InventoryChecker implements Listener {
             Long pop = lastTotemPop.get(id);
             if (pop != null) {
                 long sincePop = System.currentTimeMillis() - pop;
-                if (sincePop <= Constants.AUTOTOTEM_MAX_REACTION_MS && isTotemToOffhand(event)) {
+                if (sincePop <= config.autoTotemMaxReactionMs() && isTotemToOffhand(event)) {
                     lastTotemPop.remove(id);
                     if (!Exemptions.isExempt(player, config, luckPerms, geyser)) {
                         handleViolation(player, "AUTOTOTEM",
                                 lang.format("alert.autototem", sincePop), sincePop, player.getLocation());
                     }
-                } else if (sincePop > Constants.AUTOTOTEM_MAX_REACTION_MS) {
+                } else if (sincePop > config.autoTotemMaxReactionMs()) {
                     lastTotemPop.remove(id); // window expired
                 }
             }
@@ -193,9 +193,9 @@ public class InventoryChecker implements Listener {
         Long last = lastContainerClick.put(id, now);
         if (last == null) return;
         long interval = now - last;
-        if (interval <= Constants.CHESTSTEALER_MAX_INTERVAL_MS) {
+        if (interval <= config.chestStealerMaxIntervalMs()) {
             int streak = fastClickStreak.merge(id, 1, Integer::sum);
-            if (streak >= Constants.CHESTSTEALER_MIN_CLICKS && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
+            if (streak >= config.chestStealerMinClicks() && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
                 handleViolation(player, "CHESTSTEALER",
                         lang.format("alert.cheststealer", streak + 1, interval), streak, player.getLocation());
                 fastClickStreak.put(id, 0);
@@ -241,11 +241,11 @@ public class InventoryChecker implements Listener {
         long interval = now - last;
 
         // Fastest legit consumable (dried kelp) takes ~800ms; everything else 1.6s+.
-        if (interval < Constants.FASTUSE_MIN_INTERVAL_MS) {
+        if (interval < config.fastUseMinIntervalMs()) {
             int c = consecutiveFastUse.merge(id, 1, Integer::sum);
-            if (c >= Constants.FASTUSE_VIOLATIONS && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
+            if (c >= config.fastUseViolations() && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
                 handleViolation(player, "FASTUSE",
-                        lang.format("alert.fastuse", interval, Constants.FASTUSE_MIN_INTERVAL_MS),
+                        lang.format("alert.fastuse", interval, config.fastUseMinIntervalMs()),
                         interval, player.getLocation());
                 consecutiveFastUse.put(id, 0);
             }
@@ -264,7 +264,7 @@ public class InventoryChecker implements Listener {
         // Crossbows are pre-charged and legitimately fire instantly — bows only
         if (event.getBow() == null || event.getBow().getType() != Material.BOW) return;
         // Only full-charge shots: a full draw takes 1s, so full shots can't come faster
-        if (event.getForce() < Constants.BOWSPAM_MIN_FORCE) return;
+        if (event.getForce() < config.bowSpamMinForce()) return;
 
         UUID id = player.getUniqueId();
         long now = System.currentTimeMillis();
@@ -272,9 +272,9 @@ public class InventoryChecker implements Listener {
         if (last == null) return;
         long interval = now - last;
 
-        if (interval < Constants.BOWSPAM_MIN_INTERVAL_MS) {
+        if (interval < config.bowSpamMinIntervalMs()) {
             int c = consecutiveBowSpam.merge(id, 1, Integer::sum);
-            if (c >= Constants.BOWSPAM_VIOLATIONS && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
+            if (c >= config.bowSpamViolations() && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
                 handleViolation(player, "BOWSPAM",
                         lang.format("alert.bowspam", interval), interval, player.getLocation());
                 consecutiveBowSpam.put(id, 0);
