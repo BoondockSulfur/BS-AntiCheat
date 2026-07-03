@@ -39,7 +39,7 @@ player-placed-ore exclusion
 
 > **Opt-in / off by default** (enable in `config.yml` if you want them): NoSlow, Jesus,
 > Spider, Step and Velocity/AntiKnockback. These are inherently false-positive-prone and are
-> being reworked — see the roadmap.
+> being reworked.
 
 **Infrastructure**
 - Violation-level (VL) system with decay and configurable punishment **tiers** (console commands)
@@ -128,7 +128,7 @@ BSAntiCheat's enabled checks are heuristic and lag/transaction-compensated, tune
 flagging legitimate play (fast mining, elytra landings, jumping, ice boats, sweeping-edge
 farms, high-ping players). Thresholds are deliberately generous — tighten them for your
 server with `debug_mode` and the calibration workflow above. For maximum-precision combat
-detection (prediction-engine level), packet-timing analysis is on the roadmap.
+detection (prediction-engine level), deeper packet-timing analysis is planned.
 
 ## Building
 
