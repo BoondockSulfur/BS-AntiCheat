@@ -250,6 +250,11 @@ public class PacketChecker implements PacketListener {
      * Timer: each movement (flying) packet claims one tick (50ms) of game time. A balance
      * accumulates 50ms per packet minus the real time elapsed; if the client sends packets
      * faster than real time (game-speed/timer hack), the balance grows past the limit.
+     *
+     * <p>The balance is kept in hundredths of a millisecond so the 1% drift leak survives
+     * integer arithmetic: real time is counted at 101%, which absorbs benign client clock
+     * drift (cheap hardware clocks run up to ~0.5% fast — that otherwise accumulates
+     * ~10ms/s and periodically crosses any fixed limit). A real timer hack gains far more.
      */
     private void handleTimer(User user) {
         if (!config.timerDetectionEnabled()) return;
@@ -258,14 +263,15 @@ public class PacketChecker implements PacketListener {
         long now = System.currentTimeMillis();
 
         long[] st = timerState.computeIfAbsent(id, k -> new long[]{0L, now});
-        long balance = st[0] + TICK_MS - (now - st[1]);
-        if (balance < -1000L) balance = -1000L; // floor: don't bank unlimited credit while idle
+        long elapsed = now - st[1];
+        long balance = st[0] + TICK_MS * 100L - elapsed * 101L; // centi-ms, 1% drift leak
+        if (balance < -100000L) balance = -100000L; // floor (-1000ms): no unlimited idle credit
         st[1] = now;
 
-        if (balance > config.timerMaxBalanceMs()) {
+        if (balance > config.timerMaxBalanceMs() * 100L) {
             st[0] = 0L; // reset after flagging
-            long bal = balance;
-            Scheduler.runForPlayer(plugin, id, () ->flagTimer(id, bal));
+            long balMs = balance / 100L;
+            Scheduler.runForPlayer(plugin, id, () ->flagTimer(id, balMs));
         } else {
             st[0] = balance;
         }

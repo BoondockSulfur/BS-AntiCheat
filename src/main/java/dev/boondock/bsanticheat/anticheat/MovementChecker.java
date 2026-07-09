@@ -5,6 +5,7 @@ import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
+import dev.boondock.bsanticheat.util.CheckMath;
 import dev.boondock.bsanticheat.util.Constants;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -30,7 +31,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * WARNING: This is basic detection and may produce false positives.
  *
  * PHASE 1: every PlayerMoveEvent is checked (no sampling), so a cheat cannot hide in
- * skipped moves. Ground state is server-authoritative (isOnGroundServer) rather than the
+ * skipped moves. Ground state is server-authoritative (hasSupportWithin) rather than the
  * client-sent flag, and the consecutive-violation counters are per-tick.
  */
 public class MovementChecker implements Listener {
@@ -79,6 +80,16 @@ public class MovementChecker implements Listener {
     private final Map<UUID, Long> recentGlide = new ConcurrentHashMap<>();
     private static final long GLIDE_GRACE_MS = 1500; // grace after gliding/riptiding ends
 
+    // Slime-bounce grace — a high bounce rises for far longer than the 2-block scan below
+    // the player can see, so the launch moment is remembered instead.
+    private final Map<UUID, Long> recentSlime = new ConcurrentHashMap<>();
+    private static final long SLIME_GRACE_MS = 3000;
+
+    // Ice-momentum memory: [0]=timestamp(ms), [1]=ice speed multiplier. Sprint-jumping on
+    // ice roads has no ice directly below mid-jump while the momentum persists.
+    private final Map<UUID, double[]> recentIce = new ConcurrentHashMap<>();
+    private static final long ICE_MOMENTUM_GRACE_MS = 2500;
+
     public MovementChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
         this.config = config;
@@ -111,16 +122,9 @@ public class MovementChecker implements Listener {
         this.transactionManager = transactionManager;
     }
 
-    /**
-     * Round-trip latency (ms) for lag compensation: the precise transaction RTT when
-     * available, otherwise the coarse {@link Player#getPing()}.
-     */
+    /** Round-trip latency (ms) for lag compensation (see {@link dev.boondock.bsanticheat.util.CheckMath}). */
     private int effectivePing(Player player) {
-        if (transactionManager != null) {
-            double rtt = transactionManager.roundTripMs(player.getUniqueId());
-            if (rtt >= 0) return (int) Math.round(rtt);
-        }
-        return player.getPing();
+        return CheckMath.effectivePing(transactionManager, player);
     }
 
     /**
@@ -177,11 +181,10 @@ public class MovementChecker implements Listener {
             return MovementType.SWIMMING;
         }
 
-        // PRIORITY 4: Check climbing
-        Material blockAt = player.getLocation().getBlock().getType();
-        if (blockAt == Material.LADDER || blockAt == Material.VINE ||
-            blockAt == Material.TWISTING_VINES || blockAt == Material.WEEPING_VINES ||
-            blockAt == Material.CAVE_VINES || blockAt == Material.SCAFFOLDING) {
+        // PRIORITY 4: Check climbing. isClimbing() uses the actual game logic (hitbox
+        // overlap, trapdoor-above-ladder…); the material check is a fallback for the
+        // moment a player exits the top of a ladder while still rising.
+        if (player.isClimbing() || isClimbableMaterial(player.getLocation().getBlock().getType())) {
             return MovementType.CLIMBING;
         }
 
@@ -220,27 +223,39 @@ public class MovementChecker implements Listener {
             speedMultiplier += Constants.SOUL_SPEED_MULTIPLIER;
         }
 
-        // Ice is slippery — players legitimately reach much higher speeds on it
-        if (below == Material.BLUE_ICE) {
-            speedMultiplier *= Constants.BLUE_ICE_SPEED_MULTIPLIER;
-        } else if (below == Material.ICE || below == Material.PACKED_ICE || below == Material.FROSTED_ICE) {
-            speedMultiplier *= Constants.ICE_SPEED_MULTIPLIER;
+        // Ice is slippery — players legitimately reach much higher speeds on it. The
+        // multiplier must survive sprint-jumping along an ice road: mid-jump the block
+        // directly below is air, but the ice momentum persists. So scan a few blocks
+        // down AND remember the last ice contact for a short grace period.
+        UUID pid = player.getUniqueId();
+        long nowMs = System.currentTimeMillis();
+        double iceMultiplier = iceMultiplierBelow(player.getLocation());
+        if (iceMultiplier > 1.0) {
+            recentIce.put(pid, new double[]{nowMs, iceMultiplier});
+        } else {
+            double[] lastIce = recentIce.get(pid);
+            if (lastIce != null && nowMs - (long) lastIce[0] < ICE_MOMENTUM_GRACE_MS) {
+                iceMultiplier = lastIce[1];
+            }
         }
+        speedMultiplier *= iceMultiplier;
 
-        // LAG COMPENSATION: Non-linear increase based on player ping
-        // Uses square root scaling so high-ping players get progressively more tolerance
-        // without allowing extreme speeds at very high ping
-        int ping = effectivePing(player);
-        if (ping > 100) {
-            // sqrt scaling: 200ms → +10%, 500ms → +20%, 1000ms → +30%
-            double lagMultiplier = 1.0 + (Math.sqrt(ping - 100) / 100.0);
-            speedMultiplier *= lagMultiplier;
-        }
+        // LAG COMPENSATION: sqrt ping scaling shared with all other checks
+        speedMultiplier *= CheckMath.pingSlack(effectivePing(player));
 
         return switch (type) {
             case WALKING -> baseWalkSpeed * speedMultiplier;
             case SPRINTING -> baseSprintSpeed * speedMultiplier;
-            case SNEAKING -> baseWalkSpeed * Constants.SNEAKING_SPEED_MULTIPLIER * speedMultiplier;
+            case SNEAKING -> {
+                // Swift Sneak raises sneak speed from 0.3x walking up to 0.75x at level 3
+                double sneakMult = Constants.SNEAKING_SPEED_MULTIPLIER;
+                var leggings = player.getInventory().getLeggings();
+                if (leggings != null) {
+                    int lvl = leggings.getEnchantmentLevel(org.bukkit.enchantments.Enchantment.SWIFT_SNEAK);
+                    if (lvl > 0) sneakMult = Math.min(1.0, sneakMult + Constants.SWIFT_SNEAK_MULTIPLIER_PER_LEVEL * lvl);
+                }
+                yield baseWalkSpeed * sneakMult * speedMultiplier;
+            }
             case SWIMMING -> {
                 double swim = baseWalkSpeed * Constants.SWIMMING_SPEED_MULTIPLIER * speedMultiplier;
                 // Dolphin's Grace drastically increases swim speed — avoid false positives
@@ -284,6 +299,18 @@ public class MovementChecker implements Listener {
             event.getCause() == org.bukkit.event.entity.EntityDamageEvent.DamageCause.ENTITY_SWEEP_ATTACK) {
             recentKnockback.put(playerId, System.currentTimeMillis());
         }
+    }
+
+    /**
+     * Any server-applied velocity (projectile knockback, wind charges, explosions,
+     * fishing-rod pulls, jump pads from other plugins…) reaches the client as a velocity
+     * packet and legitimately breaks the movement model for a moment. The damage-event
+     * handler above misses every cause that deals no damage, so the velocity itself
+     * grants the same immunity.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPlayerVelocity(org.bukkit.event.player.PlayerVelocityEvent event) {
+        recentKnockback.put(event.getPlayer().getUniqueId(), System.currentTimeMillis());
     }
 
     /**
@@ -523,9 +550,16 @@ public class MovementChecker implements Listener {
             // Vertical/fly checks only apply to on-foot movement. Swimming and
             // climbing have their own vertical physics and would false-positive.
             if (groundType) {
+                // Slime bounces launch far higher than the 2-block scan can see mid-flight,
+                // so remember the launch contact and keep the exemption during the rise.
+                boolean nearSlime = isNearSlimeBlock(to);
+                if (nearSlime) recentSlime.put(playerId, now);
+                Long slimeTs = recentSlime.get(playerId);
+                boolean slimeGrace = slimeTs != null && (now - slimeTs) < SLIME_GRACE_MS;
+
                 boolean flyExempt = player.hasPotionEffect(PotionEffectType.LEVITATION)
                         || player.hasPotionEffect(PotionEffectType.SLOW_FALLING)
-                        || isNearLiquid(player) || isNearSlimeBlock(to) || isNearBubbleColumn(to);
+                        || isNearLiquid(player) || slimeGrace || isNearBubbleColumn(to);
 
                 if (config.flyDetectionEnabled()) {
                     // (a) Vertical burst: too much upward movement in a single step
@@ -644,10 +678,7 @@ public class MovementChecker implements Listener {
 
         double bps = from.distance(to) * 20.0;
         double max = moveType == MovementType.ELYTRA ? Constants.ELYTRA_MAX_SPEED : Constants.RIPTIDE_MAX_SPEED;
-        int ping = effectivePing(player);
-        if (ping > 100) {
-            max *= 1.0 + (Math.sqrt(ping - 100) / 100.0);
-        }
+        max *= CheckMath.pingSlack(effectivePing(player));
 
         if (bps > max) {
             int c = consecutiveElytra.merge(playerId, 1, Integer::sum);
@@ -702,65 +733,72 @@ public class MovementChecker implements Listener {
     }
 
     /**
-     * Returns true only when the player is clearly free-floating in the air:
-     * not reported on ground, not in/on a climbable, web or liquid, and with at
-     * least two blocks of non-solid space below (so slabs, carpets, stairs and
-     * fences don't trigger false positives). Note: a client that spoofs its
-     * on-ground flag can still evade this — full prevention needs packet-level checks.
+     * Returns true only when the player is clearly free-floating in the air: nothing
+     * supportive within two blocks below any corner of the hitbox footprint, and not
+     * climbing. Note: a client that spoofs its on-ground flag can still evade this —
+     * full prevention needs packet-level checks.
      */
     private boolean isClearlyAirborne(Player player) {
-        if (isOnGroundServer(player)) return false;
-        Location loc = player.getLocation();
-        Material at = loc.getBlock().getType();
-        if (at == Material.COBWEB || at == Material.LADDER || at == Material.VINE
-                || at == Material.SCAFFOLDING || at == Material.TWISTING_VINES
-                || at == Material.WEEPING_VINES || at == Material.CAVE_VINES) {
-            return false;
-        }
-        if (loc.getBlock().getRelative(0, -1, 0).getType().isSolid()) return false;
-        if (loc.getBlock().getRelative(0, -2, 0).getType().isSolid()) return false;
-        return true;
+        return !hasSupportWithin(player, 2);
     }
 
     /**
-     * True when the player is clearly several blocks above any solid ground (used together
-     * with a client on-ground claim to detect GroundSpoof). Requires 3 blocks of non-solid
-     * space below so slabs, carpets, snow layers and stairs never trigger it. Climbables and
-     * webs are excluded (legitimate "hanging" states).
+     * True when the player is clearly several blocks above any support (used together
+     * with a client on-ground claim to detect GroundSpoof). Requires 3 blocks of
+     * unsupportive space below the entire footprint.
      */
     private boolean isHighAboveGround(Player player) {
-        Location loc = player.getLocation();
-        Material at = loc.getBlock().getType();
-        if (at == Material.COBWEB || at == Material.LADDER || at == Material.VINE
-                || at == Material.SCAFFOLDING || at == Material.TWISTING_VINES
-                || at == Material.WEEPING_VINES || at == Material.CAVE_VINES) {
-            return false;
-        }
-        for (int i = 1; i <= 3; i++) {
-            if (loc.getBlock().getRelative(0, -i, 0).getType().isSolid()) return false;
-        }
-        return true;
+        return !hasSupportWithin(player, 3);
     }
 
     /**
-     * Server-authoritative on-ground test: true when a solid block sits just beneath any
-     * corner of the player's footprint. Reads the world directly instead of trusting the
-     * client-sent on-ground flag, which Fly/NoFall spoof. Main-thread only.
+     * True when anything the player could legitimately stand on / hang in lies within
+     * {@code depth} blocks below the hitbox footprint. Checks all four footprint corners,
+     * not just the centre — a sneaking player overhangs an edge by up to half the hitbox
+     * width while still being supported. Also checks the block at foot level itself:
+     * standing on trapdoors, slabs, carpets or snow layers puts the supporting collision
+     * INSIDE that block, not below it. Main-thread only.
      */
-    private boolean isOnGroundServer(Player player) {
+    private boolean hasSupportWithin(Player player, int depth) {
+        if (player.isClimbing()) return true;
         Location loc = player.getLocation();
-        final double half = 0.3;      // player hitbox half-width
-        final int by = (int) Math.floor(loc.getY() - 0.001); // just below the feet
+        final double half = 0.3; // player hitbox half-width
         final double[] dx = { 0, half, -half, half, -half };
         final double[] dz = { 0, half, half, -half, -half };
+        // Scan the feet block itself plus `depth` blocks below it. The feet block covers
+        // fractional-Y standing (slabs, trapdoors, carpets); at integer Y the feet sit
+        // exactly on the boundary and the support is the first block below.
+        final int feetY = (int) Math.floor(loc.getY());
         for (int i = 0; i < dx.length; i++) {
-            if (loc.getWorld().getBlockAt(
-                    (int) Math.floor(loc.getX() + dx[i]), by,
-                    (int) Math.floor(loc.getZ() + dz[i])).getType().isSolid()) {
-                return true;
+            int bx = (int) Math.floor(loc.getX() + dx[i]);
+            int bz = (int) Math.floor(loc.getZ() + dz[i]);
+            for (int k = 0; k <= depth; k++) {
+                if (isSupportive(loc.getWorld().getBlockAt(bx, feetY - k, bz))) return true;
             }
         }
         return false;
+    }
+
+    /**
+     * A block counts as support when it has real collision ({@code !isPassable()} covers
+     * full blocks, slabs, stairs, trapdoors, carpets, fences, snow layers…) or is one of
+     * the collision-free blocks players legitimately stand on or hang in: powder snow
+     * (walkable with leather boots), scaffolding tops, cobwebs, climbables and liquids.
+     */
+    private boolean isSupportive(org.bukkit.block.Block block) {
+        Material m = block.getType();
+        if (m == Material.POWDER_SNOW || m == Material.SCAFFOLDING || m == Material.COBWEB) return true;
+        if (m == Material.WATER || m == Material.LAVA || m == Material.BUBBLE_COLUMN) return true;
+        if (isClimbableMaterial(m)) return true;
+        return !block.isPassable();
+    }
+
+    /**
+     * Climbable block materials via the game's own tag — a hand-rolled list misses the
+     * *_PLANT growth variants (CAVE_VINES_PLANT etc.) and any future climbable.
+     */
+    private static boolean isClimbableMaterial(Material m) {
+        return m.isBlock() && org.bukkit.Tag.CLIMBABLE.isTagged(m);
     }
 
     /** True when standing on top of a water block without being submerged (Jesus). */
@@ -773,9 +811,7 @@ public class MovementChecker implements Listener {
 
     /** True when the player occupies a climbable block (ladder/vine/scaffolding). */
     private boolean isOnClimbable(Player player) {
-        Material at = player.getLocation().getBlock().getType();
-        return at == Material.LADDER || at == Material.VINE || at == Material.SCAFFOLDING
-                || at == Material.TWISTING_VINES || at == Material.WEEPING_VINES || at == Material.CAVE_VINES;
+        return player.isClimbing() || isClimbableMaterial(player.getLocation().getBlock().getType());
     }
 
     /** True when a solid block is directly next to the player (feet or head level). */
@@ -803,6 +839,12 @@ public class MovementChecker implements Listener {
             }
         }
         return false;
+    }
+
+    /** Ice speed multiplier within 3 blocks below (shared scan, on-foot constants). */
+    private double iceMultiplierBelow(Location loc) {
+        return CheckMath.iceMultiplierBelow(
+                loc, Constants.ICE_SPEED_MULTIPLIER, Constants.BLUE_ICE_SPEED_MULTIPLIER);
     }
 
     /**
@@ -847,6 +889,8 @@ public class MovementChecker implements Listener {
         recentTeleport.remove(playerId);
         recentJoin.remove(playerId);
         recentGlide.remove(playerId);
+        recentSlime.remove(playerId);
+        recentIce.remove(playerId);
     }
 
     /**

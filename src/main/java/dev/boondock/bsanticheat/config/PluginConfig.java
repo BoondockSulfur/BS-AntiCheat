@@ -149,7 +149,9 @@ public class PluginConfig {
     public boolean elytraDetectionEnabled() { return cfg.getBoolean("anticheat.elytra_detection", true); }
     public boolean vehicleChecksEnabled() { return cfg.getBoolean("anticheat.vehicle_checks", true); }
     public boolean criticalsDetectionEnabled() { return cfg.getBoolean("anticheat.criticals_detection", true); }
-    public boolean autoBlockDetectionEnabled() { return cfg.getBoolean("anticheat.autoblock_detection", true); }
+    // Off by default: vanilla allows attacking with the main hand while an offhand shield
+    // is raised, so "attack while isBlocking" fires on ordinary sword+shield play.
+    public boolean autoBlockDetectionEnabled() { return cfg.getBoolean("anticheat.autoblock_detection", false); }
     // Off by default — the displacement measurement needs rework before it is FP-safe.
     public boolean velocityDetectionEnabled() { return cfg.getBoolean("anticheat.velocity_detection", false); }
     public int velocityViolations() { return cfg.getInt("anticheat.thresholds.velocity_violations", Constants.VELOCITY_VIOLATIONS); }
@@ -179,6 +181,8 @@ public class PluginConfig {
     public int boatFlyViolations() { return cfg.getInt("anticheat.thresholds.boatfly_violations", Constants.BOATFLY_VIOLATIONS); }
     public int vehicleSpeedViolations() { return cfg.getInt("anticheat.thresholds.vehicle_speed_violations", Constants.VEHICLE_SPEED_VIOLATIONS); }
     public int criticalsViolations() { return cfg.getInt("anticheat.thresholds.criticals_violations", Constants.CRITICALS_VIOLATIONS); }
+    public int reachViolations() { return cfg.getInt("anticheat.thresholds.reach_violations", Constants.REACH_VIOLATIONS); }
+    public int killAuraAngleViolations() { return cfg.getInt("anticheat.thresholds.killaura_angle_violations", Constants.KILLAURA_ANGLE_VIOLATIONS); }
     public int autoBlockViolations() { return cfg.getInt("anticheat.thresholds.autoblock_violations", Constants.AUTOBLOCK_VIOLATIONS); }
     public int fastBreakViolations() { return cfg.getInt("anticheat.thresholds.fastbreak_violations", Constants.FASTBREAK_VIOLATIONS); }
     public double fastBreakTolerance() { return cfg.getDouble("anticheat.thresholds.fastbreak_tolerance", Constants.FASTBREAK_TOLERANCE); }
@@ -201,14 +205,14 @@ public class PluginConfig {
     public boolean killAuraPlayersOnly() { return cfg.getBoolean("anticheat.killaura_players_only", true); }
     public boolean worldChecksEnabled() { return cfg.getBoolean("anticheat.world_checks", true); }
     public boolean nukerDetectionEnabled() { return cfg.getBoolean("anticheat.nuker_detection", true); }
-    public int nukerMaxBreaksPerSecond() { return cfg.getInt("anticheat.nuker_max_breaks_per_second", 15); }
+    public int nukerMaxBreaksPerSecond() { return cfg.getInt("anticheat.nuker_max_breaks_per_second", 25); }
     public boolean fastPlaceDetectionEnabled() { return cfg.getBoolean("anticheat.fastplace_detection", true); }
     public int fastPlaceMaxPerSecond() { return cfg.getInt("anticheat.fastplace_max_per_second", 12); }
     public boolean scaffoldDetectionEnabled() { return cfg.getBoolean("anticheat.scaffold_detection", true); }
     public double scaffoldMaxAngle() { return cfg.getDouble("anticheat.scaffold_max_angle", 80.0); }
     public boolean packetChecksEnabled() { return cfg.getBoolean("anticheat.packet_checks", true); }
     public boolean autoClickerDetectionEnabled() { return cfg.getBoolean("anticheat.autoclicker_detection", true); }
-    public int autoClickerMaxCps() { return cfg.getInt("anticheat.autoclicker_max_cps", 16); }
+    public int autoClickerMaxCps() { return cfg.getInt("anticheat.autoclicker_max_cps", 22); }
     public boolean autoClickerConsistencyEnabled() { return cfg.getBoolean("anticheat.autoclicker_consistency", false); }
     public int autoClickerMinSamples() { return cfg.getInt("anticheat.autoclicker_min_samples", 15); }
     public int autoClickerMinCps() { return cfg.getInt("anticheat.autoclicker_min_cps", 2); }

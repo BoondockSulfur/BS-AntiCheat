@@ -5,6 +5,7 @@ import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
+import dev.boondock.bsanticheat.util.CheckMath;
 import dev.boondock.bsanticheat.util.Constants;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
@@ -44,6 +45,7 @@ public class CombatChecker implements Listener {
     private GeyserHook geyser;
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
+    private TransactionManager transactionManager;
 
     // Slack for latency/hitbox interpolation on top of the surface distance.
     private static final double HITBOX_ALLOWANCE = 0.3;
@@ -53,6 +55,16 @@ public class CombatChecker implements Listener {
     // Criticals / AutoBlock: consecutive impossible hits
     private final Map<UUID, Integer> consecutiveCriticals = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> consecutiveAutoBlock = new ConcurrentHashMap<>();
+    // Reach / KillAura angle: consecutive suspicious hits within a short window. A single
+    // hit measured at event time is too noisy to flag (latency moves both hitboxes; a
+    // legit flick hit is judged against the pre-flick rotation) — a cheat exceeds the
+    // limit on every hit anyway. The window matters: without it, hits that bypass these
+    // checks entirely (mob hits with killaura_players_only, no-reach-check hits) never
+    // reset the counter, so rare legit outliers would accumulate across a whole session.
+    // State: [0]=count, [1]=timestamp of last suspicious hit (ms).
+    private final Map<UUID, long[]> reachStreak = new ConcurrentHashMap<>();
+    private final Map<UUID, long[]> killAuraAngleStreak = new ConcurrentHashMap<>();
+    private static final long STREAK_WINDOW_MS = 10000L;
 
     public CombatChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -75,6 +87,22 @@ public class CombatChecker implements Listener {
 
     public void setViolationManager(ViolationManager violationManager) {
         this.violationManager = violationManager;
+    }
+
+    public void setTransactionManager(TransactionManager transactionManager) {
+        this.transactionManager = transactionManager;
+    }
+
+    /** Suspicious-hit streak: increment within the window, restart when it lapsed. */
+    private int bumpStreak(Map<UUID, long[]> map, UUID id) {
+        long now = System.currentTimeMillis();
+        long[] st = map.compute(id, (k, v) -> {
+            if (v == null || now - v[1] > STREAK_WINDOW_MS) return new long[]{1, now};
+            v[0]++;
+            v[1] = now;
+            return v;
+        });
+        return (int) st[0];
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
@@ -133,9 +161,20 @@ public class CombatChecker implements Listener {
             // false-positives on large mobs (Ghast, Ravager) whose hitbox extends
             // multiple blocks from the center.
             double distance = Math.max(0.0, distanceToHitbox(attacker, victim) - HITBOX_ALLOWANCE);
-            double maxReach = config.reachDistance();
+            // Latency stretches the measured distance: both hitboxes moved between the
+            // client's aim and the server's judgement. Same sqrt scaling as the movement
+            // checks (200ms → +10%, 500ms → +20%).
+            double maxReach = config.reachDistance()
+                    * CheckMath.pingSlack(
+                            CheckMath.effectivePing(transactionManager, attacker));
             if (distance > maxReach) {
-                handleViolation(attacker, "REACH", lang.format("alert.reach", distance, maxReach), distance);
+                int c = bumpStreak(reachStreak, attackerId);
+                if (c >= config.reachViolations()) {
+                    handleViolation(attacker, "REACH", lang.format("alert.reach", distance, maxReach), distance);
+                    reachStreak.remove(attackerId);
+                }
+            } else {
+                reachStreak.remove(attackerId);
             }
         }
 
@@ -152,7 +191,13 @@ public class CombatChecker implements Listener {
                             attacker.getName(), angle, config.killAuraMaxAngle(), victimIsPlayer));
                 }
                 if (angle > config.killAuraMaxAngle()) {
-                    handleViolation(attacker, "KILLAURA", lang.format("alert.killaura_angle", angle), angle);
+                    int c = bumpStreak(killAuraAngleStreak, attackerId);
+                    if (c >= config.killAuraAngleViolations()) {
+                        handleViolation(attacker, "KILLAURA", lang.format("alert.killaura_angle", angle), angle);
+                        killAuraAngleStreak.remove(attackerId);
+                    }
+                } else {
+                    killAuraAngleStreak.remove(attackerId);
                 }
             }
 
@@ -206,6 +251,8 @@ public class CombatChecker implements Listener {
         recentTargets.remove(playerId);
         consecutiveCriticals.remove(playerId);
         consecutiveAutoBlock.remove(playerId);
+        reachStreak.remove(playerId);
+        killAuraAngleStreak.remove(playerId);
     }
 
     private static final class TargetHit {

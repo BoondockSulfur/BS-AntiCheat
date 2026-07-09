@@ -29,7 +29,10 @@ public final class Constants {
     public static final long XRAY_PLACED_BLOCK_EXPIRY_MS = 3600000L;
     public static final long XRAY_CLEANUP_INTERVAL_TICKS = 6000L;
     public static final int XRAY_MAX_PLACED_BLOCKS_SIZE = 10000;
-    public static final int XRAY_MIN_STONE_FOR_RATIO_CHECK = 20;
+    // Raised from 20: cave miners legitimately break the ores they SEE plus little stone,
+    // so a small sample flags instantly (21 stone + 3 diamonds = 14%). A meaningful ratio
+    // needs a real tunnel-mining sample.
+    public static final int XRAY_MIN_STONE_FOR_RATIO_CHECK = 60;
     public static final int XRAY_MAX_PLAYER_ENTRIES = 5000;
     // Combined rare-ore count (diamond + emerald + ancient debris) that triggers an
     // alert even when no single rare ore exceeded its individual threshold.
@@ -43,6 +46,8 @@ public final class Constants {
     public static final double SPEED_POTION_MULTIPLIER_PER_LEVEL = 0.2;
     public static final double SOUL_SPEED_MULTIPLIER = 0.3;
     public static final double SNEAKING_SPEED_MULTIPLIER = 0.3;
+    // Swift Sneak raises the sneak multiplier by 0.15 per level (level 3 = 0.75x walking)
+    public static final double SWIFT_SNEAK_MULTIPLIER_PER_LEVEL = 0.15;
     public static final double SWIMMING_SPEED_MULTIPLIER = 0.8;
     public static final double CLIMBING_SPEED_MULTIPLIER = 0.5;
     public static final double CREATIVE_FLY_MULTIPLIER = 2.0;
@@ -86,6 +91,10 @@ public final class Constants {
     public static final int STEP_VIOLATIONS = 5;
     // KillAura multi-aura: window for counting distinct targets hit
     public static final long KILLAURA_MULTI_WINDOW_MS = 250L;
+    // Reach / KillAura angle: consecutive suspicious hits before flagging. Single hits are
+    // noisy (latency moves both hitboxes; flick hits are judged against stale rotation).
+    public static final int REACH_VIOLATIONS = 3;
+    public static final int KILLAURA_ANGLE_VIOLATIONS = 3;
     // Scaffold: consecutive "not looking at block" places before flagging
     public static final int SCAFFOLD_VIOLATIONS = 3;
     // Criticals (crit while on ground) / AutoBlock (attack while shielding)

@@ -165,6 +165,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
                 movementChecker.setTransactionManager(transactionManager);
                 vehicleChecker.setTransactionManager(transactionManager);
                 velocityChecker.setTransactionManager(transactionManager);
+                combatChecker.setTransactionManager(transactionManager);
 
                 packetListener = PacketEvents.getAPI().getEventManager()
                         .registerListener(packetChecker, PacketListenerPriority.NORMAL);

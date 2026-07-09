@@ -57,9 +57,11 @@ anticheat:
   combat_checks: true
   reach_detection: true
   killaura_detection: true
-  # Criticals (crit hit while on ground) and AutoBlock (attacking while shielding)
+  # Criticals: crit hit while on ground
   criticals_detection: true
-  autoblock_detection: true
+  # AutoBlock: OFF by default — vanilla allows attacking with the main hand while an
+  # offhand shield is raised, so this flags ordinary sword+shield play. Opt-in only.
+  autoblock_detection: false
   # Velocity / AntiKnockback: flag players who don't apply server-sent knockback.
   # OFF by default — the displacement measurement still needs rework before it is
   # false-positive-safe (it can misread legit knockback as ignored). Opt-in only.
@@ -105,7 +107,11 @@ anticheat:
     # Vehicle
     boatfly_violations: 10
     vehicle_speed_violations: 5
-    # Combat extras
+    # Combat extras. Reach/KillAura-angle need this many suspicious hits within a short
+    # window (10s) — single hits are noisy (latency moves both hitboxes, flick hits are
+    # judged against the pre-flick rotation).
+    reach_violations: 3
+    killaura_angle_violations: 3
     criticals_violations: 3
     autoblock_violations: 2
     velocity_violations: 3
@@ -141,16 +147,18 @@ anticheat:
   killaura_rotation_min_gcd: 8000
 
   # World: max blocks broken/placed per second before flagging. Generous defaults so
-  # legitimate fast mining (Efficiency + Haste on instamine blocks) is not flagged.
-  nuker_max_breaks_per_second: 15
+  # legitimate fast mining is not flagged — Efficiency V + Haste II instamines up to
+  # 20 blocks/s, real nukers break 50+.
+  nuker_max_breaks_per_second: 25
   fastplace_max_per_second: 12
   # Scaffold: flag placing blocks more than this many degrees off the player's aim
   # (bridging/towering "blind"), sustained over a few placements.
   scaffold_max_angle: 80.0
 
   # Packet-level: max clicks per second from arm-swings (mining swings are excluded).
-  # Skilled humans reach ~17-20 (butterfly/jitter); autoclickers usually exceed this.
-  autoclicker_max_cps: 20
+  # Skilled humans reach ~17-21 (butterfly/jitter clicking peaked at 21 in live testing);
+  # autoclickers usually exceed this.
+  autoclicker_max_cps: 22
   # AutoClicker pattern analysis (EXPERIMENTAL, off by default): flags overly consistent
   # attack intervals. Can false-positive on held attacks; calibrate with debug_mode before
   # enabling.
@@ -180,11 +188,12 @@ anticheat:
   xray_excluded_ores: []
   xray_stone_ore_ratio: 0.10
 
-  # Per-Ore Thresholds (ores mined per time window)
+  # Per-Ore Thresholds (ores mined per time window). Coal/iron/copper allow for the
+  # 1.18+ giant ore veins and large mountain seams a legit miner chews through quickly.
   xray_thresholds:
-    coal: 20
-    iron: 15
-    copper: 15
+    coal: 30
+    iron: 25
+    copper: 40
     gold: 10
     redstone: 10
     lapis: 8

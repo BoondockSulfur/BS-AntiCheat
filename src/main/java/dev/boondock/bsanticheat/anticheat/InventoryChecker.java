@@ -5,10 +5,14 @@ import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
+import dev.boondock.bsanticheat.util.CheckMath;
 import dev.boondock.bsanticheat.util.Constants;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Vehicle;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -144,6 +148,15 @@ public class InventoryChecker implements Listener {
             return;
         }
 
+        // Momentum and shoves need no key input: opening a chest while sprinting on ice
+        // keeps the player sliding above the threshold for many ticks, and colliding
+        // entities (mob crowds, villager halls) push a player with an open GUI around.
+        // Checked only after the speed gate — the entity query is the expensive part.
+        if (isOnIce(player) || isBeingPushed(player)) {
+            consecutiveInvMove.remove(id);
+            return;
+        }
+
         if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
 
         int c = consecutiveInvMove.merge(id, 1, Integer::sum);
@@ -151,6 +164,25 @@ public class InventoryChecker implements Listener {
             handleViolation(player, "INVENTORYMOVE", lang.format("alert.inventorymove", c), horizontal, to);
             consecutiveInvMove.put(id, 0);
         }
+    }
+
+    /** True when ice below could carry sliding momentum (shared scan). */
+    private boolean isOnIce(Player player) {
+        return CheckMath.iceMultiplierBelow(player.getLocation(),
+                Constants.ICE_SPEED_MULTIPLIER, Constants.BLUE_ICE_SPEED_MULTIPLIER) > 1.0;
+    }
+
+    /**
+     * True when an entity close enough to shove the player is nearby. Only collidable
+     * living entities and vehicles count — armor stands, markers and dropped items
+     * cannot push and must not disable the check.
+     */
+    private boolean isBeingPushed(Player player) {
+        for (Entity e : player.getNearbyEntities(1.0, 0.5, 1.0)) {
+            if (e instanceof LivingEntity le && le.isCollidable()) return true;
+            if (e instanceof Vehicle) return true;
+        }
+        return false;
     }
 
     // ==================== ChestStealer + AutoTotem (clicks) ====================

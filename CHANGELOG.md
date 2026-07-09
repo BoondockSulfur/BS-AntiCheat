@@ -4,6 +4,67 @@ All notable changes to BSAntiCheat are documented in this file.
 
 ---
 
+## [1.0.1] - 2026-07-08
+
+False-positive elimination release, driven by live alert data from a production server
+(503 GroundSpoof / 314 Timer / 150 Speed / 62 Fly alerts — all confirmed false positives).
+
+### Movement
+- **GroundSpoof/Fly ground detection rewritten:** all ground tests now check the four
+  hitbox-footprint corners (not just the centre column — sneaking over an edge no longer
+  flags), include the block at foot level itself (standing on trapdoors, slabs, carpets,
+  snow layers), and use real collision (`isPassable`) instead of `isSolid`, plus explicit
+  support for powder snow, scaffolding tops, cobwebs, climbables and liquids.
+- **Fly at ladders fixed:** climbing state now uses the game's own `isClimbing()` logic,
+  and climbable blocks below the feet count as support (exiting the top of a ladder no
+  longer accumulates hover violations).
+- **Speed on ice fixed:** the ice multiplier now survives sprint-jumps (3-block down-scan
+  plus a 2.5s ice-momentum memory) — ice-road running no longer flags.
+- **Swift Sneak supported:** the sneak speed cap scales with the enchantment level
+  (level 3 = 0.75x walking) instead of the fixed vanilla 0.3x.
+- **Server-applied velocity grants knockback immunity** (`PlayerVelocityEvent`): projectile
+  knockback (punch bows, snowballs), wind charges, fishing-rod pulls and jump-pad plugins
+  no longer trigger Speed/Fly.
+- **Slime-bounce grace:** high bounces are exempt during the whole rise (3s launch memory),
+  not only while slime is within 2 blocks below.
+
+### Combat
+- **Reach and KillAura (angle) now require 3 suspicious hits within a 10s window**
+  (configurable via `reach_violations`/`killaura_angle_violations`) instead of flagging a
+  single hit, and Reach is ping-compensated (same sqrt scaling as movement, fed by the
+  transaction-latency system).
+- **AutoBlock default off:** vanilla allows attacking while an offhand shield is raised,
+  so the check flags ordinary sword+shield play. Opt-in only.
+
+### Packet & world
+- **Timer clock-drift leak:** real time is counted at 101%, absorbing benign client clock
+  drift (~0.5% fast clocks accumulated ~10ms/s and periodically crossed the 200ms limit).
+- **FastBreak measures the expected dig time at dig start AND end and uses the lenient
+  one** — landing from a jump or a haste beacon kicking in mid-dig no longer flags.
+- **Scaffold angle measured to the clicked block** (nearest hitbox point) instead of the
+  placed block's centre — placing a block at your own feet (95–113° off aim in live data)
+  no longer counts.
+- **Boat ice momentum:** the boat speed ceiling and Boat-Fly keep the ice multiplier for
+  3s after ice contact — bumps/gaps/ramp launches on ice roads no longer flag.
+- **InventoryMove exempts momentum and shoves:** sliding on ice with a GUI open and being
+  pushed by nearby entities (mob crowds) no longer count.
+
+### Infrastructure & calibration
+- **Lag detection reacts to spikes:** `isLagging` now also checks the 5-second MSPT average
+  (`getAverageTickTime`) — the 1-minute TPS average barely moves during short spikes,
+  which are exactly what distorts movement deltas.
+- Calibration from live data: `autoclicker_max_cps` 20 → 22 (legit butterfly clicking
+  peaked at 21), `nuker_max_breaks_per_second` 15 → 25 (instamine reaches ~20/s),
+  XRay coal 20 → 30 / iron 15 → 25 / copper 15 → 40 (1.18+ giant veins), XRay ratio check
+  needs 60 mined stone (was 20) so cave miners aren't judged on tiny samples.
+
+Note for existing installations: config values already present in your `config.yml` are
+kept on update — apply the new calibration defaults (`autoclicker_max_cps`,
+`nuker_max_breaks_per_second`, `xray_thresholds`, `autoblock_detection`) manually or
+delete the keys so the new defaults merge in.
+
+---
+
 ## [1.0.0] - 2026-07-02
 
 First public release. Live-tested and false-positive-calibrated on a real server, verified

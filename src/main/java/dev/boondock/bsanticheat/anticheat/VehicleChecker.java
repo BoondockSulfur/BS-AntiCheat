@@ -61,6 +61,11 @@ public class VehicleChecker implements Listener {
     // Keyed by the riding player's UUID (cleaned up on quit)
     private final Map<UUID, Integer> consecutiveBoatFly = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> consecutiveVehicleSpeed = new ConcurrentHashMap<>();
+    // Ice-momentum memory for boats: [0]=timestamp(ms), [1]=ice speed multiplier. A boat
+    // at ice speed lifts off briefly over every bump/gap in the road — without the memory
+    // the allowance would collapse to the base speed mid-hop while the momentum persists.
+    private final Map<UUID, double[]> recentIce = new ConcurrentHashMap<>();
+    private static final long ICE_MOMENTUM_GRACE_MS = 3000;
 
     public VehicleChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -89,13 +94,9 @@ public class VehicleChecker implements Listener {
         this.transactionManager = transactionManager;
     }
 
-    /** Precise transaction RTT (ms) when available, otherwise the coarse getPing(). */
+    /** Round-trip latency (ms) for lag compensation (see {@link dev.boondock.bsanticheat.util.CheckMath}). */
     private int effectivePing(Player player) {
-        if (transactionManager != null) {
-            double rtt = transactionManager.roundTripMs(player.getUniqueId());
-            if (rtt >= 0) return (int) Math.round(rtt);
-        }
-        return player.getPing();
+        return dev.boondock.bsanticheat.util.CheckMath.effectivePing(transactionManager, player);
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -125,10 +126,27 @@ public class VehicleChecker implements Listener {
             return;
         }
 
+        // Ice contact memory for boats (used by both the speed ceiling and Boat-Fly:
+        // a ramp launch off blue ice keeps a legit boat rising/airborne for a while).
+        double iceMult = 1.0;
+        if (vehicle instanceof Boat) {
+            iceMult = iceMultiplierBelow(to);
+            long nowMs = System.currentTimeMillis();
+            if (iceMult > 1.0) {
+                recentIce.put(playerId, new double[]{nowMs, iceMult});
+            } else {
+                double[] lastIce = recentIce.get(playerId);
+                if (lastIce != null && nowMs - (long) lastIce[0] < ICE_MOMENTUM_GRACE_MS) {
+                    iceMult = lastIce[1];
+                }
+            }
+        }
+        boolean iceMomentum = iceMult > 1.0;
+
         // --- Boat-Fly: boat stays airborne without falling ---
         if (vehicle instanceof Boat) {
             double dy = to.getY() - from.getY();
-            if (dy > -0.01 && isAirborne(to)) {
+            if (dy > -0.01 && !iceMomentum && isAirborne(to)) {
                 int c = consecutiveBoatFly.merge(playerId, 1, Integer::sum);
                 if (c >= config.boatFlyViolations()) {
                     handleViolation(player, "BOATFLY", lang.format("alert.boatfly", c), dy, to);
@@ -141,11 +159,8 @@ public class VehicleChecker implements Listener {
 
         // --- Vehicle speed: per-event distance is ~one tick of movement → ×20 = b/s ---
         double bps = from.distance(to) * 20.0;
-        double max = maxSpeedFor(vehicle, to);
-        int ping = effectivePing(player);
-        if (ping > 100) {
-            max *= 1.0 + (Math.sqrt(ping - 100) / 100.0);
-        }
+        double max = maxSpeedFor(vehicle, iceMult)
+                * dev.boondock.bsanticheat.util.CheckMath.pingSlack(effectivePing(player));
 
         if (bps > max) {
             int c = consecutiveVehicleSpeed.merge(playerId, 1, Integer::sum);
@@ -160,32 +175,33 @@ public class VehicleChecker implements Listener {
     }
 
     /**
-     * True when nothing supports the vehicle: no solid block and no liquid/bubble column
-     * in its own block or the two blocks below (slabs, waterlogged blocks and wave
+     * True when nothing supports the vehicle: no collidable block (isPassable covers
+     * trapdoors, slabs, carpets and fences that isSolid misjudges) and no liquid/bubble
+     * column in its own block or the two blocks below (waterlogged blocks and wave
      * bobbing on the water surface therefore never trigger it).
      */
     private boolean isAirborne(Location loc) {
         Block block = loc.getBlock();
         for (int i = 0; i <= 2; i++) {
-            Material m = block.getRelative(0, -i, 0).getType();
-            if (m.isSolid() || m == Material.WATER || m == Material.LAVA || m == Material.BUBBLE_COLUMN) {
+            Block b = block.getRelative(0, -i, 0);
+            Material m = b.getType();
+            if (!b.isPassable() || m == Material.WATER || m == Material.LAVA || m == Material.BUBBLE_COLUMN) {
                 return false;
             }
         }
         return true;
     }
 
-    /** Per-type speed ceiling in blocks per second, with ice multipliers for boats. */
-    private double maxSpeedFor(Vehicle vehicle, Location to) {
+    /** Ice multiplier within 3 blocks below the boat (shared scan, vehicle constants). */
+    private double iceMultiplierBelow(Location to) {
+        return dev.boondock.bsanticheat.util.CheckMath.iceMultiplierBelow(
+                to, Constants.VEHICLE_ICE_SPEED_MULTIPLIER, Constants.VEHICLE_BLUE_ICE_SPEED_MULTIPLIER);
+    }
+
+    /** Per-type speed ceiling in blocks per second, with the (remembered) boat ice multiplier. */
+    private double maxSpeedFor(Vehicle vehicle, double iceMult) {
         if (vehicle instanceof Boat) {
-            double max = Constants.BOAT_MAX_SPEED;
-            Material below = to.getBlock().getRelative(0, -1, 0).getType();
-            if (below == Material.BLUE_ICE) {
-                max *= Constants.VEHICLE_BLUE_ICE_SPEED_MULTIPLIER;
-            } else if (below == Material.ICE || below == Material.PACKED_ICE || below == Material.FROSTED_ICE) {
-                max *= Constants.VEHICLE_ICE_SPEED_MULTIPLIER;
-            }
-            return max;
+            return Constants.BOAT_MAX_SPEED * iceMult;
         }
         if (vehicle instanceof Minecart) return Constants.MINECART_MAX_SPEED;
         if (vehicle instanceof Horse) return Constants.HORSE_MAX_SPEED;
@@ -214,5 +230,6 @@ public class VehicleChecker implements Listener {
     public void cleanup(UUID playerId) {
         consecutiveBoatFly.remove(playerId);
         consecutiveVehicleSpeed.remove(playerId);
+        recentIce.remove(playerId);
     }
 }

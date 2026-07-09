@@ -15,6 +15,7 @@ import org.bukkit.plugin.Plugin;
 public final class ServerLoad {
 
     private static volatile double currentTps = 20.0;
+    private static volatile double currentMspt = 50.0;
 
     private ServerLoad() {}
 
@@ -24,6 +25,13 @@ public final class ServerLoad {
             if (tps != null && tps.length > 0) {
                 currentTps = tps[0];
             }
+            // Defensive: on region-threaded servers (Folia) the global tick-time metric
+            // may be unsupported — a throw here must not kill the sampler task.
+            try {
+                currentMspt = Bukkit.getAverageTickTime();
+            } catch (Throwable ignored) {
+                currentMspt = 50.0; // neutral: the MSPT branch simply never triggers
+            }
         }, 20L, 20L);
     }
 
@@ -31,8 +39,15 @@ public final class ServerLoad {
         return currentTps;
     }
 
-    /** True when recent TPS is below the configured threshold (checks should back off). */
+    /**
+     * True when the server is lagging and checks should back off. Uses two signals:
+     * getTPS()[0] is a 1-minute average that barely reacts to short spikes — exactly
+     * the situations that distort movement deltas — so the 5-second MSPT average
+     * (getAverageTickTime) catches those; the equivalent threshold is 1000/lagExemptTps
+     * (18 TPS → 55.6ms per tick).
+     */
     static boolean isLagging(PluginConfig config) {
-        return currentTps < config.lagExemptTps();
+        double tpsFloor = config.lagExemptTps();
+        return currentTps < tpsFloor || (tpsFloor > 0 && currentMspt > 1000.0 / tpsFloor);
     }
 }

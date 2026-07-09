@@ -52,7 +52,7 @@ public class WorldChecker implements Listener {
     private final Map<UUID, DigState> digStart = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> consecutiveFastBreak = new ConcurrentHashMap<>();
 
-    private record DigState(long startMs, String world, int x, int y, int z) {
+    private record DigState(long startMs, long expectedMs, String world, int x, int y, int z) {
         boolean matches(Block block) {
             return block.getX() == x && block.getY() == y && block.getZ() == z
                     && block.getWorld().getName().equals(world);
@@ -92,7 +92,20 @@ public class WorldChecker implements Listener {
             return;
         }
         Block b = event.getBlock();
-        digStart.put(id, new DigState(System.currentTimeMillis(), b.getWorld().getName(), b.getX(), b.getY(), b.getZ()));
+        // Expected dig time measured NOW: the player's state at dig start (on ground /
+        // airborne, haste, tool) is what governed most of the actual dig.
+        digStart.put(id, new DigState(System.currentTimeMillis(), expectedDigMs(b, event.getPlayer()),
+                b.getWorld().getName(), b.getX(), b.getY(), b.getZ()));
+    }
+
+    /**
+     * Expected dig time in ms from getBreakSpeed() (damage per tick, tool/enchants/haste/
+     * conditions included), or 0 when instamined / not measurable.
+     */
+    private long expectedDigMs(Block block, Player player) {
+        float speed = block.getBreakSpeed(player);
+        if (speed <= 0.0f || speed >= 1.0f) return 0L;
+        return (long) Math.ceil(1.0 / speed) * 50L;
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -119,14 +132,16 @@ public class WorldChecker implements Listener {
             }
         }
 
-        // FastBreak: block broken clearly faster than its expected break time.
-        // getBreakSpeed() is the damage dealt per tick (tool/enchants/haste/conditions
-        // included), so expected ticks = ceil(1/speed). Instamine (speed >= 1) and very
-        // short digs are skipped; the tolerance keeps tool switches mid-dig from flagging.
+        // FastBreak: block broken clearly faster than its expected break time. The
+        // expected time is measured at BOTH dig start and dig end and the smaller one
+        // wins: the player's state can legitimately change mid-dig (landing from a jump,
+        // a haste beacon kicking in, a tool switch) and judging only the end state reads
+        // the on-ground/boosted dig as impossibly fast. Instamine and very short digs
+        // are skipped.
         if (config.fastBreakDetectionEnabled() && dig != null && dig.matches(event.getBlock())) {
-            float breakSpeed = event.getBlock().getBreakSpeed(player);
-            if (breakSpeed > 0.0f && breakSpeed < 1.0f) {
-                long expectedMs = (long) Math.ceil(1.0 / breakSpeed) * 50L;
+            long expectedEndMs = expectedDigMs(event.getBlock(), player);
+            if (expectedEndMs > 0L && dig.expectedMs() > 0L) {
+                long expectedMs = Math.min(dig.expectedMs(), expectedEndMs);
                 long actualMs = System.currentTimeMillis() - dig.startMs();
                 if (expectedMs >= Constants.FASTBREAK_MIN_EXPECTED_MS
                         && actualMs < (long) (expectedMs * config.fastBreakTolerance())) {
@@ -167,11 +182,18 @@ public class WorldChecker implements Listener {
         }
 
         // Scaffold: block placed far outside the player's view (placing "blind" while
-        // bridging/towering). Legit placement looks at the block, so the angle is small.
+        // bridging/towering). The angle is measured to the nearest point of the CLICKED
+        // block, not the placed block's center: placing a block at your own feet
+        // legitimately puts the new block below/behind you (95°+ off aim) while the face
+        // you actually clicked was in view the whole time.
         if (config.scaffoldDetectionEnabled()) {
-            Vector look = player.getEyeLocation().getDirection();
-            Vector toBlock = event.getBlock().getLocation().add(0.5, 0.5, 0.5).toVector()
-                    .subtract(player.getEyeLocation().toVector());
+            Block against = event.getBlockAgainst();
+            org.bukkit.Location eye = player.getEyeLocation();
+            double nx = Math.max(against.getX(), Math.min(eye.getX(), against.getX() + 1.0));
+            double ny = Math.max(against.getY(), Math.min(eye.getY(), against.getY() + 1.0));
+            double nz = Math.max(against.getZ(), Math.min(eye.getZ(), against.getZ() + 1.0));
+            Vector look = eye.getDirection();
+            Vector toBlock = new Vector(nx, ny, nz).subtract(eye.toVector());
             if (toBlock.lengthSquared() > 1.0e-6) {
                 double angle = Math.toDegrees(look.angle(toBlock));
                 if (config.debugMode()) {
