@@ -4,10 +4,13 @@ All notable changes to BSAntiCheat are documented in this file.
 
 ---
 
-## [1.0.1] - 2026-07-08
+## [1.0.1] - 2026-07-09
 
 False-positive elimination release, driven by live alert data from a production server
 (503 GroundSpoof / 314 Timer / 150 Speed / 62 Fly alerts — all confirmed false positives).
+
+**Verified in production:** deployed 2026-07-09; the prior baseline of ~200 false alerts
+per day (~1000 over 5 days) dropped to zero in the first 24 hours of normal play.
 
 ### Movement
 - **GroundSpoof/Fly ground detection rewritten:** all ground tests now check the four
