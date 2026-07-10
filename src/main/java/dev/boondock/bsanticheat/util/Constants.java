@@ -35,8 +35,9 @@ public final class Constants {
     public static final int XRAY_MIN_STONE_FOR_RATIO_CHECK = 60;
     public static final int XRAY_MAX_PLAYER_ENTRIES = 5000;
     // Combined rare-ore count (diamond + emerald + ancient debris) that triggers an
-    // alert even when no single rare ore exceeded its individual threshold.
-    public static final int XRAY_RARE_COMBINED_THRESHOLD = 8;
+    // alert even when no single rare ore exceeded its individual threshold. Raised from
+    // 8 after live data: beacon/efficiency deepslate mining legitimately clears that.
+    public static final int XRAY_RARE_COMBINED_THRESHOLD = 12;
 
     // ==================== ALERT MANAGER ====================
     public static final long ALERT_COOLDOWN_MS = 300000L;

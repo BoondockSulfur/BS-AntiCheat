@@ -75,10 +75,10 @@ public class PluginConfig {
     private void validateConfig(FileConfiguration cfg) {
         boolean hasErrors = false;
 
-        double ratio = cfg.getDouble("anticheat.xray_stone_ore_ratio", 0.10);
+        double ratio = cfg.getDouble("anticheat.xray_stone_ore_ratio", 0.15);
         if (ratio < 0.0 || ratio > 1.0) {
-            plugin.getLogger().warning("[Config] Invalid xray_stone_ore_ratio: " + ratio + ". Using 0.10");
-            cfg.set("anticheat.xray_stone_ore_ratio", 0.10);
+            plugin.getLogger().warning("[Config] Invalid xray_stone_ore_ratio: " + ratio + ". Using 0.15");
+            cfg.set("anticheat.xray_stone_ore_ratio", 0.15);
             hasErrors = true;
         }
 
@@ -237,7 +237,9 @@ public class PluginConfig {
     // XRay settings
     public int xrayTimewindowSeconds() { return cfg.getInt("anticheat.xray_timewindow_seconds", 60); }
     public List<String> xrayExcludedOres() { return cfg.getStringList("anticheat.xray_excluded_ores"); }
-    public double xrayStoneOreRatio() { return cfg.getDouble("anticheat.xray_stone_ore_ratio", 0.10); }
+    public double xrayStoneOreRatio() { return cfg.getDouble("anticheat.xray_stone_ore_ratio", 0.15); }
+    public List<String> xrayExemptWorlds() { return cfg.getStringList("anticheat.xray_exempt_worlds"); }
+    public int xrayRareCombinedThreshold() { return cfg.getInt("anticheat.xray_rare_combined_threshold", Constants.XRAY_RARE_COMBINED_THRESHOLD); }
 
     public int xrayThreshold(String oreType) {
         String key = oreType.toLowerCase().replace("_ore", "").replace("deepslate_", "");

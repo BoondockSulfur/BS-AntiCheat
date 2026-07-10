@@ -4,6 +4,25 @@ All notable changes to BSAntiCheat are documented in this file.
 
 ---
 
+## [1.0.2] - 2026-07-10
+
+XRay calibration release: live data showed legitimate beacon (Haste II) + Efficiency V
+deepslate branch mining still tripping the per-ore thresholds and the ore/stone ratio
+(10.45% vs. the 10% limit).
+
+- **Per-ore thresholds raised** for the deepslate-level ores: gold 10 → 15,
+  redstone 10 → 20, lapis 8 → 15, diamond 6 → 10, emerald 4 → 6.
+- **Ore/stone ratio 0.10 → 0.15** — cave/deepslate miners legitimately exceed 10%.
+- **Combined rare-ore threshold 8 → 12** and now configurable
+  (`xray_rare_combined_threshold`).
+- **New `xray_exempt_worlds` option:** skip XRay entirely in listed worlds (resource/farm
+  worlds that get reset). Prefer raised thresholds over full exemption — cheaters mine in
+  exactly those worlds.
+- **Threshold alerts now name the exceeded ores** (e.g. `[DIAMOND_ORE x11 (max 10)]`) in
+  the alert and DB log — previously a logged alert couldn't be diagnosed or tuned against.
+
+---
+
 ## [1.0.1] - 2026-07-09
 
 False-positive elimination release, driven by live alert data from a production server

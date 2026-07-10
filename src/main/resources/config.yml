@@ -186,19 +186,29 @@ anticheat:
   # XRay Settings
   xray_timewindow_seconds: 60
   xray_excluded_ores: []
-  xray_stone_ore_ratio: 0.10
+  # Ore/stone ratio: cave and deepslate miners legitimately hit >10% (they mine the
+  # ores they see plus little stone), so 0.15 leaves headroom for normal mining.
+  xray_stone_ore_ratio: 0.15
+  # Worlds where XRay detection is skipped entirely (e.g. resource/farm worlds that get
+  # reset). Note: cheaters often mine in exactly these worlds — prefer raising the
+  # thresholds below before fully exempting a world.
+  xray_exempt_worlds: []
+  # Combined rare-ore count (diamond + emerald + ancient debris together) per time window
+  xray_rare_combined_threshold: 12
 
   # Per-Ore Thresholds (ores mined per time window). Coal/iron/copper allow for the
-  # 1.18+ giant ore veins and large mountain seams a legit miner chews through quickly.
+  # 1.18+ giant ore veins and large mountain seams; redstone/lapis/diamond/gold allow
+  # for beacon (Haste II) + Efficiency V deepslate branch mining, which legitimately
+  # clears the old lower limits (confirmed via live alert data).
   xray_thresholds:
     coal: 30
     iron: 25
     copper: 40
-    gold: 10
-    redstone: 10
-    lapis: 8
-    diamond: 6
-    emerald: 4
+    gold: 15
+    redstone: 20
+    lapis: 15
+    diamond: 10
+    emerald: 6
     ancient_debris: 3
 
   # Restricted Worlds (instant alerts when ores are mined)

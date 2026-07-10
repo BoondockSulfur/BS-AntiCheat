@@ -5,7 +5,7 @@
 
   <groupId>dev.boondock</groupId>
   <artifactId>bsanticheat</artifactId>
-  <version>1.0.1</version>
+  <version>1.0.2</version>
   <name>BSAntiCheat</name>
   <description>AntiCheat plugin for Paper 1.21.x with Movement and XRay detection</description>
 

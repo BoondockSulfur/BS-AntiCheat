@@ -343,6 +343,11 @@ public class XRayDetector implements Listener {
             return;
         }
 
+        // Fully exempt worlds (resource/farm worlds where mass mining is normal)
+        if (config.xrayExemptWorlds().contains(block.getWorld().getName())) {
+            return;
+        }
+
         // Track stone mining (time-windowed)
         if (STONE_TYPES.contains(type)) {
             long now = System.currentTimeMillis();
@@ -487,7 +492,16 @@ public class XRayDetector implements Listener {
             // Get location info from recent mines
             String locationInfo = getLocationSummary(mines);
 
-            String message = lang.format("alert.xray_threshold", player.getName(), timewindow, locationInfo);
+            // Name the exceeded ores in the message — without them a logged alert can't
+            // be judged (or the thresholds tuned) afterwards.
+            StringBuilder oreInfo = new StringBuilder();
+            for (Map.Entry<String, Integer> e : exceededOres.entrySet()) {
+                if (oreInfo.length() > 0) oreInfo.append(", ");
+                oreInfo.append(e.getKey()).append(" x").append(e.getValue())
+                        .append(" (max ").append(config.xrayThreshold(e.getKey())).append(")");
+            }
+            String message = lang.format("alert.xray_threshold", player.getName(), timewindow, locationInfo)
+                    + " [" + oreInfo + "]";
 
             // Log alerts to console only in debug mode
             if (config.debugMode()) {
@@ -545,7 +559,7 @@ public class XRayDetector implements Listener {
 
         if (!rareAlreadyFlagged) {
             List<OreMineEvent> rareMines = mines.stream().filter(m -> RARE_ORES.contains(m.oreType)).toList();
-            if (rareMines.size() >= Constants.XRAY_RARE_COMBINED_THRESHOLD) {
+            if (rareMines.size() >= config.xrayRareCombinedThreshold()) {
                 Map<String, Integer> rareBreakdown = new HashMap<>();
                 rareMines.forEach(m -> rareBreakdown.merge(m.oreType.name().replace("DEEPSLATE_", ""), 1, Integer::sum));
 
