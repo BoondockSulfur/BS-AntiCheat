@@ -149,25 +149,4 @@ public class FallbackLogger {
             e.printStackTrace();
         }
     }
-
-    /**
-     * Get the fallback log file path.
-     */
-    public String getLogFilePath() {
-        return logFilePath;
-    }
-
-    /**
-     * Check if there are queued entries.
-     */
-    public boolean hasQueuedEntries() {
-        return !queue.isEmpty();
-    }
-
-    /**
-     * Get current queue size.
-     */
-    public int getQueueSize() {
-        return queue.size();
-    }
 }

@@ -87,7 +87,7 @@ public class DiscordWebhook {
             return;
         }
 
-        requestQueue.offer(new WebhookRequest(webhookUrl, json, title));
+        requestQueue.offer(new WebhookRequest(webhookUrl, json));
         startQueueProcessor();
     }
 
@@ -98,30 +98,46 @@ public class DiscordWebhook {
     }
 
     private void processQueue() {
-        while (!requestQueue.isEmpty()) {
-            WebhookRequest request = requestQueue.poll();
-            if (request == null) break;
+        try {
+            while (!requestQueue.isEmpty()) {
+                WebhookRequest request = requestQueue.poll();
+                if (request == null) break;
 
-            long now = System.currentTimeMillis();
-            long timeSince = now - lastRequestTime.get();
-            if (timeSince < Constants.DISCORD_MIN_REQUEST_DELAY_MS) {
+                long now = System.currentTimeMillis();
+                long timeSince = now - lastRequestTime.get();
+                if (timeSince < Constants.DISCORD_MIN_REQUEST_DELAY_MS) {
+                    try {
+                        Thread.sleep(Constants.DISCORD_MIN_REQUEST_DELAY_MS - timeSince);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+
                 try {
-                    Thread.sleep(Constants.DISCORD_MIN_REQUEST_DELAY_MS - timeSince);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
+                    sendWebhookSync(request.webhookUrl(), request.json());
+                    lastRequestTime.set(System.currentTimeMillis());
+                } catch (IOException e) {
+                    plugin.getLogger().warning("[Discord] Webhook failed: " + e.getMessage());
                 }
             }
-
-            try {
-                sendWebhookSync(request.webhookUrl, request.json);
-                lastRequestTime.set(System.currentTimeMillis());
-            } catch (IOException e) {
-                plugin.getLogger().warning("[Discord] Webhook failed: " + e.getMessage());
-            }
+        } finally {
+            // Clearing the flag and the re-check must both happen under the same lock that
+            // startQueueProcessor() takes, otherwise an alert queued in between is seen by
+            // neither the running processor nor a new one — and sits there until the next
+            // alert arrives. The finally also guarantees the flag is cleared on a throw,
+            // which would otherwise wedge the queue permanently.
+            finishQueueProcessor();
         }
+    }
+
+    /** Release the processor slot and restart it if work arrived while we were finishing. */
+    private synchronized void finishQueueProcessor() {
         processorRunning = false;
-        if (!requestQueue.isEmpty()) startQueueProcessor();
+        if (!requestQueue.isEmpty()) {
+            processorRunning = true;
+            dev.boondock.bsanticheat.util.Scheduler.runAsync(plugin, this::processQueue);
+        }
     }
 
     private String buildEmbedJson(AlertType type, String title, String description, double value) {
@@ -179,14 +195,5 @@ public class DiscordWebhook {
             .replaceAll("[\u0000-\u001F]", "");
     }
 
-    private static class WebhookRequest {
-        final String webhookUrl;
-        final String json;
-        final String title;
-        WebhookRequest(String webhookUrl, String json, String title) {
-            this.webhookUrl = webhookUrl;
-            this.json = json;
-            this.title = title;
-        }
-    }
+    private record WebhookRequest(String webhookUrl, String json) {}
 }

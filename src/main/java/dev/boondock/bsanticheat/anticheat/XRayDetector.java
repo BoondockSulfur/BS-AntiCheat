@@ -344,7 +344,7 @@ public class XRayDetector implements Listener {
         }
 
         // Fully exempt worlds (resource/farm worlds where mass mining is normal)
-        if (config.xrayExemptWorlds().contains(block.getWorld().getName())) {
+        if (config.isXrayExemptWorld(block.getWorld().getName())) {
             return;
         }
 
@@ -523,9 +523,21 @@ public class XRayDetector implements Listener {
             plugin.getLogger().info("[XRay] " + player.getName() + " - Kein Schwellenwert ueberschritten. Breakdown: " + oreBreakdown);
         }
 
-        // Check 2: Ore-to-stone ratio (only check if player mined enough stone)
+        // Check 2: Ore-to-stone ratio (only check if player mined enough stone).
+        // Trim the stone deque to the time window FIRST: it is otherwise only trimmed when
+        // stone is broken or by the 5-minute cleanup task, so a player who mines stone and
+        // then switches to pure ore mining keeps a stale, inflated denominator for minutes
+        // — which silently makes the ratio look better than it is.
         ConcurrentLinkedDeque<Long> stoneTimestamps = playerStoneMines.get(playerId);
-        int stoneMined = stoneTimestamps != null ? stoneTimestamps.size() : 0;
+        int stoneMined = 0;
+        if (stoneTimestamps != null) {
+            long stoneCutoff = System.currentTimeMillis() - (timewindow * 1000L);
+            Long oldest;
+            while ((oldest = stoneTimestamps.peekFirst()) != null && oldest < stoneCutoff) {
+                stoneTimestamps.pollFirst();
+            }
+            stoneMined = stoneTimestamps.size();
+        }
         if (stoneMined > Constants.XRAY_MIN_STONE_FOR_RATIO_CHECK) {
             // Only count rarer ores — common veins (coal/iron/...) would inflate the ratio
             long relevantOreCount = mines.stream().filter(m -> !COMMON_ORES.contains(m.oreType)).count();
@@ -668,8 +680,7 @@ public class XRayDetector implements Listener {
         }
 
         // Check UUID whitelist
-        List<String> whitelistPlayers = config.anticheatWhitelistPlayers();
-        if (whitelistPlayers.contains(player.getUniqueId().toString())) {
+        if (config.isWhitelistedPlayer(player.getUniqueId())) {
             if (debug) plugin.getLogger().info("[XRay] " + name + " ist whitelisted (UUID in Liste)");
             return true;
         }
@@ -684,8 +695,8 @@ public class XRayDetector implements Listener {
             }
         }
 
-        // Check explicit bypass permission (only for non-OPs)
-        if (!player.isOp() && player.hasPermission("bsanticheat.bypass")) {
+        // Check explicit bypass permission (defaults to false, so OPs never get it implicitly)
+        if (player.hasPermission("bsanticheat.bypass")) {
             if (debug) plugin.getLogger().info("[XRay] " + name + " hat bypass Permission -> übersprungen");
             return true;
         }
@@ -700,10 +711,6 @@ public class XRayDetector implements Listener {
         }
 
         return false;
-    }
-
-    private void logViolation(Player player, String type, String message, int oreCount, Map<String, Integer> oreBreakdown) {
-        logViolation(player, type, message, oreCount, oreBreakdown, null);
     }
 
     private void logViolation(Player player, String type, String message, int oreCount, Map<String, Integer> oreBreakdown, List<String> locations) {

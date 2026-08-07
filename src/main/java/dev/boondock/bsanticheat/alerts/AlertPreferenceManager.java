@@ -14,8 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Categories:
  * - ALL: Mutes everything
  * - XRAY: XRay detection alerts
- * - MOVEMENT: Movement/Speed/Fly alerts
- * - PERFORMANCE: Performance alerts (TPS drops, high MSPT, heap warnings)
+ * - MOVEMENT: every non-XRay check (movement, combat, world, inventory, packet)
  *
  * @since 2.3.1
  */
@@ -123,14 +122,6 @@ public class AlertPreferenceManager {
     public void resetAll(UUID playerId) {
         mutedCategories.remove(playerId);
         updatePersistence(playerId);
-    }
-
-    /**
-     * Check if a player has any muted categories.
-     */
-    public boolean hasAnyMuted(UUID playerId) {
-        Set<AlertCategory> muted = mutedCategories.get(playerId);
-        return muted != null && !muted.isEmpty();
     }
 
     /**

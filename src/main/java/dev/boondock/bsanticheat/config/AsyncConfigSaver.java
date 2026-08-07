@@ -83,12 +83,4 @@ public class AsyncConfigSaver {
             e.printStackTrace();
         }
     }
-
-    /**
-     * Check if a save operation is currently in progress.
-     * @return true if saving
-     */
-    public boolean isSaving() {
-        return isSaving.get();
-    }
 }

@@ -55,9 +55,15 @@ public class TransactionManager {
         this.database = database;
     }
 
-    /** Begin sending a transaction ping to every online player each tick. */
+    /**
+     * Begin sending transaction pings to every online player. The interval is configurable
+     * because this is pure per-player packet overhead: every tick means 20 extra packets
+     * per second per player, which on a full server is thousands for a measurement that
+     * stays accurate at a coarser rate.
+     */
     public void start() {
-        pingTask = Scheduler.runGlobalTimer(plugin, this::tick, 20L, 1L);
+        long period = Math.max(1L, config.transactionIntervalTicks());
+        pingTask = Scheduler.runGlobalTimer(plugin, this::tick, 20L, period);
     }
 
     public void stop() {
@@ -105,17 +111,6 @@ public class TransactionManager {
             double ms = rtt / 1.0e6;
             database.logAsync("transaction", ms, name + ": transaction confirmed rtt=" + String.format("%.1fms", ms));
         }
-    }
-
-    /**
-     * Effective one-way latency in milliseconds for lag compensation: half the measured
-     * transaction round-trip. Returns -1 when no transaction has completed yet, so callers
-     * can fall back to {@link Player#getPing()}.
-     */
-    public double oneWayLatencyMs(UUID uuid) {
-        Long rtt = lastRttNanos.get(uuid);
-        if (rtt == null) return -1;
-        return (rtt / 1.0e6) / 2.0;
     }
 
     /**

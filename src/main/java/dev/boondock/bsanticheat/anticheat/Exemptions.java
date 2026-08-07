@@ -27,9 +27,11 @@ public final class Exemptions {
         if (p.getGameMode() == GameMode.CREATIVE || p.getGameMode() == GameMode.SPECTATOR) return true;
         if (isBedrockExempt(p, config, geyser)) return true;
         if (isLegacyExempt(p, config)) return true;
-        if (config.anticheatWhitelistPlayers().contains(p.getUniqueId().toString())) return true;
+        if (config.isWhitelistedPlayer(p.getUniqueId())) return true;
         if (p.isOp() && config.opsBypass()) return true;
-        if (!p.isOp() && p.hasPermission("bsanticheat.bypass")) return true;
+        // No isOp() guard here: the permission defaults to false, so OPs never get it
+        // implicitly — but an admin who grants it explicitly (LuckPerms) means it.
+        if (p.hasPermission("bsanticheat.bypass")) return true;
         if (luckPerms != null && luckPerms.isPlayerInWhitelistedGroup(p, config.anticheatWhitelistGroups())) return true;
         return false;
     }

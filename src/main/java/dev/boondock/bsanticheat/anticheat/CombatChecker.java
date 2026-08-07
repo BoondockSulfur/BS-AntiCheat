@@ -128,10 +128,16 @@ public class CombatChecker implements Listener {
         boolean victimIsPlayer = victim instanceof Player;
         UUID attackerId = attacker.getUniqueId();
 
-        // --- Criticals: a critical hit while standing on the ground. Vanilla crits
-        // require being airborne and falling; the Criticals cheat spoofs the crit
-        // condition without leaving the ground. (isOnGround is client-influenced, but a
-        // client spoofing OFF-ground to fake crits gets caught by the hover/fly checks.)
+        // --- Criticals (OFF by default — see config.yml) ---
+        // Caveat, verified against the vanilla rules: the server only awards a critical
+        // when fallDistance > 0 AND the player is airborne, and event.isCritical() reports
+        // exactly that server-side decision. "critical AND on ground AND fallDistance <= 0"
+        // is therefore a contradiction that a genuine vanilla crit can never satisfy — the
+        // condition can only be met by a damage event another plugin synthesised with the
+        // critical flag set. It also does not catch the actual Criticals cheat, which feeds
+        // the server fake micro-falls so the crit is computed while the player is reported
+        // airborne. Distinguishing that from a legitimate jump-crit needs the per-tick
+        // vertical movement from the packet layer, not this event.
         if (config.criticalsDetectionEnabled() && event.isCritical()
                 && attacker.isOnGround() && attacker.getFallDistance() <= 0.0f) {
             int c = consecutiveCriticals.merge(attackerId, 1, Integer::sum);
@@ -164,7 +170,16 @@ public class CombatChecker implements Listener {
             // Latency stretches the measured distance: both hitboxes moved between the
             // client's aim and the server's judgement. Same sqrt scaling as the movement
             // checks (200ms → +10%, 500ms → +20%).
-            double maxReach = config.reachDistance()
+            // Honour a raised interaction-range attribute. Item plugins (MMOItems and
+            // friends) grant long-reach weapons by modifying it — judging those hits
+            // against the flat config value flags the player for using their own gear.
+            double configured = config.reachDistance();
+            var range = attacker.getAttribute(org.bukkit.attribute.Attribute.ENTITY_INTERACTION_RANGE);
+            if (range != null) {
+                configured = Math.max(configured, range.getValue() + Constants.REACH_ATTRIBUTE_SLACK);
+            }
+            // A resized player reaches proportionally further — their arms are longer.
+            double maxReach = configured * CheckMath.scale(attacker)
                     * CheckMath.pingSlack(
                             CheckMath.effectivePing(transactionManager, attacker));
             if (distance > maxReach) {
@@ -207,6 +222,10 @@ public class CombatChecker implements Listener {
             if (distinct >= config.killAuraMultiTargets()) {
                 handleViolation(attacker, "KILLAURA",
                         lang.format("alert.killaura_multi", distinct, Constants.KILLAURA_MULTI_WINDOW_MS), distinct);
+                // Drop the evidence after flagging, like every other check. Without this
+                // each further hit inside the (short) window still sees the same distinct
+                // targets and re-flags, so one burst raised the VL several times over.
+                recentTargets.remove(attackerId);
             }
         }
     }
@@ -235,7 +254,8 @@ public class CombatChecker implements Listener {
 
     private void handleViolation(Player player, String type, String details, double value) {
         if (database != null) {
-            database.logAsync("anticheat_" + type.toLowerCase(), value, player.getName() + ": " + details);
+            database.logAsync("anticheat_" + type.toLowerCase(), value,
+                    player.getName() + ": " + details + " @ " + CheckMath.formatLocation(player.getLocation()));
         }
         if (alertManager != null) {
             alertManager.addAlert(player, type, details, value, player.getLocation());

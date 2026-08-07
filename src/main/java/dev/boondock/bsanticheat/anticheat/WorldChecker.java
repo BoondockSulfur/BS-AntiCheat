@@ -5,6 +5,7 @@ import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
+import dev.boondock.bsanticheat.util.CheckMath;
 import dev.boondock.bsanticheat.util.Constants;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
@@ -229,7 +230,8 @@ public class WorldChecker implements Listener {
 
     private void handleViolation(Player player, String type, String details, double value, Location location) {
         if (database != null) {
-            database.logAsync("anticheat_" + type.toLowerCase(), value, player.getName() + ": " + details);
+            database.logAsync("anticheat_" + type.toLowerCase(), value,
+                    player.getName() + ": " + details + " @ " + CheckMath.formatLocation(location));
         }
         if (alertManager != null) {
             alertManager.addAlert(player, type, details, value, location);

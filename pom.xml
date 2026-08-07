@@ -5,7 +5,7 @@
 
   <groupId>dev.boondock</groupId>
   <artifactId>bsanticheat</artifactId>
-  <version>1.0.2</version>
+  <version>1.0.3</version>
   <name>BSAntiCheat</name>
   <description>AntiCheat plugin for Paper 1.21.x with Movement and XRay detection</description>
 
@@ -69,6 +69,15 @@
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-api</artifactId>
       <version>2.0.9</version>
+      <scope>provided</scope>
+    </dependency>
+    <!-- Gson comes from the server (Paper bundles it). Declared explicitly so the
+         UpdateChecker's compile-time use of it is visible instead of relying on a
+         transitive paper-api dependency that could disappear without notice. -->
+    <dependency>
+      <groupId>com.google.code.gson</groupId>
+      <artifactId>gson</artifactId>
+      <version>2.10.1</version>
       <scope>provided</scope>
     </dependency>
     <!-- PacketEvents is used as an installed server plugin (not shaded), to avoid

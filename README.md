@@ -27,19 +27,21 @@ system. Built to be calibrated for *your* server rather than flag your legit pla
 - Nuker, FastPlace, Scaffold (blind placement), FastBreak (per-block dig time vs. expected)
 
 **Packet-level** *(requires PacketEvents)*
-- AutoClicker (CPS from arm-swings, with mining excluded), BadPackets, Timer,
-  crash protection (oversized book/sign packets), packet-flood
+- AutoClicker — CPS from arm-swings (mining excluded), plus opt-in interval-consistency
+  analysis that catches slow-but-metronomic clickers
+- BadPackets, Timer, crash protection (oversized book/sign packets), packet-flood
 
 **Vehicle** — Boat-Fly and per-type vehicle speed (via `VehicleMoveEvent`)
 
 **XRay** — per-ore thresholds, ore/stone ratio, combined-rare-ore, restricted-world zones,
 player-placed-ore exclusion
 
-**Inventory** *(opt-in family)* — InventoryMove, ChestStealer, FastUse, BowSpam, AutoTotem
+**Inventory** — InventoryMove, ChestStealer, FastUse, BowSpam, AutoTotem
 
 > **Opt-in / off by default** (enable in `config.yml` if you want them): NoSlow, Jesus,
-> Spider, Step and Velocity/AntiKnockback. These are inherently false-positive-prone and are
-> being reworked.
+> Spider, Step, AutoBlock, Velocity/AntiKnockback, the KillAura rotation-GCD check and the
+> AutoClicker consistency analysis. These are inherently false-positive-prone — calibrate
+> them with `debug_mode` before switching them on.
 
 **Infrastructure**
 - Violation-level (VL) system with decay and configurable punishment **tiers** (console commands)
@@ -66,7 +68,7 @@ Timer, Crasher, PacketFlood) and the transaction-latency system simply stay disa
 
 ## Installation
 
-1. Drop `BSAntiCheat-1.0.0.jar` into `plugins/`.
+1. Drop `BSAntiCheat-1.0.3.jar` into `plugins/`.
 2. (Recommended) Install **PacketEvents** for the packet-level checks.
 3. Start the server, then edit `plugins/BSAntiCheat/config.yml` and run `/bsac reload`.
 
@@ -84,6 +86,8 @@ Everything lives in `config.yml`. A few things worth knowing:
 - **`anticheat.exempt_bedrock_players`** — exempt Geyser/Floodgate players (their client physics differ).
 - **`anticheat.exempt_legacy_clients`** — exempt ViaVersion legacy clients (opt-in).
 - **`anticheat.thresholds.*`** — per-check violation counts and thresholds, all tunable via `/bsac reload`.
+- **`anticheat.transaction_interval_ticks`** — how often the latency system pings each player.
+  Pure per-player packet overhead; raise it on high-population servers. Applied at startup.
 
 **Calibration workflow:** set `debug_mode: true` and `punishments.enabled: false`, watch the
 debug values while playing, tune `anticheat.thresholds.*`, apply with `/bsac reload` (no restart),
@@ -133,7 +137,7 @@ detection (prediction-engine level), deeper packet-timing analysis is planned.
 ## Building
 
 ```bash
-mvn clean package    # → target/BSAntiCheat-1.0.0.jar
+mvn clean package    # → target/BSAntiCheat-1.0.3.jar
 ```
 
 License: see [LICENSE](LICENSE).

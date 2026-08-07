@@ -5,6 +5,7 @@ import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
+import dev.boondock.bsanticheat.util.CheckMath;
 import dev.boondock.bsanticheat.util.Constants;
 import dev.boondock.bsanticheat.util.Scheduler;
 import org.bukkit.Location;
@@ -90,8 +91,10 @@ public class VelocityChecker implements Listener {
         if (expectedH < Constants.VELOCITY_MIN_KB) return;   // not a real knockback
 
         // Legit reasons a knockback is reduced/blocked
+        // isFlying/getAllowFlight covers survival flight granted by another plugin
+        // (EssentialsX /fly): knockback barely displaces a flying player.
         if (player.isInWater() || player.isInsideVehicle() || player.isGliding() || player.isRiptiding()
-                || isOnClimbable(player)) {
+                || player.isFlying() || player.getAllowFlight() || isOnClimbable(player)) {
             return;
         }
 
@@ -148,15 +151,21 @@ public class VelocityChecker implements Listener {
         return probe.getBlock().getType().isSolid();
     }
 
+    /**
+     * Climbable via the game's own tag, not a hand-rolled list: the latter misses the
+     * *_PLANT growth variants (CAVE_VINES_PLANT etc.) and every future climbable, which
+     * would flag a player who legitimately absorbed the knockback on a vine.
+     */
     private boolean isOnClimbable(Player player) {
+        if (player.isClimbing()) return true;
         Material at = player.getLocation().getBlock().getType();
-        return at == Material.LADDER || at == Material.VINE || at == Material.SCAFFOLDING
-                || at == Material.TWISTING_VINES || at == Material.WEEPING_VINES || at == Material.CAVE_VINES;
+        return at.isBlock() && org.bukkit.Tag.CLIMBABLE.isTagged(at);
     }
 
     private void handleViolation(Player player, String type, String details, double value, Location location) {
         if (database != null) {
-            database.logAsync("anticheat_" + type.toLowerCase(), value, player.getName() + ": " + details);
+            database.logAsync("anticheat_" + type.toLowerCase(), value,
+                    player.getName() + ": " + details + " @ " + CheckMath.formatLocation(location));
         }
         if (alertManager != null) {
             alertManager.addAlert(player, type, details, value, location);

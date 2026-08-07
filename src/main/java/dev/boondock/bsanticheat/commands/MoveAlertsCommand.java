@@ -4,6 +4,7 @@ import dev.boondock.bsanticheat.BSAntiCheat;
 import dev.boondock.bsanticheat.anticheat.MovementAlertManager;
 import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.lang.LanguageManager;
+import dev.boondock.bsanticheat.util.Constants;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.command.Command;
@@ -80,8 +81,8 @@ public class MoveAlertsCommand implements CommandExecutor, TabCompleter {
                 if (clearDb) {
                     DatabaseManager db = plugin.database();
                     if (db != null) {
-                        db.deleteAntiCheatLogsAsync(playerName,
-                                List.of("anticheat_speed", "anticheat_fly", "anticheat_teleport"),
+                        db.deleteAntiCheatLogsExceptAsync(playerName,
+                                Constants.XRAY_LOG_TYPE_PREFIXES,
                                 deleted -> sender.sendMessage(lang().get("movement.db_cleared",
                                         "%player%", playerName, "%count%", String.valueOf(deleted))));
                     }

@@ -10,8 +10,11 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 
 /**
@@ -26,6 +29,13 @@ public class PluginConfig {
     private volatile FileConfiguration cfg;
     private final AsyncConfigSaver asyncSaver;
 
+    // Hot-path membership caches. These lists are consulted on every movement, every hit
+    // and every block break, and cfg.getStringList() allocates a fresh ArrayList on each
+    // call — far too expensive there. Rebuilt on load/reload and on every mutation below.
+    private volatile Set<String> whitelistPlayersSet = Set.of();
+    private volatile Set<String> xrayExemptWorldsSet = Set.of();
+    private volatile Set<String> restrictedWorldsSet = Set.of();
+
     public PluginConfig(JavaPlugin plugin) {
         this.plugin = plugin;
         this.asyncSaver = new AsyncConfigSaver(plugin);
@@ -33,6 +43,7 @@ public class PluginConfig {
         mergeDefaults(fresh);
         validateConfig(fresh);
         this.cfg = fresh;
+        rebuildCaches();
     }
 
     public void reload() {
@@ -41,6 +52,22 @@ public class PluginConfig {
         mergeDefaults(fresh);
         validateConfig(fresh);
         this.cfg = fresh;
+        rebuildCaches();
+    }
+
+    /** Rebuild the hot-path lookup sets from the current config. */
+    private void rebuildCaches() {
+        whitelistPlayersSet = toSet(cfg.getStringList("anticheat.whitelist_players"));
+        xrayExemptWorldsSet = toSet(cfg.getStringList("anticheat.xray_exempt_worlds"));
+        restrictedWorldsSet = toSet(cfg.getStringList("anticheat.restricted_worlds"));
+    }
+
+    private static Set<String> toSet(List<String> values) {
+        Set<String> set = new HashSet<>();
+        for (String v : values) {
+            if (v != null) set.add(v);
+        }
+        return Collections.unmodifiableSet(set);
     }
 
     /**
@@ -113,6 +140,11 @@ public class PluginConfig {
     // Lag handling: skip checks while recent TPS is below this (avoids lag false positives)
     public double lagExemptTps() { return cfg.getDouble("anticheat.lag_exempt_tps", 18.0); }
 
+    // Transaction latency: ticks between ping packets per player (read once at startup)
+    public long transactionIntervalTicks() {
+        return cfg.getLong("anticheat.transaction_interval_ticks", Constants.TRANSACTION_INTERVAL_TICKS);
+    }
+
     // Exempt Bedrock (Geyser/Floodgate) players from checks — their client physics differ
     public boolean exemptBedrockPlayers() { return cfg.getBoolean("anticheat.exempt_bedrock_players", true); }
     // Exempt legacy clients (via ViaVersion) below the given protocol — opt-in, off by default
@@ -148,7 +180,9 @@ public class PluginConfig {
     public boolean teleportDetectionEnabled() { return cfg.getBoolean("anticheat.teleport_detection", true); }
     public boolean elytraDetectionEnabled() { return cfg.getBoolean("anticheat.elytra_detection", true); }
     public boolean vehicleChecksEnabled() { return cfg.getBoolean("anticheat.vehicle_checks", true); }
-    public boolean criticalsDetectionEnabled() { return cfg.getBoolean("anticheat.criticals_detection", true); }
+    // Off by default: the condition cannot be satisfied by a vanilla-computed crit, so it
+    // only fires on damage events synthesised by other plugins. See config.yml.
+    public boolean criticalsDetectionEnabled() { return cfg.getBoolean("anticheat.criticals_detection", false); }
     // Off by default: vanilla allows attacking with the main hand while an offhand shield
     // is raised, so "attack while isBlocking" fires on ordinary sword+shield play.
     public boolean autoBlockDetectionEnabled() { return cfg.getBoolean("anticheat.autoblock_detection", false); }
@@ -166,6 +200,7 @@ public class PluginConfig {
     public boolean crasherDetectionEnabled() { return cfg.getBoolean("anticheat.crasher_detection", true); }
     public boolean packetFloodDetectionEnabled() { return cfg.getBoolean("anticheat.packetflood_detection", true); }
     public int packetFloodMaxPerSecond() { return cfg.getInt("anticheat.packetflood_max_per_second", 500); }
+    public int packetFloodWindows() { return cfg.getInt("anticheat.packetflood_windows", Constants.PACKETFLOOD_WINDOWS); }
 
     // ---- Calibration thresholds (phase 4.4): each defaults to its Constants value, so the
     // behaviour is unchanged unless an admin overrides it in config.yml (no rebuild needed).
@@ -190,6 +225,7 @@ public class PluginConfig {
     public double inventoryMoveMinSpeed() { return cfg.getDouble("anticheat.thresholds.inventorymove_min_speed", Constants.INVENTORYMOVE_MIN_SPEED); }
     public int chestStealerMinClicks() { return cfg.getInt("anticheat.thresholds.cheststealer_min_clicks", Constants.CHESTSTEALER_MIN_CLICKS); }
     public long chestStealerMaxIntervalMs() { return cfg.getLong("anticheat.thresholds.cheststealer_max_interval_ms", Constants.CHESTSTEALER_MAX_INTERVAL_MS); }
+    public long chestStealerMinIntervalMs() { return cfg.getLong("anticheat.thresholds.cheststealer_min_interval_ms", Constants.CHESTSTEALER_MIN_INTERVAL_MS); }
     public int fastUseViolations() { return cfg.getInt("anticheat.thresholds.fastuse_violations", Constants.FASTUSE_VIOLATIONS); }
     public long fastUseMinIntervalMs() { return cfg.getLong("anticheat.thresholds.fastuse_min_interval_ms", Constants.FASTUSE_MIN_INTERVAL_MS); }
     public int bowSpamViolations() { return cfg.getInt("anticheat.thresholds.bowspam_violations", Constants.BOWSPAM_VIOLATIONS); }
@@ -219,10 +255,11 @@ public class PluginConfig {
     public int autoClickerMaxDeviationMs() { return cfg.getInt("anticheat.autoclicker_max_deviation_ms", 30); }
     public double autoClickerMaxCv() { return cfg.getDouble("anticheat.autoclicker_max_cv", 0.30); }
     public double autoClickerMaxOutlierRatio() { return cfg.getDouble("anticheat.autoclicker_max_outlier_ratio", 0.06); }
-    public int autoClickerMinSignals() { return cfg.getInt("anticheat.autoclicker_min_signals", 2); }
+    public int autoClickerMinSignals() { return cfg.getInt("anticheat.autoclicker_min_signals", 3); }
     public boolean badPacketsDetectionEnabled() { return cfg.getBoolean("anticheat.badpackets_detection", true); }
     public boolean timerDetectionEnabled() { return cfg.getBoolean("anticheat.timer_detection", true); }
     public long timerMaxBalanceMs() { return cfg.getLong("anticheat.timer_max_balance_ms", 200L); }
+    public long timerSustainedMs() { return cfg.getLong("anticheat.timer_sustained_ms", Constants.TIMER_SUSTAINED_MS); }
     // KillAura rotation GCD (experimental, off by default — calibrate with debug_mode)
     public boolean killAuraRotationDetectionEnabled() { return cfg.getBoolean("anticheat.killaura_rotation_detection", false); }
     public int killAuraRotationSamples() { return cfg.getInt("anticheat.killaura_rotation_samples", 20); }
@@ -238,7 +275,8 @@ public class PluginConfig {
     public int xrayTimewindowSeconds() { return cfg.getInt("anticheat.xray_timewindow_seconds", 60); }
     public List<String> xrayExcludedOres() { return cfg.getStringList("anticheat.xray_excluded_ores"); }
     public double xrayStoneOreRatio() { return cfg.getDouble("anticheat.xray_stone_ore_ratio", 0.15); }
-    public List<String> xrayExemptWorlds() { return cfg.getStringList("anticheat.xray_exempt_worlds"); }
+    /** Hot path (every block break) — backed by the cached set. */
+    public boolean isXrayExemptWorld(String worldName) { return xrayExemptWorldsSet.contains(worldName); }
     public int xrayRareCombinedThreshold() { return cfg.getInt("anticheat.xray_rare_combined_threshold", Constants.XRAY_RARE_COMBINED_THRESHOLD); }
 
     public int xrayThreshold(String oreType) {
@@ -251,6 +289,10 @@ public class PluginConfig {
     public boolean opsBypass() { return cfg.getBoolean("anticheat.ops_bypass", false); }
     public List<String> anticheatWhitelistPlayers() { return cfg.getStringList("anticheat.whitelist_players"); }
     public List<String> anticheatWhitelistGroups() { return cfg.getStringList("anticheat.whitelist_groups"); }
+    /** Hot path (every movement, hit and block break) — backed by the cached set. */
+    public boolean isWhitelistedPlayer(java.util.UUID playerId) {
+        return whitelistPlayersSet.contains(playerId.toString());
+    }
 
     // Movement speed thresholds
     public double speedThresholdWalk() { return cfg.getDouble("anticheat.speed_thresholds.walk", 0.4); }
@@ -283,18 +325,17 @@ public class PluginConfig {
     }
 
     // Restricted worlds
-    public List<String> restrictedWorlds() { return cfg.getStringList("anticheat.restricted_worlds"); }
     public List<String> restrictedWorldOres() { return cfg.getStringList("anticheat.restricted_world_ores"); }
-    public boolean isRestrictedWorld(String worldName) { return restrictedWorlds().contains(worldName); }
+    public boolean isRestrictedWorld(String worldName) { return restrictedWorldsSet.contains(worldName); }
 
     // Whitelist management
     public void addWhitelistPlayer(String uuid) {
         List<String> list = new ArrayList<>(anticheatWhitelistPlayers());
-        if (!list.contains(uuid)) { list.add(uuid); cfg.set("anticheat.whitelist_players", list); asyncSaver.saveAsync(); }
+        if (!list.contains(uuid)) { list.add(uuid); cfg.set("anticheat.whitelist_players", list); rebuildCaches(); asyncSaver.saveAsync(); }
     }
     public void removeWhitelistPlayer(String uuid) {
         List<String> list = new ArrayList<>(anticheatWhitelistPlayers());
-        if (list.remove(uuid)) { cfg.set("anticheat.whitelist_players", list); asyncSaver.saveAsync(); }
+        if (list.remove(uuid)) { cfg.set("anticheat.whitelist_players", list); rebuildCaches(); asyncSaver.saveAsync(); }
     }
     public void addWhitelistGroup(String group) {
         List<String> list = new ArrayList<>(anticheatWhitelistGroups());
@@ -324,6 +365,5 @@ public class PluginConfig {
     public void setSilentPlayers(List<String> players) { cfg.set("alerts.silent_players", players); asyncSaver.saveAsync(); }
 
     // Save
-    public void saveAsync() { asyncSaver.saveAsync(); }
     public void saveSyncOnShutdown() { asyncSaver.saveSyncOnShutdown(); }
 }

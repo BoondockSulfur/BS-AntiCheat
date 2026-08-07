@@ -1,7 +1,6 @@
 # BSAntiCheat - English Language File
 
 general:
-  prefix: "&8[&cBSAntiCheat&8]&r "
   no_permission: "&cYou don't have permission to do that."
   player_not_found: "&cPlayer not found: &f%player%"
   config_reloaded: "&aConfiguration reloaded."

@@ -24,6 +24,12 @@ anticheat:
   # so server lag spikes don't cause false positives.
   lag_exempt_tps: 18.0
 
+  # Transaction latency (requires PacketEvents): ticks between the ping packet sent to
+  # each player to measure true round-trip latency. Lower = finer resolution, but it is
+  # pure per-player packet overhead — 1 means 20 extra packets/second/player. Raise this
+  # on servers with a high player count. Applied at startup (needs a restart, not /reload).
+  transaction_interval_ticks: 2
+
   # Exempt Bedrock players connecting through Geyser/Floodgate. Their client uses
   # different movement physics (jump/sprint/step), which a Java-tuned anticheat would
   # otherwise flag. Requires the Geyser/Floodgate plugin to be installed to take effect.
@@ -57,8 +63,15 @@ anticheat:
   combat_checks: true
   reach_detection: true
   killaura_detection: true
-  # Criticals: crit hit while on ground
-  criticals_detection: true
+  # Criticals: OFF by default. The server only awards a critical hit when the player is
+  # airborne AND falling, so "critical while standing on the ground" is a contradiction
+  # no legitimate vanilla crit can produce — in practice it only fires on damage events
+  # synthesised by other plugins (custom-item and mob plugins do this), i.e. it flags
+  # players for using their own gear. It also does NOT catch the real Criticals cheat,
+  # which fakes micro-falls so the crit is computed while the player reports airborne;
+  # telling that apart from a legitimate jump-crit needs per-tick vertical movement from
+  # the packet layer. Enable only on servers without damage-modifying plugins.
+  criticals_detection: false
   # AutoBlock: OFF by default — vanilla allows attacking with the main hand while an
   # offhand shield is raised, so this flags ordinary sword+shield play. Opt-in only.
   autoblock_detection: false
@@ -89,6 +102,10 @@ anticheat:
   crasher_detection: true
   packetflood_detection: true
   packetflood_max_per_second: 500
+  # How many consecutive one-second windows must exceed the limit. A connection that
+  # stalled and then flushes its queue floods exactly ONE window — a real attack floods
+  # every window it lasts. 1 restores the old (false-positive-prone) behaviour.
+  packetflood_windows: 2
 
   # Calibration thresholds. Each value is the default; lower a *_violations count for
   # faster/stricter detection, raise it to reduce false positives. Tune with debug_mode
@@ -124,6 +141,10 @@ anticheat:
     inventorymove_min_speed: 0.15  # blocks/move counted as walking with a GUI open
     cheststealer_min_clicks: 6
     cheststealer_max_interval_ms: 40
+    # Intervals below this are ignored entirely: neither a human nor an autoclicker can
+    # produce separate clicks that fast (>100 CPS), so they only occur when the network
+    # delivered several clicks in one bundle.
+    cheststealer_min_interval_ms: 10
     fastuse_violations: 2
     fastuse_min_interval_ms: 600
     bowspam_violations: 3
@@ -170,10 +191,20 @@ anticheat:
   autoclicker_max_deviation_ms: 30   # marker 1: std-dev of intervals (ms) at/below this
   autoclicker_max_cv: 0.30           # marker 2: std-dev / mean (consistency vs. click rate)
   autoclicker_max_outlier_ratio: 0.06 # marker 3: share of long-pause intervals (>1.5x median)
-  autoclicker_min_signals: 2         # how many markers must hold to flag (2 = balanced)
+  # How many markers must hold to flag. Markers 1 and 2 both measure jitter and rise
+  # together, so a human clicking steadily trips BOTH — 2 is not the safe middle it
+  # looks like. Marker 3 (do they ever pause?) is the independent one. Keep this at 3
+  # unless your debug data shows your players clearly separated from the cheats.
+  autoclicker_min_signals: 3
   # Timer: allowed "ahead of real time" balance (ms) before flagging game-speed/timer hacks.
-  # 200 leaves headroom for short network/packet bursts; real timer hacks blow far past it.
   timer_max_balance_ms: 200
+  # ...and how long the balance must STAY over that limit to count. TCP delivers packets
+  # in bundles: five movement packets arriving in the same millisecond each credit a full
+  # tick with no real time to subtract, so the balance jumps by exactly 5x50ms and crosses
+  # any limit instantly. The gap that always follows such a bundle pulls it straight back
+  # down, while a real timer hack holds it up for as long as it runs. Set to 0 to flag on
+  # the first crossing (the old behaviour — expect false alerts on poor connections).
+  timer_sustained_ms: 1000
   # AimSnap: catches a rotation that snaps to a target and back within ~1 tick (look A ->
   # far B -> back near A) — robotic aim used by rotation-spoofing scaffold/killaura. Flags
   # after this many snaps within the window. Raise min_angle / threshold if fast PvP flicks
@@ -223,7 +254,13 @@ anticheat:
     decay_seconds: 300       # a player loses 1 VL per this many seconds without a violation
     setback: false           # teleport movement violators back to their last valid position
     # Console commands per VL threshold. Placeholders: %player%, %check%, %vl%
-    # check values: SPEED, FLY, TELEPORT, XRAY_THRESHOLD, XRAY_RATIO, XRAY_RARE_ORES, RESTRICTED_ZONE
+    # %check% is the name of the check that flagged, e.g. SPEED, FLY, TELEPORT,
+    # GROUNDSPOOF, ELYTRA, NOSLOW, JESUS, SPIDER, STEP, REACH, KILLAURA, CRITICALS,
+    # AUTOBLOCK, VELOCITY, NUKER, FASTPLACE, FASTBREAK, SCAFFOLD, BOATFLY,
+    # VEHICLE_SPEED, INVENTORYMOVE, CHESTSTEALER, FASTUSE, BOWSPAM, AUTOTOTEM,
+    # AUTOCLICKER, BADPACKETS, TIMER, AIMSNAP, CRASHER, PACKETFLOOD,
+    # XRAY_THRESHOLD, XRAY_RATIO, XRAY_RARE_ORES, RESTRICTED_ZONE.
+    # VL is tracked per check, so a tier fires when ONE check reaches the threshold.
     tiers:
       "40":
         - "kick %player% AntiCheat: suspicious %check% activity"

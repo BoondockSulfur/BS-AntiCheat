@@ -36,9 +36,6 @@ public class MovementAlertManager {
     // Store alerts per player
     private final Map<UUID, List<MovementAlert>> playerAlerts = new ConcurrentHashMap<>();
 
-    // Track if we already notified admins about suspicious players
-    private final Set<UUID> notifiedPlayers = ConcurrentHashMap.newKeySet();
-
     // Cooldown per player per type (to prevent spam)
     private final Map<UUID, Map<String, Long>> alertCooldowns = new ConcurrentHashMap<>();
     private AlertPreferenceManager preferenceManager;
@@ -114,8 +111,7 @@ public class MovementAlertManager {
 
     private String formatLocation(Location loc) {
         if (loc == null) return lang.get("alert.location_unknown");
-        String worldName = loc.getWorld() != null ? loc.getWorld().getName() : "unknown";
-        return String.format("%s [%d, %d, %d]", worldName, loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
+        return dev.boondock.bsanticheat.util.CheckMath.formatLocation(loc);
     }
 
     /**
@@ -124,7 +120,7 @@ public class MovementAlertManager {
     private void notifyAdmins(Player suspect, String type, String details, double value, String location) {
         String message = lang.get("alert.notify_movement", "%player%", suspect.getName());
         String detail = lang.get("alert.notify_movement_detail",
-                "%type%", type, "%value%", String.format("%.2f", value), "%pos%", location);
+                "%type%", type, "%value%", String.format(java.util.Locale.ROOT, "%.2f", value), "%pos%", location);
 
         LegacyComponentSerializer legacy = LegacyComponentSerializer.legacySection();
         Component clickable = legacy.deserialize(message)
@@ -153,7 +149,7 @@ public class MovementAlertManager {
         String description = "**" + lang.get("alert.discord_player") + ":** " + player.getName()
                 + "\n**" + lang.get("alert.discord_type") + ":** " + type
                 + "\n**" + lang.get("alert.discord_details") + ":** " + details
-                + "\n**" + lang.get("alert.discord_value") + ":** " + String.format("%.2f", value)
+                + "\n**" + lang.get("alert.discord_value") + ":** " + String.format(java.util.Locale.ROOT, "%.2f", value)
                 + "\n**" + lang.get("alert.discord_position") + ":** " + location;
 
         discordWebhook.sendAlert(
@@ -190,7 +186,6 @@ public class MovementAlertManager {
      */
     public void clearAlerts(UUID playerId) {
         playerAlerts.remove(playerId);
-        notifiedPlayers.remove(playerId);
         alertCooldowns.remove(playerId);
     }
 
@@ -199,7 +194,6 @@ public class MovementAlertManager {
      */
     public void clearAllAlerts() {
         playerAlerts.clear();
-        notifiedPlayers.clear();
         alertCooldowns.clear();
     }
 
@@ -216,9 +210,8 @@ public class MovementAlertManager {
             List<MovementAlert> alerts = entry.getValue();
             alerts.removeIf(alert -> alert.timestamp() < alertCutoff);
 
-            // Remove empty entries and cleanup tracking
+            // Remove empty entries
             if (alerts.isEmpty()) {
-                notifiedPlayers.remove(entry.getKey());
                 return true; // Remove this entry
             }
             return false;
@@ -249,7 +242,7 @@ public class MovementAlertManager {
             lines.add(lang.get("alert.entry_movement",
                     "%time%", time, "%type%", alert.type(), "%details%", alert.details()));
             lines.add(lang.get("alert.entry_movement_value",
-                    "%value%", String.format("%.2f", alert.value()), "%pos%", alert.location()));
+                    "%value%", String.format(java.util.Locale.ROOT, "%.2f", alert.value()), "%pos%", alert.location()));
         }
 
         return lines;

@@ -73,6 +73,11 @@ public class InventoryChecker implements Listener {
     private final Map<UUID, Integer> consecutiveBowSpam = new ConcurrentHashMap<>();
     // AutoTotem: timestamp of the last totem pop
     private final Map<UUID, Long> lastTotemPop = new ConcurrentHashMap<>();
+    // Knockback grace: any server-applied velocity moves a player who has a GUI open
+    // without any key input (arrow/trident hits, wind charges, explosions, jump pads).
+    // MovementChecker has always had this; InventoryMove was missing it.
+    private final Map<UUID, Long> recentKnockback = new ConcurrentHashMap<>();
+    private static final long KNOCKBACK_GRACE_MS = 2000;
 
     public InventoryChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -120,6 +125,11 @@ public class InventoryChecker implements Listener {
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPlayerVelocity(org.bukkit.event.player.PlayerVelocityEvent event) {
+        recentKnockback.put(event.getPlayer().getUniqueId(), System.currentTimeMillis());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerMove(PlayerMoveEvent event) {
         if (event instanceof PlayerTeleportEvent) return;
         if (!config.inventoryChecksEnabled() || !config.inventoryMoveDetectionEnabled()) return;
@@ -135,7 +145,17 @@ public class InventoryChecker implements Listener {
 
         // Pushes (entities, water, pistons) can move a player with an open GUI —
         // exempt liquid/vehicle/glide states and require sustained walking speed.
-        if (player.isInsideVehicle() || player.isGliding() || player.isInWater()) {
+        // isFlying covers survival flight granted by another plugin (EssentialsX /fly):
+        // those players drift with a GUI open and are not in creative gamemode, so the
+        // gamemode exemption further down would never catch them.
+        if (player.isInsideVehicle() || player.isGliding() || player.isInWater()
+                || player.isFlying() || player.getAllowFlight()) {
+            consecutiveInvMove.remove(id);
+            return;
+        }
+
+        Long kb = recentKnockback.get(id);
+        if (kb != null && System.currentTimeMillis() - kb < KNOCKBACK_GRACE_MS) {
             consecutiveInvMove.remove(id);
             return;
         }
@@ -191,6 +211,8 @@ public class InventoryChecker implements Listener {
     public void onInventoryClick(InventoryClickEvent event) {
         if (!config.inventoryChecksEnabled()) return;
         if (!(event.getWhoClicked() instanceof Player player)) return;
+        // Queued clicks arriving in one tick after a lag spike look like 0ms intervals.
+        if (ServerLoad.isLagging(config)) return;
         UUID id = player.getUniqueId();
 
         // --- AutoTotem: a totem lands in the offhand via inventory click within an
@@ -225,6 +247,10 @@ public class InventoryChecker implements Listener {
         Long last = lastContainerClick.put(id, now);
         if (last == null) return;
         long interval = now - last;
+        // Below the physical floor the two clicks were delivered in one network bundle,
+        // not actually made that fast — neither count nor reset, just ignore the pair.
+        // A real ChestStealer clicks at 20-40ms, comfortably above the floor.
+        if (interval < config.chestStealerMinIntervalMs()) return;
         if (interval <= config.chestStealerMaxIntervalMs()) {
             int streak = fastClickStreak.merge(id, 1, Integer::sum);
             if (streak >= config.chestStealerMinClicks() && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
@@ -318,7 +344,8 @@ public class InventoryChecker implements Listener {
 
     private void handleViolation(Player player, String type, String details, double value, Location location) {
         if (database != null) {
-            database.logAsync("anticheat_" + type.toLowerCase(), value, player.getName() + ": " + details);
+            database.logAsync("anticheat_" + type.toLowerCase(), value,
+                    player.getName() + ": " + details + " @ " + CheckMath.formatLocation(location));
         }
         if (alertManager != null) {
             alertManager.addAlert(player, type, details, value, location);
@@ -340,5 +367,6 @@ public class InventoryChecker implements Listener {
         lastFullShot.remove(playerId);
         consecutiveBowSpam.remove(playerId);
         lastTotemPop.remove(playerId);
+        recentKnockback.remove(playerId);
     }
 }

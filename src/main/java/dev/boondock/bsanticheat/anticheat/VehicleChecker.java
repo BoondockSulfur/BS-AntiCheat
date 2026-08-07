@@ -5,6 +5,7 @@ import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
+import dev.boondock.bsanticheat.util.CheckMath;
 import dev.boondock.bsanticheat.util.Constants;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -14,6 +15,7 @@ import org.bukkit.entity.Camel;
 import org.bukkit.entity.Donkey;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Horse;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Llama;
 import org.bukkit.entity.Minecart;
 import org.bukkit.entity.Mule;
@@ -26,6 +28,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.vehicle.VehicleMoveEvent;
 import org.bukkit.plugin.Plugin;
+import org.bukkit.potion.PotionEffectType;
 
 import java.util.Map;
 import java.util.UUID;
@@ -66,6 +69,10 @@ public class VehicleChecker implements Listener {
     // the allowance would collapse to the base speed mid-hop while the momentum persists.
     private final Map<UUID, double[]> recentIce = new ConcurrentHashMap<>();
     private static final long ICE_MOMENTUM_GRACE_MS = 3000;
+    // A single vehicle move larger than this is a teleport (Multiverse portal, /tp of a
+    // ridden horse, a plugin repositioning the boat), not movement. Vanilla vehicles stay
+    // far below one block per tick; the elytra-class speeds do not apply to vehicles.
+    private static final double VEHICLE_TELEPORT_DISTANCE = 8.0;
 
     public VehicleChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -121,6 +128,14 @@ public class VehicleChecker implements Listener {
 
         if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
         if (ServerLoad.isLagging(config)) {
+            consecutiveBoatFly.remove(playerId);
+            consecutiveVehicleSpeed.remove(playerId);
+            return;
+        }
+
+        // A teleport is not a speed violation. VehicleMoveEvent has no teleport flag, so
+        // an implausible single-tick jump is treated as one: reset the streaks and skip.
+        if (from.distance(to) > VEHICLE_TELEPORT_DISTANCE) {
             consecutiveBoatFly.remove(playerId);
             consecutiveVehicleSpeed.remove(playerId);
             return;
@@ -200,6 +215,17 @@ public class VehicleChecker implements Listener {
 
     /** Per-type speed ceiling in blocks per second, with the (remembered) boat ice multiplier. */
     private double maxSpeedFor(Vehicle vehicle, double iceMult) {
+        // A Speed potion on the mount is legitimate and raises its ceiling; without this
+        // a fast horse under Speed II blows past the flat limit.
+        double potion = 1.0;
+        if (vehicle instanceof LivingEntity le && le.hasPotionEffect(PotionEffectType.SPEED)) {
+            var eff = le.getPotionEffect(PotionEffectType.SPEED);
+            if (eff != null) potion += Constants.SPEED_POTION_MULTIPLIER_PER_LEVEL * (eff.getAmplifier() + 1);
+        }
+        return baseMaxSpeedFor(vehicle, iceMult) * potion;
+    }
+
+    private double baseMaxSpeedFor(Vehicle vehicle, double iceMult) {
         if (vehicle instanceof Boat) {
             return Constants.BOAT_MAX_SPEED * iceMult;
         }
@@ -215,7 +241,8 @@ public class VehicleChecker implements Listener {
 
     private void handleViolation(Player player, String type, String details, double value, Location location) {
         if (database != null) {
-            database.logAsync("anticheat_" + type.toLowerCase(), value, player.getName() + ": " + details);
+            database.logAsync("anticheat_" + type.toLowerCase(), value,
+                    player.getName() + ": " + details + " @ " + CheckMath.formatLocation(location));
         }
         if (alertManager != null) {
             alertManager.addAlert(player, type, details, value, location);

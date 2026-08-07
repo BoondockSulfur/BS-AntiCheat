@@ -20,12 +20,10 @@ import java.util.stream.Collectors;
  */
 public class ACSilentCommand implements CommandExecutor, TabCompleter {
 
-    private final Plugin plugin;
     private final LanguageManager lang;
     private final AlertPreferenceManager preferences;
 
     public ACSilentCommand(Plugin plugin, LanguageManager lang, AlertPreferenceManager preferences) {
-        this.plugin = plugin;
         this.lang = lang;
         this.preferences = preferences;
     }

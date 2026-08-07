@@ -4,6 +4,7 @@ import dev.boondock.bsanticheat.BSAntiCheat;
 import dev.boondock.bsanticheat.anticheat.XRayAlertManager;
 import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.lang.LanguageManager;
+import dev.boondock.bsanticheat.util.Constants;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.command.Command;
@@ -74,7 +75,7 @@ public class XRayAlertsCommand implements CommandExecutor, TabCompleter {
                     DatabaseManager db = plugin.database();
                     if (db != null) {
                         db.deleteAntiCheatLogsAsync(playerName,
-                                List.of("anticheat_xray", "anticheat_restricted_zone"),
+                                Constants.XRAY_LOG_TYPE_PREFIXES,
                                 deleted -> sender.sendMessage(lang().get("xray.db_cleared",
                                         "%player%", playerName, "%count%", String.valueOf(deleted))));
                     }

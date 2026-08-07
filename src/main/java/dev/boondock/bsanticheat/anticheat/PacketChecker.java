@@ -24,6 +24,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.Map;
 import java.util.UUID;
@@ -41,8 +42,13 @@ import java.util.concurrent.ConcurrentLinkedDeque;
  *
  * <p>Runs on Netty threads, so all Bukkit access (alerts) is hopped back to the main
  * thread before use.
+ *
+ * <p><b>Threading:</b> the per-player maps are concurrent, but their VALUES are plain
+ * {@link ArrayDeque}s. That is safe because a connection's packets are handled on that
+ * connection's own event-loop thread, so one player's state is never touched concurrently.
+ * If that ever stops holding, these need to become synchronized or concurrent deques.
  */
-public class PacketChecker implements PacketListener {
+public class PacketChecker implements PacketListener, org.bukkit.event.Listener {
 
     private static final long WINDOW_MS = 1000L;
     // How many recent swing timestamps to keep per player for interval analysis.
@@ -62,13 +68,16 @@ public class PacketChecker implements PacketListener {
     private TransactionManager transactionManager;
 
     private final Map<UUID, ConcurrentLinkedDeque<Long>> clicks = new ConcurrentHashMap<>();
-    // Timer balance per player: [0]=balance(ms), [1]=last packet time(ms)
+    // Timer balance per player: [0]=balance(centi-ms), [1]=last packet time(ms),
+    // [2]=time the balance first went over the limit (0 = currently under)
     private final Map<UUID, long[]> timerState = new ConcurrentHashMap<>();
     private static final long TICK_MS = 50L;
     // Held-button (mining/swinging) signature to exclude from AutoClicker: ~tick-rate, ultra-regular
     private static final int HELD_CPS_MIN = 18;
     private static final int HELD_CPS_MAX = 22;
     private static final double HELD_SD_MAX = 5.0;
+    // Below this many intervals the standard deviation is noise, not a signature.
+    private static final int MIN_INTERVALS_FOR_SD = 7;
     // KillAura rotation GCD analysis
     private final Map<UUID, Float> lastYaw = new ConcurrentHashMap<>();
     private final Map<UUID, Deque<Long>> yawDeltas = new ConcurrentHashMap<>();
@@ -76,13 +85,19 @@ public class PacketChecker implements PacketListener {
     // AimSnap: last 3 look directions + recent snap timestamps
     private final Map<UUID, Deque<double[]>> recentDirs = new ConcurrentHashMap<>();
     private final Map<UUID, Deque<Long>> snapTimes = new ConcurrentHashMap<>();
-    // Packet flood: [0]=window start(ms), [1]=count in window
+    // Packet flood: [0]=window start(ms), [1]=count in window, [2]=consecutive windows over the limit
     private final Map<UUID, long[]> packetCounts = new ConcurrentHashMap<>();
     // Mining state: while a player is breaking a block the client sends a swing every tick,
     // which would false-flag AutoClicker. Value = timestamp until which we treat the player
     // as mining (set on START_DIGGING with a safety cap, cleared on FINISH/CANCEL).
     private final Map<UUID, Long> miningUntil = new ConcurrentHashMap<>();
     private static final long MINING_SAFETY_MS = 5000L;
+    // Grace after a teleport/join/respawn/world change. Loading the destination stalls
+    // the CLIENT, which then flushes everything it queued in one burst — that burst is
+    // what produced the Timer/PacketFlood alerts. MovementChecker has always had these
+    // windows; the packet checks had none, because they live outside the Bukkit event
+    // world. Hence this class now listens for those events too.
+    private final Map<UUID, Long> graceUntil = new ConcurrentHashMap<>();
 
     public PacketChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -111,6 +126,41 @@ public class PacketChecker implements PacketListener {
         this.transactionManager = transactionManager;
     }
 
+    // ---- Bukkit events that make a client stall and then burst ----
+
+    @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.MONITOR)
+    public void onTeleport(org.bukkit.event.player.PlayerTeleportEvent event) {
+        grant(event.getPlayer().getUniqueId());
+    }
+
+    @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.MONITOR)
+    public void onJoin(org.bukkit.event.player.PlayerJoinEvent event) {
+        grant(event.getPlayer().getUniqueId());
+    }
+
+    @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.MONITOR)
+    public void onRespawn(org.bukkit.event.player.PlayerRespawnEvent event) {
+        grant(event.getPlayer().getUniqueId());
+    }
+
+    @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.MONITOR)
+    public void onWorldChange(org.bukkit.event.player.PlayerChangedWorldEvent event) {
+        grant(event.getPlayer().getUniqueId());
+    }
+
+    private void grant(UUID id) {
+        graceUntil.put(id, System.currentTimeMillis() + Constants.PACKET_GRACE_MS);
+        // The accumulated balance is meaningless across a teleport — start clean.
+        timerState.remove(id);
+        packetCounts.remove(id);
+    }
+
+    /** True while the client is still catching up after a teleport/join/world change. */
+    private boolean inGrace(UUID id) {
+        Long until = graceUntil.get(id);
+        return until != null && System.currentTimeMillis() < until;
+    }
+
     @Override
     public void onPacketReceive(PacketReceiveEvent event) {
         PacketTypeCommon type = event.getPacketType();
@@ -129,9 +179,14 @@ public class PacketChecker implements PacketListener {
 
         if (!config.packetChecksEnabled()) return;
 
-        // Crash protection & flood run even under lag — an attack CAUSES lag, so the
-        // lag exemption must not disable exactly these checks.
-        handleFlood(event);
+        User u = event.getUser();
+        boolean grace = u != null && u.getUUID() != null && inGrace(u.getUUID());
+
+        // Crash protection runs even under lag and even in grace — it CANCELS malicious
+        // packets, so suspending it would open exactly the hole it exists to close.
+        // Flood counting does back off during grace: a client flushing its queue after a
+        // teleport legitimately produces one oversized window.
+        if (!grace) handleFlood(event);
         if (type == PacketType.Play.Client.EDIT_BOOK || type == PacketType.Play.Client.UPDATE_SIGN) {
             handleCrasher(event, type);
         }
@@ -141,7 +196,7 @@ public class PacketChecker implements PacketListener {
             handleDigging(event);
         }
 
-        if (ServerLoad.isLagging(config)) return;
+        if (grace || ServerLoad.isLagging(config)) return;
         if (type == PacketType.Play.Client.ANIMATION) {
             handleSwing(event);
         } else if (WrapperPlayClientPlayerFlying.isFlying(type)) {
@@ -183,20 +238,28 @@ public class PacketChecker implements PacketListener {
         UUID id = user.getUUID();
 
         long now = System.currentTimeMillis();
-        long[] st = packetCounts.computeIfAbsent(id, k -> new long[]{now, 0L});
+        long[] st = packetCounts.computeIfAbsent(id, k -> new long[]{now, 0L, 0L});
         synchronized (st) {
             if (now - st[0] >= WINDOW_MS) {
+                // A window that stayed under the limit ends the streak: a connection
+                // catching up after a stall floods exactly one window, an attack floods
+                // every window it lasts.
+                if (st[1] <= config.packetFloodMaxPerSecond()) st[2] = 0;
                 st[0] = now;
                 st[1] = 1;
                 return;
             }
             st[1]++;
             if (st[1] > config.packetFloodMaxPerSecond()) {
+                long over = ++st[2];
                 st[0] = now;
                 st[1] = 0;
-                long rate = config.packetFloodMaxPerSecond() + 1;
-                String name = user.getName();
-                flagSimple(id, name, "PACKETFLOOD", lang.format("alert.packetflood", rate), rate);
+                if (over >= config.packetFloodWindows()) {
+                    st[2] = 0;
+                    long rate = config.packetFloodMaxPerSecond() + 1;
+                    String name = user.getName();
+                    flagSimple(id, name, "PACKETFLOOD", lang.format("alert.packetflood", rate), rate);
+                }
             }
         }
     }
@@ -262,25 +325,45 @@ public class PacketChecker implements PacketListener {
         UUID id = user.getUUID();
         long now = System.currentTimeMillis();
 
-        long[] st = timerState.computeIfAbsent(id, k -> new long[]{0L, now});
+        long[] st = timerState.computeIfAbsent(id, k -> new long[]{0L, now, 0L});
         long elapsed = now - st[1];
         long balance = st[0] + TICK_MS * 100L - elapsed * 101L; // centi-ms, 1% drift leak
         if (balance < -100000L) balance = -100000L; // floor (-1000ms): no unlimited idle credit
         st[1] = now;
 
+        st[0] = balance;
+
+        // The balance must stay over the limit, not merely touch it. TCP delivers packets
+        // in bundles: five movement packets arriving in the same millisecond each credit a
+        // full tick with no real time to subtract, so the balance jumps by exactly 5x50ms
+        // and crosses any limit instantly — that was the single biggest source of false
+        // Timer alerts. The gap that always follows such a bundle brings the balance back
+        // down within a few hundred ms, while a real timer hack holds it up indefinitely.
         if (balance > config.timerMaxBalanceMs() * 100L) {
-            st[0] = 0L; // reset after flagging
-            long balMs = balance / 100L;
-            Scheduler.runForPlayer(plugin, id, () ->flagTimer(id, balMs));
+            if (st[2] == 0L) st[2] = now;                       // excursion started
+            if (now - st[2] >= config.timerSustainedMs()) {
+                st[0] = 0L;
+                st[2] = 0L;
+                long balMs = balance / 100L;
+                String details = lang.format("alert.timer", balMs);
+                Scheduler.runForPlayer(plugin, id, () -> flagOnMain(id, "TIMER", details, balMs));
+            }
         } else {
-            st[0] = balance;
+            st[2] = 0L; // back under the limit — it was a bundle, not a hack
         }
     }
 
     /**
-     * AutoClicker: clicks per second from arm-swing (ANIMATION) packets — covers clicking
-     * on air, blocks or entities. Holding the button to mine/swing sends one swing per tick
-     * (~20 CPS at near-zero jitter); that "held button" signature is excluded so normal
+     * AutoClicker, from arm-swing (ANIMATION) packets — covers clicking on air, blocks or
+     * entities. Two independent signals:
+     * <ol>
+     *   <li>raw clicks per second above {@code autoclicker_max_cps};</li>
+     *   <li>interval consistency ({@code autoclicker_consistency}, opt-in): three "robotic"
+     *       markers, flagged when at least {@code autoclicker_min_signals} of them hold.
+     *       This also catches slow-but-metronomic clickers that never exceed the CPS cap.</li>
+     * </ol>
+     * Holding the button to mine/swing sends one swing per tick (~20 CPS at near-zero
+     * jitter); that "held button" signature is excluded from both signals so normal
      * mining/holding doesn't false-flag.
      */
     private void handleSwing(PacketReceiveEvent event) {
@@ -309,29 +392,74 @@ public class PacketChecker implements PacketListener {
 
         int maxCps = config.autoClickerMaxCps();
 
-        // Standard deviation of recent intervals (for the held-button exclusion)
-        double sd = -1;
-        if (n >= 8) {
+        // Click intervals over the consistency window, shared by the held-button exclusion
+        // and the pattern analysis below.
+        long[] intervals = new long[Math.max(0, n - 1)];
+        for (int i = 1; i < n; i++) intervals[i - 1] = times[i] - times[i - 1];
+        double mean = 0, sd = -1;
+        if (intervals.length >= MIN_INTERVALS_FOR_SD) {
             double sum = 0;
-            for (int i = 1; i < n; i++) sum += times[i] - times[i - 1];
-            double mean = sum / (n - 1);
+            for (long iv : intervals) sum += iv;
+            mean = sum / intervals.length;
             double v = 0;
-            for (int i = 1; i < n; i++) { double d = times[i] - times[i - 1] - mean; v += d * d; }
-            sd = Math.sqrt(v / (n - 1));
+            for (long iv : intervals) { double d = iv - mean; v += d * d; }
+            sd = Math.sqrt(v / intervals.length);
         }
         // Held left-click (mining/swinging) sends ~one swing per tick: ~20 CPS, ultra-regular.
         boolean heldButton = cps >= HELD_CPS_MIN && cps <= HELD_CPS_MAX && sd >= 0 && sd < HELD_SD_MAX;
 
         if (config.debugMode()) {
-            plugin.getLogger().info(String.format("[AC-DEBUG] %s cps=%d sd=%s held=%b (max %d)",
-                    user.getName(), cps, sd < 0 ? "n/a" : String.format("%.1f", sd), heldButton, maxCps));
+            plugin.getLogger().info(String.format("[AC-DEBUG] %s cps=%d sd=%s cv=%s outliers=%s held=%b (max %d)",
+                    user.getName(), cps,
+                    sd < 0 ? "n/a" : String.format("%.1f", sd),
+                    sd < 0 || mean <= 0 ? "n/a" : String.format("%.2f", sd / mean),
+                    intervals.length == 0 ? "n/a" : String.format("%.2f", outlierRatio(intervals)),
+                    heldButton, maxCps));
         }
 
+        // (a) Raw click rate
         if (cps > maxCps && !heldButton) {
             buf.clear(); // reset so it must re-accumulate
-            int cpsSnap = cps;
-            Scheduler.runForPlayer(plugin, id, () ->flagAutoClicker(id, cpsSnap, maxCps));
+            String details = lang.format("alert.autoclicker", cps, maxCps);
+            int value = cps;
+            Scheduler.runForPlayer(plugin, id, () -> flagOnMain(id, "AUTOCLICKER", details, value));
+            return;
         }
+
+        // (b) Interval consistency (opt-in). Humans jitter and pause, so they usually fail
+        // ALL three markers; an autoclicker fails at most one.
+        if (!config.autoClickerConsistencyEnabled()) return;
+        if (heldButton || sd < 0 || mean <= 0) return;
+        if (n < config.autoClickerMinSamples() || cps < config.autoClickerMinCps()) return;
+
+        int signals = 0;
+        if (sd <= config.autoClickerMaxDeviationMs()) signals++;                    // absolute jitter
+        if (sd / mean <= config.autoClickerMaxCv()) signals++;                      // jitter relative to rate
+        if (outlierRatio(intervals) <= config.autoClickerMaxOutlierRatio()) signals++; // missing human pauses
+
+        if (signals >= config.autoClickerMinSignals()) {
+            buf.clear(); // reset so it must re-accumulate
+            String details = lang.format("alert.autoclicker_pattern", sd, cps);
+            double value = sd;
+            Scheduler.runForPlayer(plugin, id, () -> flagOnMain(id, "AUTOCLICKER", details, value));
+        }
+    }
+
+    /**
+     * Share of intervals longer than 1.5x the median. A human pauses regularly (high share),
+     * an autoclicker runs without a break (near zero).
+     */
+    private static double outlierRatio(long[] intervals) {
+        if (intervals.length == 0) return 1.0;
+        long[] sorted = intervals.clone();
+        Arrays.sort(sorted);
+        int mid = sorted.length / 2;
+        double median = sorted.length % 2 == 0 ? (sorted[mid - 1] + sorted[mid]) / 2.0 : sorted[mid];
+        if (median <= 0) return 0.0; // no measurable gaps at all — as robotic as it gets
+        double limit = median * 1.5;
+        int outliers = 0;
+        for (long iv : intervals) if (iv > limit) outliers++;
+        return (double) outliers / intervals.length;
     }
 
     /** Rotation packets: BadPackets (impossible pitch) and KillAura rotation GCD. */
@@ -353,7 +481,8 @@ public class PacketChecker implements PacketListener {
 
         // BadPackets: impossible rotation values
         if (bp && (!Float.isFinite(pitch) || !Float.isFinite(yaw) || pitch < -90.0f || pitch > 90.0f)) {
-            Scheduler.runForPlayer(plugin, id, () ->flagBadPackets(id, pitch));
+            String details = lang.format("alert.badpackets", pitch);
+            Scheduler.runForPlayer(plugin, id, () -> flagOnMain(id, "BADPACKETS", details, pitch));
         }
 
         // KillAura rotation GCD: human mouse input is quantised (yaw deltas share a common
@@ -378,7 +507,8 @@ public class PacketChecker implements PacketListener {
                         if (g > 0 && g < config.killAuraRotationMinGcd()) {
                             dq.clear();
                             long flagged = g;
-                            Scheduler.runForPlayer(plugin, id, () ->flagRotation(id, flagged));
+                            String details = lang.format("alert.killaura_rotation", flagged);
+                            Scheduler.runForPlayer(plugin, id, () -> flagOnMain(id, "KILLAURA", details, flagged));
                         }
                     }
                 }
@@ -410,7 +540,8 @@ public class PacketChecker implements PacketListener {
                     if (st.size() >= config.aimSnapThreshold()) {
                         st.clear();
                         double angle = spikeIn;
-                        Scheduler.runForPlayer(plugin, id, () ->flagAimSnap(id, angle));
+                        String details = lang.format("alert.aimsnap", angle);
+                        Scheduler.runForPlayer(plugin, id, () -> flagOnMain(id, "AIMSNAP", details, angle));
                     }
                 }
             }
@@ -474,112 +605,42 @@ public class PacketChecker implements PacketListener {
         Scheduler.runForPlayer(plugin, id, main);
     }
 
-    /** Runs on the main thread. */
-    private void flagAutoClicker(UUID id, int cps, int maxCps) {
+    /**
+     * Flag path for the checks that need the Player object (alert location, exemption
+     * state). Runs on the player's region thread; best-effort — skipped if the player
+     * already disconnected.
+     */
+    private void flagOnMain(UUID id, String type, String details, double value) {
         Player player = Bukkit.getPlayer(id);
         if (player == null) return;
         if (Exemptions.isExempt(player, config, luckPerms, geyser)) {
-            if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] flag skipped: " + player.getName() + " is exempt");
+            if (config.debugMode()) {
+                plugin.getLogger().info("[AC-DEBUG] " + type + " flag skipped: " + player.getName() + " is exempt");
+            }
             return;
         }
-        if (config.debugMode()) plugin.getLogger().info("[AC-DEBUG] FLAG " + player.getName() + " cps=" + cps);
-
-        String details = lang.format("alert.autoclicker", cps, maxCps);
+        if (config.debugMode()) {
+            plugin.getLogger().info("[AC-DEBUG] FLAG " + player.getName() + " " + type + " - " + details);
+        }
         if (database != null) {
-            database.logAsync("anticheat_autoclicker", cps, player.getName() + ": " + details);
+            database.logAsync("anticheat_" + type.toLowerCase(), value,
+                    player.getName() + ": " + details + " @ "
+                            + dev.boondock.bsanticheat.util.CheckMath.formatLocation(player.getLocation()));
         }
         if (alertManager != null) {
-            alertManager.addAlert(player, "AUTOCLICKER", details, cps, player.getLocation());
+            alertManager.addAlert(player, type, details, value, player.getLocation());
         } else if (config.debugMode()) {
-            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " AUTOCLICKER - " + details);
+            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " " + type + " - " + details);
         }
         if (violationManager != null) {
-            violationManager.flag(player, "AUTOCLICKER");
+            violationManager.flag(player, type);
         }
     }
 
-    /** Runs on the main thread. */
-    private void flagBadPackets(UUID id, float pitch) {
-        Player player = Bukkit.getPlayer(id);
-        if (player == null) return;
-        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
-
-        String details = lang.format("alert.badpackets", pitch);
-        if (database != null) {
-            database.logAsync("anticheat_badpackets", pitch, player.getName() + ": " + details);
-        }
-        if (alertManager != null) {
-            alertManager.addAlert(player, "BADPACKETS", details, pitch, player.getLocation());
-        } else if (config.debugMode()) {
-            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " BADPACKETS - " + details);
-        }
-        if (violationManager != null) {
-            violationManager.flag(player, "BADPACKETS");
-        }
-    }
-
-    /** Runs on the main thread. */
-    private void flagTimer(UUID id, long balance) {
-        Player player = Bukkit.getPlayer(id);
-        if (player == null) return;
-        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
-
-        String details = lang.format("alert.timer", balance);
-        if (database != null) {
-            database.logAsync("anticheat_timer", balance, player.getName() + ": " + details);
-        }
-        if (alertManager != null) {
-            alertManager.addAlert(player, "TIMER", details, balance, player.getLocation());
-        } else if (config.debugMode()) {
-            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " TIMER - " + details);
-        }
-        if (violationManager != null) {
-            violationManager.flag(player, "TIMER");
-        }
-    }
-
-    /** Runs on the main thread. */
-    private void flagRotation(UUID id, long measuredGcd) {
-        Player player = Bukkit.getPlayer(id);
-        if (player == null) return;
-        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
-
-        String details = lang.format("alert.killaura_rotation", measuredGcd);
-        if (database != null) {
-            database.logAsync("anticheat_killaura", measuredGcd, player.getName() + ": " + details);
-        }
-        if (alertManager != null) {
-            alertManager.addAlert(player, "KILLAURA", details, measuredGcd, player.getLocation());
-        } else if (config.debugMode()) {
-            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " KILLAURA - " + details);
-        }
-        if (violationManager != null) {
-            violationManager.flag(player, "KILLAURA");
-        }
-    }
-
-    /** Runs on the main thread. */
-    private void flagAimSnap(UUID id, double angle) {
-        Player player = Bukkit.getPlayer(id);
-        if (player == null) return;
-        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
-
-        String details = lang.format("alert.aimsnap", angle);
-        if (database != null) {
-            database.logAsync("anticheat_aimsnap", angle, player.getName() + ": " + details);
-        }
-        if (alertManager != null) {
-            alertManager.addAlert(player, "AIMSNAP", details, angle, player.getLocation());
-        } else if (config.debugMode()) {
-            plugin.getLogger().warning("[AntiCheat] " + player.getName() + " AIMSNAP - " + details);
-        }
-        if (violationManager != null) {
-            violationManager.flag(player, "AIMSNAP");
-        }
-    }
 
     public void cleanup(UUID playerId) {
         clicks.remove(playerId);
+        graceUntil.remove(playerId);
         timerState.remove(playerId);
         packetCounts.remove(playerId);
         miningUntil.remove(playerId);

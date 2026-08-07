@@ -1,7 +1,6 @@
 # BSAntiCheat - Deutsche Sprachdatei
 
 general:
-  prefix: "&8[&cBSAntiCheat&8]&r "
   no_permission: "&cDu hast keine Berechtigung dafuer."
   player_not_found: "&cSpieler nicht gefunden: &f%player%"
   config_reloaded: "&aKonfiguration neu geladen."

@@ -170,7 +170,9 @@ public class LanguageManager {
     public String format(String key, Object... args) {
         String message = get(key);
         try {
-            return String.format(message, args);
+            // Locale.ROOT: alert text must not depend on the server JVM's locale, which
+            // would otherwise render "4.20 blocks" as "4,20" on some hosts and not others.
+            return String.format(java.util.Locale.ROOT, message, args);
         } catch (Exception e) {
             return message;
         }

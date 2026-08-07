@@ -167,6 +167,9 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
                 velocityChecker.setTransactionManager(transactionManager);
                 combatChecker.setTransactionManager(transactionManager);
 
+                // Also a Bukkit listener: it needs teleport/join/world-change events to
+                // know when a client is catching up and must not be judged.
+                Bukkit.getPluginManager().registerEvents(packetChecker, this);
                 packetListener = PacketEvents.getAPI().getEventManager()
                         .registerListener(packetChecker, PacketListenerPriority.NORMAL);
                 transactionManager.start();
@@ -242,7 +245,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
     }
 
     public void reloadPlugin() {
-        reloadConfig();
+        // configAdapter.reload() calls reloadConfig() itself — don't do it twice here.
         configAdapter.reload();
         // Reload the language in place so components holding a reference stay valid
         lang.setLanguage(configAdapter.language());
@@ -254,7 +257,6 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
     public PluginConfig configAdapter() { return configAdapter; }
     public LanguageManager lang() { return lang; }
     public DatabaseManager database() { return database; }
-    public MovementChecker movementChecker() { return movementChecker; }
     public XRayDetector xrayDetector() { return xrayDetector; }
     public ViolationManager violationManager() { return violationManager; }
     public XRayAlertManager xrayAlertManager() { return xrayAlertManager; }

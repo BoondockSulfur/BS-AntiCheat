@@ -1,10 +1,7 @@
 package dev.boondock.bsanticheat.commands;
 
 import dev.boondock.bsanticheat.BSAntiCheat;
-import dev.boondock.bsanticheat.alerts.AlertPreferenceManager;
-import dev.boondock.bsanticheat.anticheat.*;
 import dev.boondock.bsanticheat.config.PluginConfig;
-import dev.boondock.bsanticheat.lang.LanguageManager;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.command.TabCompleter;

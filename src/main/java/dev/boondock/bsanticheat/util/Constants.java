@@ -8,6 +8,15 @@ public final class Constants {
     private Constants() {}
 
     // ==================== DATABASE ====================
+    /** Shared prefix of every check's DB log type ({@code anticheat_<check>}). */
+    public static final String LOG_TYPE_PREFIX = "anticheat_";
+    /**
+     * Log-type prefixes owned by the XRay alert family. Everything else under
+     * {@link #LOG_TYPE_PREFIX} belongs to the movement alert family, so the two clear
+     * commands stay complete without a hand-maintained per-check list.
+     */
+    public static final java.util.List<String> XRAY_LOG_TYPE_PREFIXES =
+            java.util.List.of("anticheat_xray", "anticheat_restricted_zone");
     public static final int DB_MAX_BATCH_SIZE = 1000;
     public static final int DB_MAX_QUEUE_SIZE = 10000;
     public static final int DB_DEFAULT_POOL_SIZE = 5;
@@ -39,6 +48,12 @@ public final class Constants {
     // 8 after live data: beacon/efficiency deepslate mining legitimately clears that.
     public static final int XRAY_RARE_COMBINED_THRESHOLD = 12;
 
+    // ==================== TRANSACTION LATENCY ====================
+    // Ticks between transaction pings per player. Every 2 ticks (10/s) still resolves
+    // latency far finer than the 15s keep-alive getPing() is derived from, at half the
+    // packet overhead of the previous every-tick default.
+    public static final long TRANSACTION_INTERVAL_TICKS = 2L;
+
     // ==================== ALERT MANAGER ====================
     public static final long ALERT_COOLDOWN_MS = 300000L;
     public static final long ALERT_CLEANUP_MS = 1800000L;
@@ -55,6 +70,8 @@ public final class Constants {
     public static final double ICE_SPEED_MULTIPLIER = 1.7;
     public static final double BLUE_ICE_SPEED_MULTIPLIER = 2.6;
     public static final double DOLPHINS_GRACE_MULTIPLIER = 4.0;
+    // Depth Strider I/II/III remove ~1/3 of the water drag per level
+    public static final double DEPTH_STRIDER_MULTIPLIER_PER_LEVEL = 0.33;
 
     // ==================== VEHICLE SPEEDS ====================
     public static final double HORSE_MAX_SPEED = 15.0;
@@ -95,6 +112,8 @@ public final class Constants {
     // Reach / KillAura angle: consecutive suspicious hits before flagging. Single hits are
     // noisy (latency moves both hitboxes; flick hits are judged against stale rotation).
     public static final int REACH_VIOLATIONS = 3;
+    // Slack on top of a player's actual entity_interaction_range attribute (vanilla 3.0)
+    public static final double REACH_ATTRIBUTE_SLACK = 1.0;
     public static final int KILLAURA_ANGLE_VIOLATIONS = 3;
     // Scaffold: consecutive "not looking at block" places before flagging
     public static final int SCAFFOLD_VIOLATIONS = 3;
@@ -119,6 +138,10 @@ public final class Constants {
     public static final int INVENTORYMOVE_VIOLATIONS = 8;
     // ChestStealer: this many consecutive container clicks each under the interval
     public static final long CHESTSTEALER_MAX_INTERVAL_MS = 40L;
+    // Intervals below this are physically impossible for separate human clicks AND for
+    // any real autoclicker (that would be >100 CPS) — they only occur when the network
+    // delivered several clicks in one bundle. Such pairs are ignored, not counted.
+    public static final long CHESTSTEALER_MIN_INTERVAL_MS = 10L;
     public static final int CHESTSTEALER_MIN_CLICKS = 6;
     // FastUse: fastest legit consumable (dried kelp) takes ~800ms
     public static final long FASTUSE_MIN_INTERVAL_MS = 600L;
@@ -129,6 +152,17 @@ public final class Constants {
     public static final int BOWSPAM_VIOLATIONS = 3;
     // AutoTotem: inventory-click totem refill faster than any human reaction after a pop
     public static final long AUTOTOTEM_MAX_REACTION_MS = 150L;
+
+    // Timer: the balance must stay over the limit this long before it counts. A bundle of
+    // packets delivered together spikes it for a few hundred ms; a timer hack holds it.
+    public static final long TIMER_SUSTAINED_MS = 1000L;
+    // PacketFlood: consecutive one-second windows over the limit before flagging. One
+    // window is a connection catching up after a stall; an attack floods every window.
+    public static final int PACKETFLOOD_WINDOWS = 2;
+    // Grace after a teleport/join/world change: chunk loading stalls the CLIENT, which
+    // then flushes its queued packets in one burst. The movement checks have always had
+    // these windows; the packet checks had none.
+    public static final long PACKET_GRACE_MS = 5000L;
 
     // ==================== CRASH PROTECTION ====================
     // Generous multiples of the vanilla limits (books: 100 pages / ~1024 chars per page)

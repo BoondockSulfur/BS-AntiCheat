@@ -17,7 +17,11 @@ public class ConfigMigrator {
     }
 
     public void migrateFromPerformanceAnalyzer() {
-        File oldConfig = new File("plugins/PerformanceAnalyzer/config.yml");
+        // Resolve via our own data folder's parent — a relative path would depend on the
+        // process working directory, which is not guaranteed to be the server root.
+        File pluginsDir = plugin.getDataFolder().getParentFile();
+        if (pluginsDir == null) return;
+        File oldConfig = new File(new File(pluginsDir, "PerformanceAnalyzer"), "config.yml");
         if (!oldConfig.exists()) return;
         if (plugin.getConfig().getInt("config_version", 0) > 0) return;
 

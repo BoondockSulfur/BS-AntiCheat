@@ -150,16 +150,58 @@ public class DatabaseManager {
         });
     }
 
+    /**
+     * Delete every anticheat log for a player whose type does NOT start with one of
+     * {@code excludedPrefixes}. Used by the movement alert command: its alert manager owns
+     * every check except XRay, and a hand-maintained type list silently goes stale each
+     * time a check is added (which is exactly what happened before this existed).
+     */
+    public void deleteAntiCheatLogsExceptAsync(String playerName, List<String> excludedPrefixes,
+                                               java.util.function.IntConsumer callback) {
+        Scheduler.runAsync(plugin, () -> {
+            int deleted = deleteAntiCheatLogsExcept(playerName, excludedPrefixes);
+            Scheduler.runGlobal(plugin, () -> callback.accept(deleted));
+        });
+    }
+
     public int deleteAntiCheatLogs(String playerName, String logTypePrefix) {
-        String sql = "DELETE FROM anticheat_logs WHERE log_type LIKE ? AND description LIKE ?";
+        String sql = "DELETE FROM anticheat_logs WHERE log_type LIKE ? ESCAPE '\\' AND description LIKE ? ESCAPE '\\'";
         try (Connection c = ds.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, logTypePrefix + "%");
-            ps.setString(2, playerName + ":%");
+            ps.setString(1, likePrefix(logTypePrefix));
+            ps.setString(2, likePrefix(playerName + ":"));
             return ps.executeUpdate();
         } catch (SQLException e) {
             plugin.getLogger().severe("Delete error: " + e.getMessage());
         }
         return 0;
+    }
+
+    private int deleteAntiCheatLogsExcept(String playerName, List<String> excludedPrefixes) {
+        StringBuilder sql = new StringBuilder(
+                "DELETE FROM anticheat_logs WHERE log_type LIKE ? ESCAPE '\\' AND description LIKE ? ESCAPE '\\'");
+        for (int i = 0; i < excludedPrefixes.size(); i++) {
+            sql.append(" AND log_type NOT LIKE ? ESCAPE '\\'");
+        }
+        try (Connection c = ds.getConnection(); PreparedStatement ps = c.prepareStatement(sql.toString())) {
+            ps.setString(1, likePrefix(Constants.LOG_TYPE_PREFIX));
+            ps.setString(2, likePrefix(playerName + ":"));
+            for (int i = 0; i < excludedPrefixes.size(); i++) {
+                ps.setString(3 + i, likePrefix(excludedPrefixes.get(i)));
+            }
+            return ps.executeUpdate();
+        } catch (SQLException e) {
+            plugin.getLogger().severe("Delete error: " + e.getMessage());
+        }
+        return 0;
+    }
+
+    /**
+     * Turn a literal string into a LIKE prefix pattern. SQL {@code LIKE} treats {@code _}
+     * as a single-character wildcard — and Minecraft names may contain underscores, so an
+     * unescaped "A_B:%" would also match player "AxB"'s rows and delete them.
+     */
+    private static String likePrefix(String literal) {
+        return literal.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%";
     }
 
     public void cleanOldData(int daysToKeep) {
@@ -196,8 +238,6 @@ public class DatabaseManager {
             if (ds != null && !ds.isClosed()) ds.close();
         }
     }
-
-    public boolean isDatabaseAvailable() { return databaseAvailable; }
 
     private void run(String sql) {
         try (Connection c = ds.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {

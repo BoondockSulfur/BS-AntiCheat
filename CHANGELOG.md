@@ -4,6 +4,158 @@ All notable changes to BSAntiCheat are documented in this file.
 
 ---
 
+## [1.0.3] - 2026-08-05
+
+Full code-review release: correctness fixes found by auditing every source file against
+its own documentation, plus hot-path performance work and dead-code removal. No behaviour
+change for the default configuration except where a check was previously too weak.
+
+### Fixed — false positives
+### Fixed — movement
+- **Standing on entities is no longer GroundSpoof/Fly.** The ground scan only ever looked
+  at blocks, so a player standing on a boat, a minecart, a horse or another player's head
+  had "nothing below them" and was flagged. An entity check now runs — but only when the
+  block scan came up empty, so it costs nothing during normal play.
+- **Lily pads are no longer Jesus.** The water-surface test accepted any non-water block
+  at foot level, so walking across lily pads (and standing on a boat on water) read as
+  walking on water. The feet block must now be air specifically.
+- **Jump Boost is exempt from the fly checks.** It raises both jump height and time spent
+  rising, which fed the hover counter. The Step check had always excluded it.
+- **Depth Strider is compensated.** Without it a player with Depth Strider III swims at
+  roughly walking speed and pushes against the swimming cap.
+
+### Fixed — inventory
+- **InventoryMove had no knockback grace.** Any server-applied velocity (arrow or trident
+  hit, wind charge, explosion, jump pad) moves a player with a GUI open without any key
+  input. MovementChecker has always had this grace; this check was missing it.
+- **InventoryMove ignored plugin-granted flight.** A player flying via EssentialsX `/fly`
+  is in survival gamemode, so the creative exemption never applied — they drifted with a
+  GUI open and were flagged. Now exempt, as is the Velocity check for the same reason.
+- **ChestStealer had no lag guard.** After a lag spike the queued clicks all arrive in one
+  tick and look like 0 ms intervals — an instant flag. Every other check already backed
+  off under lag.
+
+### Fixed — combat and vehicles
+- **Reach honours the `entity_interaction_range` attribute.** Item plugins grant
+  long-reach weapons by raising it; judging those hits against the flat config value
+  flagged players for using their own gear.
+- **Vehicle teleports are not speed violations.** `VehicleMoveEvent` carries no teleport
+  flag, so a Multiverse portal or a plugin repositioning a ridden horse produced one
+  enormous "movement". Implausible single-tick jumps now reset the streak instead.
+- **A Speed potion on a mount raises its ceiling.** A fast horse under Speed II otherwise
+  blew past the flat per-type limit.
+
+### Changed
+- **`autoclicker_min_signals` now defaults to 3 (was 2).** Markers 1 and 2 both measure
+  jitter and rise together, so a human clicking steadily trips both — 2 was not the safe
+  middle it appeared to be. Marker 3 (does the player ever pause?) is the independent
+  signal. Documented in `config.yml`.
+
+### Fixed — effects, items and attributes
+- **Checks now read the game's own attributes instead of hand-rolled multipliers.** The
+  Speed potion was compensated by a hard-coded formula, so every *other* legitimate way a
+  player gets faster was invisible: attribute modifiers from custom gear and item plugins,
+  datapacks, mount/armour buffs — and `EssentialsX /speed`, which bypasses the attribute
+  system entirely via `setWalkSpeed()`. The speed checks now derive their ceiling from
+  `movement_speed` and `getWalkSpeed()`. Verified numerically identical for potions
+  (Speed I → 1.2x, Speed II → 1.4x, exactly as before), so nothing was loosened for
+  vanilla play. Vanilla applies the sprint boost as a `movement_speed` modifier, which is
+  divided back out so the separate sprint threshold is not inflated by 30%.
+- **Sneaking uses the `sneaking_speed` attribute** — what Swift Sneak actually modifies —
+  instead of a fixed 0.3, so any item or plugin granting faster crouching is respected.
+  The enchantment is still read as a floor.
+- **Jump strength scales the vertical fly allowance**, step height is taken from the
+  `step_height` attribute, and **reduced `gravity` exempts the hover check** — hanging in
+  the air without descending is exactly what that check flags, and low gravity makes it
+  legitimate.
+- **Body `scale` is respected**: a resized player has a proportionally wider hitbox (the
+  ground scan now scans that width) and reaches proportionally further (reach ceiling).
+
+- **Swimming reads `water_movement_efficiency`**, the attribute vanilla maps Depth Strider
+  onto, so items and plugins granting the same effect without the enchantment are covered.
+  The enchantment lookup remains as a floor.
+
+### Changed — Criticals is now opt-in
+- **`criticals_detection` now defaults to `false`.** Checking the vanilla rules against the
+  implementation showed the condition ("critical **and** on the ground **and** fall distance
+  zero") is a contradiction: the server only awards a critical when the player is airborne
+  and falling, and `isCritical()` reports that same server-side decision. It can therefore
+  never fire on legitimate vanilla combat — only on damage events synthesised by other
+  plugins, i.e. it flags players for using custom gear. It also does not catch the real
+  Criticals cheat, which fakes micro-falls so the crit is computed while the player is
+  reported airborne. A working implementation needs per-tick vertical movement from the
+  packet layer; until then the check is off rather than silently wrong. Consistent with the
+  30 days of production data available, where it never fired once.
+
+### Fixed — correctness
+- **AutoClicker consistency analysis now actually exists.** `config.yml` documented seven
+  options for it (`autoclicker_consistency`, `_min_samples`, `_min_cps`,
+  `_max_deviation_ms`, `_max_cv`, `_max_outlier_ratio`, `_min_signals`) and the alert text
+  was translated in both languages — but no code ever read them, so enabling it did
+  nothing. Implemented as documented: three robotic markers (absolute jitter, jitter
+  relative to click rate, share of human pauses), flagged when at least `min_signals`
+  hold. Still opt-in; calibrate with `debug_mode`, which now logs sd/cv/outlier values.
+- **XRay ore/stone ratio was measured against a stale stone count.** The stone deque was
+  only trimmed to the time window when stone was broken or by the 5-minute cleanup task,
+  so a player who mined stone and then switched to pure ore mining kept an inflated
+  denominator for minutes — silently weakening the check. It is now trimmed at read time.
+- **`/movealerts clear <player> --db` deleted only 3 of ~30 log types** (speed, fly,
+  teleport), leaving every other check's rows behind while reporting success. It now
+  deletes everything that is not XRay-owned, derived from a single shared constant so
+  adding a check can no longer make it stale again.
+- **Log deletion could hit the wrong player.** The queries built `LIKE` patterns from raw
+  names, and `_` is a single-character wildcard in SQL — clearing alerts for `A_B` also
+  matched `AxB`. Patterns are now escaped (`ESCAPE '\'`).
+- **KillAura multi-target raised the violation level several times per incident.** Unlike
+  every other check it did not clear its evidence after flagging, so each further hit in
+  the window re-flagged and punishment tiers were reached far too fast.
+- **Setback is Folia-safe.** It was the only synchronous `teleport()` left in the plugin
+  and ran inside a `PlayerMoveEvent` handler despite `folia-supported: true`; it now uses
+  `teleportAsync()`.
+- **Setback no longer teleports to a stale position.** The grace windows (teleport,
+  knockback, join, glide) returned early *before* the last-known-position bookkeeping, so
+  a setback after a 2-second knockback window sent the player back to where they stood
+  before it.
+- **An explicitly granted `bsanticheat.bypass` now works for OPs.** All three checks were
+  guarded by `!isOp()`, so granting the permission to an OP-admin silently did nothing.
+  The permission defaults to `false`, so OPs still never receive it implicitly.
+
+### Performance
+- Ground detection does **one** scan per movement packet instead of two. The hover and
+  GroundSpoof checks differ only in the depth they accept, so `supportDepth()` now returns
+  the distance to the nearest support and both read it — ~35 fewer block lookups per
+  movement packet per player. The slime/bubble-column lookups are shared the same way.
+- Whitelist, restricted-world and XRay-exempt-world lookups are cached as sets. They were
+  hit on every movement, hit and block break, and each call allocated a fresh `ArrayList`.
+- **New `anticheat.transaction_interval_ticks`** (default `2`). The latency system sent a
+  ping packet to every player every tick — 20 extra packets/second/player unconditionally.
+  The default halves that; raise it further on high-population servers. Requires a restart.
+
+### Changed
+- Velocity's climbable check uses the game's `CLIMBABLE` tag instead of a hand-written
+  material list that missed the `*_PLANT` vine variants.
+- Alert numbers format with `Locale.ROOT`, so values no longer render as `4,20` on servers
+  whose JVM runs in a comma-decimal locale.
+- The Discord queue processor releases its slot under the same lock that starts it, and in
+  a `finally` — an alert queued during hand-off could previously wait for the next alert,
+  and an exception would have wedged the queue permanently.
+- The PerformanceAnalyzer config migration resolves its path from the plugin data folder
+  instead of the process working directory.
+- Gson is declared in `pom.xml` (`provided`) instead of being used via a transitive
+  paper-api dependency.
+- Removed dead code: `db/TimeUnit`, nine unused accessors, a write-only tracking set in
+  the movement alert manager, the unused German enum labels on `MovementType`, and the
+  unused `general.prefix` language key. The five near-identical packet flag paths were
+  merged into one.
+
+### Documentation
+- `config.yml` lists all ~30 `%check%` values for punishment tiers instead of 7, and
+  documents that VL is tracked per check.
+- README: corrected jar version, the inventory family is not opt-in, the opt-in list now
+  matches the code, and the AutoClicker entry describes both signals.
+
+---
+
 ## [1.0.2] - 2026-07-10
 
 XRay calibration release: live data showed legitimate beacon (Haste II) + Efficiency V
