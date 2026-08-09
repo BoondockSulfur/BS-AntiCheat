@@ -14,9 +14,6 @@ import dev.boondock.bsanticheat.integration.ViaVersionHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
 import dev.boondock.bsanticheat.util.UpdateChecker;
-import com.github.retrooper.packetevents.PacketEvents;
-import com.github.retrooper.packetevents.event.PacketListenerCommon;
-import com.github.retrooper.packetevents.event.PacketListenerPriority;
 import org.bstats.bukkit.Metrics;
 import org.bukkit.Bukkit;
 import org.bukkit.event.EventHandler;
@@ -46,10 +43,10 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
     private InventoryChecker inventoryChecker;
     private VelocityChecker velocityChecker;
     private ViolationManager violationManager;
-    private PacketChecker packetChecker;
-    private TransactionManager transactionManager;
-    private PacketListenerCommon packetListener;
-    private boolean packetEventsActive = false;
+    // Held as PacketIntegration, never as a PacketEvents type: naming one here would
+    // make the JVM resolve it while linking THIS class, so the plugin would fail to
+    // load on a server without PacketEvents instead of degrading. Null when absent.
+    private PacketIntegration packets;
     private LuckPermsHook luckPerms;
     private GeyserHook geyser;
 
@@ -151,36 +148,23 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         // Packet-level checks — use the installed PacketEvents plugin (optional).
         // We do NOT bundle/init PacketEvents ourselves to avoid conflicting with a
         // standalone PacketEvents/ProtocolLib already hooking the netty pipeline.
+        // The call is what loads PacketIntegration, and with it the PacketEvents classes.
+        // On a server without PacketEvents that throws NoClassDefFoundError right here,
+        // inside this catch — which is precisely the intended degradation.
         try {
-            if (PacketEvents.getAPI() != null && PacketEvents.getAPI().isInitialized()) {
-                packetChecker = new PacketChecker(this, configAdapter, database, lang);
-                packetChecker.setLuckPerms(luckPerms);
-                packetChecker.setGeyser(geyser);
-                packetChecker.setAlertManager(movementAlertManager);
-                packetChecker.setViolationManager(violationManager);
-
-                // Transaction/latency system (phase 2) — only meaningful with PacketEvents.
-                transactionManager = new TransactionManager(this, configAdapter, database);
-                packetChecker.setTransactionManager(transactionManager);
-                movementChecker.setTransactionManager(transactionManager);
-                vehicleChecker.setTransactionManager(transactionManager);
-                velocityChecker.setTransactionManager(transactionManager);
-                combatChecker.setTransactionManager(transactionManager);
-
-                // Also a Bukkit listener: it needs teleport/join/world-change events to
-                // know when a client is catching up and must not be judged.
-                Bukkit.getPluginManager().registerEvents(packetChecker, this);
-                packetListener = PacketEvents.getAPI().getEventManager()
-                        .registerListener(packetChecker, PacketListenerPriority.NORMAL);
-                transactionManager.start();
-                packetEventsActive = true;
+            packets = PacketIntegration.tryEnable(this, configAdapter, database, lang, luckPerms, geyser,
+                    movementAlertManager, violationManager,
+                    movementChecker, vehicleChecker, velocityChecker, combatChecker);
+            if (packets != null) {
                 getLogger().info("[PacketEvents] hooked - packet checks + transaction latency active.");
             } else {
-                getLogger().info("[PacketEvents] not found - packet checks (AutoClicker, BadPackets) disabled. "
-                        + "Install the PacketEvents plugin to enable them.");
+                getLogger().info("[PacketEvents] not found - packet checks (AutoClicker, BadPackets, Timer) "
+                        + "disabled. Install the PacketEvents plugin to enable them.");
             }
         } catch (Throwable t) {
-            getLogger().warning("[PacketEvents] Could not hook - packet-based checks disabled: " + t.getMessage());
+            packets = null;
+            getLogger().info("[PacketEvents] not available - packet-based checks disabled ("
+                    + t.getClass().getSimpleName() + "). The rest of the anticheat runs normally.");
         }
 
         // Commands
@@ -219,9 +203,8 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
-        if (transactionManager != null) transactionManager.stop();
-        if (packetListener != null) {
-            try { PacketEvents.getAPI().getEventManager().unregisterListener(packetListener); } catch (Throwable ignored) {}
+        if (packets != null) {
+            try { packets.shutdown(); } catch (Throwable ignored) {}
         }
         if (database != null) database.shutdown();
         if (configAdapter != null) configAdapter.saveSyncOnShutdown();
@@ -238,8 +221,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         if (vehicleChecker != null) vehicleChecker.cleanup(playerId);
         if (inventoryChecker != null) inventoryChecker.cleanup(playerId);
         if (velocityChecker != null) velocityChecker.cleanup(playerId);
-        if (packetChecker != null) packetChecker.cleanup(playerId);
-        if (transactionManager != null) transactionManager.cleanup(playerId);
+        if (packets != null) packets.cleanup(playerId);
         if (alertPreferenceManager != null) alertPreferenceManager.cleanup(playerId);
         if (violationManager != null) violationManager.cleanup(playerId);
     }

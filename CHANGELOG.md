@@ -87,6 +87,18 @@ change for the default configuration except where a check was previously too wea
   packet layer; until then the check is off rather than silently wrong. Consistent with the
   30 days of production data available, where it never fired once.
 
+### Fixed — the plugin now really is optional-dependency safe
+- **BSAntiCheat did not load at all without PacketEvents**, despite `plugin.yml` listing it
+  only as a `softdepend` and the README promising the packet checks would simply switch
+  off. The main class named PacketEvents types directly (a `PacketListenerCommon` field,
+  and passing `PacketChecker` where a `PacketListener` is expected), so the JVM had to
+  resolve them while *linking* the main class — long before the runtime guard in
+  `onEnable` could run. Anyone installing the plugin without PacketEvents got a startup
+  error instead of the documented degradation. All PacketEvents references now live in a
+  single `PacketIntegration` class; loading *that* is what fails on such a server, inside
+  the caller's `try/catch(Throwable)`. Verified by loading the main class against a
+  classpath with and without PacketEvents.
+
 ### Fixed — correctness
 - **AutoClicker consistency analysis now actually exists.** `config.yml` documented seven
   options for it (`autoclicker_consistency`, `_min_samples`, `_min_cps`,
