@@ -1,6 +1,6 @@
 # BSAntiCheat
 
-A lightweight, false-positive-conscious anti-cheat for **Paper 1.21.x** — with full **Folia**
+A lightweight, false-positive-conscious anti-cheat for **Paper 1.21.10+** — with full **Folia**
 support. It covers movement, combat, world-interaction, inventory and packet-level cheats,
 logs everything to SQLite, and can act through a configurable violation-level punishment
 system. Built to be calibrated for *your* server rather than flag your legit players.
@@ -20,8 +20,8 @@ system. Built to be calibrated for *your* server rather than flag your legit pla
 - Grace windows for teleport, knockback, join/respawn/world-change and elytra landings
 
 **Combat**
-- Reach (measured to the hitbox surface), KillAura (aim angle + multi-target), AimSnap
-  (robotic snap-back rotation), Criticals, AutoBlock
+- Reach (measured to the hitbox surface, honours the interaction-range attribute),
+  KillAura (aim angle + multi-target), AimSnap (robotic snap-back rotation)
 
 **World**
 - Nuker, FastPlace, Scaffold (blind placement), FastBreak (per-block dig time vs. expected)
@@ -42,6 +42,11 @@ player-placed-ore exclusion
 > Spider, Step, AutoBlock, Velocity/AntiKnockback, the KillAura rotation-GCD check and the
 > AutoClicker consistency analysis. These are inherently false-positive-prone — calibrate
 > them with `debug_mode` before switching them on.
+>
+> **Criticals** is off for a different reason: the server only awards a critical hit to a
+> player who is airborne and falling, so the check's condition cannot be met by a genuine
+> vanilla crit — in practice it only fires on damage events synthesised by other plugins.
+> Leave it off unless your server has no damage-modifying plugins.
 
 **Infrastructure**
 - Violation-level (VL) system with decay and configurable punishment **tiers** (console commands)
@@ -57,12 +62,14 @@ player-placed-ore exclusion
 
 | | |
 |---|---|
-| **Server** | Paper 1.21.x (or Folia 1.21.x) |
+| **Server** | Paper 1.21.10+ (or Folia). Built against the 1.21.10 API; running in production on Paper 26.1.2 |
 | **Required for packet checks** | [PacketEvents](https://modrinth.com/plugin/packetevents) (install as a plugin) |
 | **Optional** | LuckPerms (group whitelist), PlaceholderAPI, Geyser/Floodgate (Bedrock exemption), ViaVersion (legacy-client exemption) |
 
 Without PacketEvents the plugin still runs — the packet-level checks (AutoClicker, BadPackets,
-Timer, Crasher, PacketFlood) and the transaction-latency system simply stay disabled.
+Timer, Crasher, PacketFlood) and the transaction-latency system simply stay disabled. This is
+verified by loading the plugin against a classpath with and without PacketEvents, not just
+asserted: until 1.0.3 a missing PacketEvents actually prevented the plugin from loading.
 
 ---
 
