@@ -64,6 +64,7 @@ public class CombatChecker implements Listener {
     // State: [0]=count, [1]=timestamp of last suspicious hit (ms).
     private final Map<UUID, long[]> reachStreak = new ConcurrentHashMap<>();
     private final Map<UUID, long[]> killAuraAngleStreak = new ConcurrentHashMap<>();
+    private final Map<UUID, long[]> killAuraMultiStreak = new ConcurrentHashMap<>();
     private static final long STREAK_WINDOW_MS = 10000L;
 
     public CombatChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
@@ -218,8 +219,13 @@ public class CombatChecker implements Listener {
 
             // (b) Multi-aura: several distinct targets hit within a tiny window.
             // (Sweeping-edge hits are already excluded by the ENTITY_ATTACK gate above.)
+            // Unlike reach and aim angle this had no streak requirement, so a single burst
+            // flagged outright — and a crowded team fight legitimately puts three players
+            // within reach inside 250ms. A killaura sustains it; a scramble does not.
             int distinct = recordTarget(attacker.getUniqueId(), victim.getUniqueId());
-            if (distinct >= config.killAuraMultiTargets()) {
+            if (distinct >= config.killAuraMultiTargets()
+                    && bumpStreak(killAuraMultiStreak, attackerId) >= config.killAuraMultiViolations()) {
+                killAuraMultiStreak.remove(attackerId);
                 handleViolation(attacker, "KILLAURA",
                         lang.format("alert.killaura_multi", distinct, Constants.KILLAURA_MULTI_WINDOW_MS), distinct);
                 // Drop the evidence after flagging, like every other check. Without this
@@ -273,6 +279,7 @@ public class CombatChecker implements Listener {
         consecutiveAutoBlock.remove(playerId);
         reachStreak.remove(playerId);
         killAuraAngleStreak.remove(playerId);
+        killAuraMultiStreak.remove(playerId);
     }
 
     private static final class TargetHit {

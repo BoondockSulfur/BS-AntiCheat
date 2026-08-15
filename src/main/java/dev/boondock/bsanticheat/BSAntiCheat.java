@@ -42,6 +42,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
     private VehicleChecker vehicleChecker;
     private InventoryChecker inventoryChecker;
     private VelocityChecker velocityChecker;
+    private PistonTracker pistonTracker;
     private ViolationManager violationManager;
     // Held as PacketIntegration, never as a PacketEvents type: naming one here would
     // make the JVM resolve it while linking THIS class, so the plugin would fail to
@@ -86,6 +87,12 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         vehicleChecker = new VehicleChecker(this, configAdapter, database, lang);
         inventoryChecker = new InventoryChecker(this, configAdapter, database, lang);
         velocityChecker = new VelocityChecker(this, configAdapter, database, lang);
+
+        // Pistons displace players without any velocity packet, so the movement and
+        // inventory checks need to know where one just fired.
+        pistonTracker = new PistonTracker();
+        movementChecker.setPistonTracker(pistonTracker);
+        inventoryChecker.setPistonTracker(pistonTracker);
 
         // Wire alert managers
         movementChecker.setAlertManager(movementAlertManager);
@@ -143,6 +150,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         Bukkit.getPluginManager().registerEvents(vehicleChecker, this);
         Bukkit.getPluginManager().registerEvents(inventoryChecker, this);
         Bukkit.getPluginManager().registerEvents(velocityChecker, this);
+        Bukkit.getPluginManager().registerEvents(pistonTracker, this);
         Bukkit.getPluginManager().registerEvents(this, this);
 
         // Packet-level checks — use the installed PacketEvents plugin (optional).

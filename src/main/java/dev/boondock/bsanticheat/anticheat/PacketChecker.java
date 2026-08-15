@@ -72,10 +72,26 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     // [2]=time the balance first went over the limit (0 = currently under)
     private final Map<UUID, long[]> timerState = new ConcurrentHashMap<>();
     private static final long TICK_MS = 50L;
-    // Held-button (mining/swinging) signature to exclude from AutoClicker: ~tick-rate, ultra-regular
-    private static final int HELD_CPS_MIN = 18;
-    private static final int HELD_CPS_MAX = 22;
-    private static final double HELD_SD_MAX = 5.0;
+    // Silence longer than this between movement packets is a stalled connection, not play:
+    // a vanilla client sends one every tick even while standing still.
+    private static final long PACKET_GAP_MS = 400L;
+    // How long the catch-up burst after such a stall is left unjudged.
+    private static final long STALL_GRACE_MS = 3000L;
+    // AimSnap looks at three consecutive rotation packets, which should span ~2 ticks. This
+    // bounds how far apart they may actually have arrived before the "flick" is just a player
+    // turning around at human speed with a packet gap in the middle.
+    private static final long AIMSNAP_MAX_SPAN_MS = 150L;
+    private final Map<UUID, Long> timerGraceUntil = new ConcurrentHashMap<>();
+    // Held-button (mining, or simply swinging at air) signature to exclude from AutoClicker.
+    // It is identified by the RATE the swings arrive at, not by how many land in a window:
+    // a held button is bound to the server tick, so its typical interval is TICK_MS. How far
+    // the median interval may sit from one tick — 6ms accepts 44-56ms, i.e. 17.9-22.7 CPS,
+    // and still excludes a 23 CPS clicker (43.5ms). The upper bound matters: it is what keeps
+    // the exclusion from becoming a hiding place for a genuine clicker.
+    private static final double HELD_TICK_TOLERANCE_MS = 6.0;
+    // Spread around that interval, as median absolute deviation. A single pause between
+    // swings inflates a standard deviation but leaves the MAD where it is.
+    private static final double HELD_MAD_MAX_MS = 12.0;
     // Below this many intervals the standard deviation is noise, not a signature.
     private static final int MIN_INTERVALS_FOR_SD = 7;
     // KillAura rotation GCD analysis
@@ -327,6 +343,30 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
 
         long[] st = timerState.computeIfAbsent(id, k -> new long[]{0L, now, 0L});
         long elapsed = now - st[1];
+
+        // A gap in the packet stream means the connection stalled — a vanilla client sends a
+        // movement packet every tick even standing still, so silence this long is not normal
+        // play. What follows is the client flushing what it queued, and every queued packet
+        // credits a full tick with no real time attached: the balance climbs by the whole
+        // backlog at once. The sustained-excursion rule does not catch it, because an
+        // eight-second backlog is not paid off in a few hundred milliseconds either.
+        // Live data: two TIMER alerts, one of them 8284ms, inside the minutes a player was
+        // timing out and reconnecting repeatedly.
+        if (elapsed > PACKET_GAP_MS) {
+            st[0] = 0L;             // discard the balance built before the stall
+            st[1] = now;
+            st[2] = 0L;             // and any excursion in progress
+            timerGraceUntil.put(id, now + STALL_GRACE_MS);
+            return;
+        }
+        Long graceUntil = timerGraceUntil.get(id);
+        if (graceUntil != null) {
+            if (now < graceUntil) {
+                st[1] = now;        // keep the clock moving, but do not judge the catch-up
+                return;
+            }
+            timerGraceUntil.remove(id);
+        }
         long balance = st[0] + TICK_MS * 100L - elapsed * 101L; // centi-ms, 1% drift leak
         if (balance < -100000L) balance = -100000L; // floor (-1000ms): no unlimited idle credit
         st[1] = now;
@@ -405,12 +445,24 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
             for (long iv : intervals) { double d = iv - mean; v += d * d; }
             sd = Math.sqrt(v / intervals.length);
         }
-        // Held left-click (mining/swinging) sends ~one swing per tick: ~20 CPS, ultra-regular.
-        boolean heldButton = cps >= HELD_CPS_MIN && cps <= HELD_CPS_MAX && sd >= 0 && sd < HELD_SD_MAX;
+        // Held left-click sends exactly one swing per tick, so the swings' typical INTERVAL is
+        // one tick however much their arrival times jitter. That distinction is the whole
+        // point of measuring intervals here: `cps` counts arrivals in a sliding window, so
+        // bunched packets push it past any fixed ceiling — which is how held-button swinging
+        // came to be flagged at 23 CPS against a 22 cap while its interval never moved off
+        // 50ms. A hand clicking at 23 CPS, by contrast, has a ~43.5ms interval and is not
+        // excluded. Median and MAD rather than mean and standard deviation: one pause between
+        // swings shifts a mean and explodes a deviation, but leaves the median where it is.
+        double medianInterval = intervals.length >= MIN_INTERVALS_FOR_SD ? median(intervals) : -1;
+        boolean heldButton = isHeldButton(intervals);
 
         if (config.debugMode()) {
-            plugin.getLogger().info(String.format("[AC-DEBUG] %s cps=%d sd=%s cv=%s outliers=%s held=%b (max %d)",
+            plugin.getLogger().info(String.format(
+                    "[AC-DEBUG] %s cps=%d median=%s mad=%s sd=%s cv=%s outliers=%s held=%b (max %d)",
                     user.getName(), cps,
+                    medianInterval < 0 ? "n/a" : String.format("%.1fms", medianInterval),
+                    medianInterval < 0 ? "n/a"
+                            : String.format("%.1fms", medianAbsoluteDeviation(intervals, medianInterval)),
                     sd < 0 ? "n/a" : String.format("%.1f", sd),
                     sd < 0 || mean <= 0 ? "n/a" : String.format("%.2f", sd / mean),
                     intervals.length == 0 ? "n/a" : String.format("%.2f", outlierRatio(intervals)),
@@ -449,12 +501,51 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
      * Share of intervals longer than 1.5x the median. A human pauses regularly (high share),
      * an autoclicker runs without a break (near zero).
      */
-    private static double outlierRatio(long[] intervals) {
-        if (intervals.length == 0) return 1.0;
-        long[] sorted = intervals.clone();
+    /**
+     * Whether these swing intervals carry the cadence of a held mouse button.
+     *
+     * <p>A held button is bound to the server tick — the client emits exactly one swing per
+     * tick — so the TYPICAL interval sits at {@link #TICK_MS} however much individual arrival
+     * times jitter. Deciding on the interval distribution rather than on the CPS count is the
+     * whole point: the count is a sliding window over arrival times, so bunched packets push
+     * it past any fixed ceiling while the cadence never moved.
+     *
+     * <p>Package-private and free of any server state so the behaviour can be tested
+     * directly — this is where the 23-CPS false positives came from.
+     */
+    static boolean isHeldButton(long[] intervals) {
+        if (intervals.length < MIN_INTERVALS_FOR_SD) return false;
+        double m = median(intervals);
+        return Math.abs(m - TICK_MS) <= HELD_TICK_TOLERANCE_MS
+                && medianAbsoluteDeviation(intervals, m) <= HELD_MAD_MAX_MS;
+    }
+
+    /** Median of a sample, or 0 for an empty one. */
+    static double median(long[] values) {
+        if (values.length == 0) return 0.0;
+        long[] sorted = values.clone();
         Arrays.sort(sorted);
         int mid = sorted.length / 2;
-        double median = sorted.length % 2 == 0 ? (sorted[mid - 1] + sorted[mid]) / 2.0 : sorted[mid];
+        return sorted.length % 2 == 0 ? (sorted[mid - 1] + sorted[mid]) / 2.0 : sorted[mid];
+    }
+
+    /**
+     * Median absolute deviation around {@code centre} — a spread measure that a single
+     * outlier cannot inflate, unlike a standard deviation. One pause in a stream of held
+     * swings is exactly such an outlier.
+     */
+    static double medianAbsoluteDeviation(long[] values, double centre) {
+        if (values.length == 0) return 0.0;
+        long[] deviations = new long[values.length];
+        for (int i = 0; i < values.length; i++) {
+            deviations[i] = Math.abs(Math.round(values[i] - centre));
+        }
+        return median(deviations);
+    }
+
+    static double outlierRatio(long[] intervals) {
+        if (intervals.length == 0) return 1.0;
+        double median = median(intervals);
         if (median <= 0) return 0.0; // no measurable gaps at all — as robotic as it gets
         double limit = median * 1.5;
         int outliers = 0;
@@ -520,7 +611,7 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         // spoofing Scaffold/KillAura even when the per-frame angle to the target is small.
         if (snap && Float.isFinite(yaw) && Float.isFinite(pitch)) {
             Deque<double[]> dirs = recentDirs.computeIfAbsent(id, k -> new ArrayDeque<>());
-            dirs.addLast(dirOf(yaw, pitch));
+            dirs.addLast(dirOf(yaw, pitch, System.currentTimeMillis()));
             while (dirs.size() > 3) dirs.pollFirst();
             if (dirs.size() == 3) {
                 double[][] d = dirs.toArray(new double[0][]);
@@ -531,7 +622,15 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
                     plugin.getLogger().info(String.format("[SNAP-DEBUG] %s in=%.0f out=%.0f net=%.0f",
                             user.getName(), spikeIn, spikeOut, net));
                 }
-                if (spikeIn > config.aimSnapMinAngle() && spikeOut > config.aimSnapMinAngle()
+                // The three samples must be consecutive in TIME, not merely in arrival order.
+                // Turning to look at something and back is an entirely ordinary thing to do
+                // over a second — it is only beyond a mouse inside two ticks. Without this
+                // bound, a packet gap (a stalled connection catching up, which this server
+                // sees regularly) hands the check three rotations seconds apart and they read
+                // as one impossible flick.
+                boolean withinTwoTicks = d[2][3] - d[0][3] <= AIMSNAP_MAX_SPAN_MS;
+                if (withinTwoTicks && spikeIn > config.aimSnapMinAngle()
+                        && spikeOut > config.aimSnapMinAngle()
                         && net < config.aimSnapReturnAngle()) {
                     long now = System.currentTimeMillis();
                     Deque<Long> st = snapTimes.computeIfAbsent(id, k -> new ArrayDeque<>());
@@ -548,11 +647,16 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         }
     }
 
-    private static double[] dirOf(float yaw, float pitch) {
+    /**
+     * Look direction as a unit vector, with the arrival time appended as a fourth element.
+     * {@link #angleBetween} reads only the first three, so the timestamp rides along without
+     * affecting the geometry.
+     */
+    private static double[] dirOf(float yaw, float pitch, long timeMs) {
         double y = Math.toRadians(yaw);
         double p = Math.toRadians(pitch);
         double cp = Math.cos(p);
-        return new double[]{ -cp * Math.sin(y), -Math.sin(p), cp * Math.cos(y) };
+        return new double[]{ -cp * Math.sin(y), -Math.sin(p), cp * Math.cos(y), timeMs };
     }
 
     private static double angleBetween(double[] a, double[] b) {
@@ -640,6 +744,7 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
 
     public void cleanup(UUID playerId) {
         clicks.remove(playerId);
+        timerGraceUntil.remove(playerId);
         graceUntil.remove(playerId);
         timerState.remove(playerId);
         packetCounts.remove(playerId);

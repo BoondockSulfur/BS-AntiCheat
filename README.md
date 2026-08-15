@@ -17,7 +17,12 @@ system. Built to be calibrated for *your* server rather than flag your legit pla
 - Speed, Fly (vertical burst + sustained hover), Teleport, GroundSpoof, Elytra/Riptide speed
 - Server-authoritative on-ground check (not the spoofable client flag)
 - Lag compensation via a real **transaction-latency** system (ping/pong), not the coarse `getPing()`
-- Grace windows for teleport, knockback, join/respawn/world-change and elytra landings
+- Grace windows for teleport, knockback, join/respawn/world-change, elytra landings and
+  riptide momentum, dismounting at speed, slime launches, and **piston displacement** —
+  pistons move players without applying velocity, so nothing else would excuse them
+- Exemptions for what looks like flight but is not: towering up (placing your own footing),
+  and cobwebs, powder snow or honey walls, which slow a descent below the rate that counts
+  as falling
 
 **Combat**
 - Reach (measured to the hitbox surface, honours the interaction-range attribute),
@@ -27,14 +32,26 @@ system. Built to be calibrated for *your* server rather than flag your legit pla
 - Nuker, FastPlace, Scaffold (blind placement), FastBreak (per-block dig time vs. expected)
 
 **Packet-level** *(requires PacketEvents)*
-- AutoClicker — CPS from arm-swings (mining excluded), plus opt-in interval-consistency
-  analysis that catches slow-but-metronomic clickers
+- AutoClicker — CPS from arm-swings, plus opt-in interval-consistency analysis that catches
+  slow-but-metronomic clickers. A held mouse button is recognised by its **cadence** (one
+  swing per server tick) rather than by its click count, so network jitter cannot push
+  ordinary mining or swinging over the limit
 - BadPackets, Timer, crash protection (oversized book/sign packets), packet-flood
 
 **Vehicle** — Boat-Fly and per-type vehicle speed (via `VehicleMoveEvent`)
 
 **XRay** — per-ore thresholds, ore/stone ratio, combined-rare-ore, restricted-world zones,
-player-placed-ore exclusion
+player-placed-ore exclusion. Three things keep honest miners out of it:
+
+- Only ore that was **still buried** when broken is counted. X-Ray reveals ore you cannot
+  see, and reaching it means digging; emptying an open cave means taking ore off walls that
+  were visible all along — which produces the same "lots of ore, little stone" statistics.
+  Faces the player opened themselves do not count as visibility, so tunnelling straight to a
+  concealed vein still counts against them.
+- Ore must come from several **separate deposits**. One thick copper vein, or a vein-miner
+  tool taking a whole vein at once, is a lucky find, not knowledge of where ore is.
+- A player moving a lot of stone is visibly **searching** — the opposite of what X-Ray is
+  for — and is judged by hit rate instead of by raw counts.
 
 **Inventory** — InventoryMove, ChestStealer, FastUse, BowSpam, AutoTotem
 
@@ -75,7 +92,7 @@ asserted: until 1.0.3 a missing PacketEvents actually prevented the plugin from 
 
 ## Installation
 
-1. Drop `BSAntiCheat-1.0.3.jar` into `plugins/`.
+1. Drop `BSAntiCheat-1.0.4.jar` into `plugins/`.
 2. (Recommended) Install **PacketEvents** for the packet-level checks.
 3. Start the server, then edit `plugins/BSAntiCheat/config.yml` and run `/bsac reload`.
 
@@ -137,14 +154,30 @@ handling on top of BSAntiCheat.
 
 BSAntiCheat's enabled checks are heuristic and lag/transaction-compensated, tuned to avoid
 flagging legitimate play (fast mining, elytra landings, jumping, ice boats, sweeping-edge
-farms, high-ping players). Thresholds are deliberately generous — tighten them for your
-server with `debug_mode` and the calibration workflow above. For maximum-precision combat
-detection (prediction-engine level), deeper packet-timing analysis is planned.
+farms, towering up, piston elevators, cave mining, high-ping players). Thresholds are
+deliberately generous — tighten them for your server with `debug_mode` and the calibration
+workflow above. For maximum-precision combat detection (prediction-engine level), deeper
+packet-timing analysis is planned.
+
+Several of these exemptions exist because the check was wrong first: 1.0.4 was written from
+a day of live alert data in which **every single alert was a false positive**, each traced
+back to what the player was actually doing. If you find one, the alert text and
+`debug_mode` are usually enough to reconstruct the same way.
 
 ## Building
 
 ```bash
-mvn clean package    # → target/BSAntiCheat-1.0.3.jar
+mvn clean package    # → target/BSAntiCheat-1.0.4.jar
+mvn test             # 74 tests
 ```
+
+Tests cover the decision logic directly (interval statistics, deposit clustering, ore
+visibility, latency slack) and run scenarios through real event sequences against
+[MockBukkit](https://github.com/MockBukkit/MockBukkit) — a player walking, towering, being
+shoved by a piston, emptying a cave, digging a tunnel. Each scenario is a pair: the false
+positive that must stay silent, and the detection that must survive it.
+
+Anything inside `PacketChecker` (AutoClicker, Timer, AimSnap) is unit tested but not covered
+end to end — that path needs PacketEvents objects MockBukkit cannot supply.
 
 License: see [LICENSE](LICENSE).

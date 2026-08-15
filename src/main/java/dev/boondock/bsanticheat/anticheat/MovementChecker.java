@@ -45,6 +45,7 @@ public class MovementChecker implements Listener {
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
     private TransactionManager transactionManager;
+    private PistonTracker pistons;
 
     private final Map<UUID, Location> lastLocations = new ConcurrentHashMap<>();
     private final Map<UUID, Long> lastMoveTime = new ConcurrentHashMap<>();
@@ -62,6 +63,12 @@ public class MovementChecker implements Listener {
     private final Map<UUID, Integer> consecutiveStep = new ConcurrentHashMap<>();
     // Elytra/Riptide: consecutive over-speed samples
     private final Map<UUID, Integer> consecutiveElytra = new ConcurrentHashMap<>();
+    // Start of the current elytra/riptide speed sample. Speed is measured across a fixed
+    // time window instead of per move event: a move event is not reliably one tick, and
+    // treating it as one turns every packet gap into phantom speed (see checkElytraSpeed).
+    private final Map<UUID, Location> elytraSampleFrom = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> elytraSampleAt = new ConcurrentHashMap<>();
+    private static final long ELYTRA_SAMPLE_WINDOW_MS = 250;
 
     // Knockback immunity tracking
     private final Map<UUID, Long> recentKnockback = new ConcurrentHashMap<>();
@@ -77,8 +84,33 @@ public class MovementChecker implements Listener {
 
     // Elytra/Riptide landing grace — after gliding stops the player keeps high horizontal
     // momentum for a moment, which the ground speed check would misread as a Speed violation.
-    private final Map<UUID, Long> recentGlide = new ConcurrentHashMap<>();
-    private static final long GLIDE_GRACE_MS = 1500; // grace after gliding/riptiding ends
+    // Stores the instant the grace EXPIRES, because riptide needs a longer one than elytra:
+    // a trident launch is a single impulse that then bleeds off against drag, and vanilla
+    // clears isRiptiding() after the ~0.5s animation while the player is still travelling at
+    // several blocks per tick. Live data caught exactly that tail — three SPEED alerts of
+    // 1.52 / 1.03 / 0.72 b/t against a 0.4 walk cap, decaying, at the same coordinates and
+    // second as RIPTIDE alerts.
+    // Also used for dismounts: leaving a horse or boat at speed hands the player its
+    // momentum, with no key input of their own behind it.
+    private final Map<UUID, Long> momentumGraceUntil = new ConcurrentHashMap<>();
+    private static final long GLIDE_GRACE_MS = 1500;   // elytra: gliding stops, momentum drops fast
+    private static final long RIPTIDE_GRACE_MS = 3000; // riptide: impulse decays over ~2-3s
+    private static final long DISMOUNT_GRACE_MS = 1500;
+
+    // Pillar-up grace — a player towering upwards places a block directly beneath their own
+    // feet and lands on it immediately. Two things follow: the fresh block catches them
+    // before gravity shows, so the fall the hover check waits for never happens, and at the
+    // apex of each jump the previous solid block has already dropped out of the support scan.
+    // The result reads as "airborne and not falling", which is precisely the hover signature.
+    // Live data: 31 hover alerts climbing Y 91→302 while CoreProtect recorded 752 clay blocks
+    // placed and removed over the same Y range, in the same minutes.
+    private final Map<UUID, Long> recentPillar = new ConcurrentHashMap<>();
+    private static final long PILLAR_GRACE_MS = 1500;
+    // How far below the feet a placed block still counts as the player's own new footing.
+    private static final double PILLAR_MAX_DROP = 3.0;
+    // …and how far it may sit horizontally — beyond one block sideways it is scaffolding out,
+    // not towering up.
+    private static final double PILLAR_MAX_REACH = 1.5;
 
     // Slime-bounce grace — a high bounce rises for far longer than the 2-block scan below
     // the player can see, so the launch moment is remembered instead.
@@ -125,6 +157,15 @@ public class MovementChecker implements Listener {
 
     public void setTransactionManager(TransactionManager transactionManager) {
         this.transactionManager = transactionManager;
+    }
+
+    public void setPistonTracker(PistonTracker pistons) {
+        this.pistons = pistons;
+    }
+
+    /** True when a piston recently moved next to this spot — it displaced the player. */
+    private boolean pistonShoved(Location loc) {
+        return pistons != null && pistons.wasPushedRecently(loc);
     }
 
     /** Round-trip latency (ms) for lag compensation (see {@link dev.boondock.bsanticheat.util.CheckMath}). */
@@ -299,8 +340,10 @@ public class MovementChecker implements Listener {
             case RIDING_STRIDER -> Constants.STRIDER_MAX_SPEED;
             case BOAT -> Constants.BOAT_MAX_SPEED;
             case MINECART -> Constants.MINECART_MAX_SPEED;
-            case ELYTRA -> Constants.ELYTRA_MAX_SPEED;
-            case RIPTIDE -> Constants.RIPTIDE_MAX_SPEED;
+            // Not reached from onPlayerMove (gliding/riptiding is routed to
+            // checkElytraSpeed), but kept in sync with it so the ceiling has one source.
+            case ELYTRA -> config.elytraMaxSpeed();
+            case RIPTIDE -> config.riptideMaxSpeed();
             case CREATIVE_FLY -> baseFlySpeed * Constants.CREATIVE_FLY_MULTIPLIER;
             case OTHER_VEHICLE -> Constants.OTHER_VEHICLE_MAX_SPEED;
         };
@@ -368,6 +411,44 @@ public class MovementChecker implements Listener {
             plugin.getLogger().fine("[AC] " + player.getName() + " teleported (" +
                     event.getCause().name() + "), granting immunity");
         }
+    }
+
+    /**
+     * Remember when a player placed a block they could be standing on, so the vertical
+     * checks can tell towering up ("pillaring") apart from hovering.
+     *
+     * <p>Only blocks placed under the player's own feet count — up to
+     * {@link #PILLAR_MAX_DROP} below and {@link #PILLAR_MAX_REACH} sideways. That keeps the
+     * exemption from becoming a free pass for flight: vanilla only allows placing against an
+     * existing block, so a player who keeps producing footing beneath themselves is by
+     * definition standing on a column they built, not floating. Bridging out sideways stays
+     * outside the window and remains the SCAFFOLD check's business.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onBlockPlace(org.bukkit.event.block.BlockPlaceEvent event) {
+        Player player = event.getPlayer();
+        org.bukkit.block.Block placed = event.getBlockPlaced();
+        Location loc = player.getLocation();
+        if (!placed.getWorld().equals(loc.getWorld())) return;
+
+        // Block top surface relative to the feet: at or below them, within reach.
+        double drop = loc.getY() - (placed.getY() + 1);
+        if (drop < -0.5 || drop > PILLAR_MAX_DROP) return;
+        if (Math.abs(placed.getX() + 0.5 - loc.getX()) > PILLAR_MAX_REACH) return;
+        if (Math.abs(placed.getZ() + 0.5 - loc.getZ()) > PILLAR_MAX_REACH) return;
+
+        recentPillar.put(player.getUniqueId(), System.currentTimeMillis());
+    }
+
+    /**
+     * Leaving a vehicle at speed hands its momentum to the player, who then covers ground
+     * for a moment without pressing anything — a horse at full gallop or a boat off blue ice
+     * carries far more than the walking cap allows.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDismount(org.bukkit.event.entity.EntityDismountEvent event) {
+        if (!(event.getEntity() instanceof Player player)) return;
+        momentumGraceUntil.put(player.getUniqueId(), System.currentTimeMillis() + DISMOUNT_GRACE_MS);
     }
 
     @EventHandler
@@ -438,7 +519,9 @@ public class MovementChecker implements Listener {
             if (config.elytraDetectionEnabled() && !ServerLoad.isLagging(config)) {
                 checkElytraSpeed(player, playerId, moveType, from, to);
             }
-            recentGlide.put(playerId, System.currentTimeMillis()); // for the landing grace
+            // Landing grace, measured from now — riptide's impulse outlives its animation.
+            long graceMs = moveType == MovementType.RIPTIDE ? RIPTIDE_GRACE_MS : GLIDE_GRACE_MS;
+            momentumGraceUntil.put(playerId, System.currentTimeMillis() + graceMs);
             lastLocations.put(playerId, to.clone());
             lastMoveTime.put(playerId, System.currentTimeMillis());
             return;
@@ -502,6 +585,13 @@ public class MovementChecker implements Listener {
                 maxVerticalSpeed *= 2.0; // Double vertical speed allowance
             }
 
+            // Slime launchers throw a player sideways as readily as upwards, and the bounce
+            // itself needs no key input. The grace was previously computed inside the
+            // vertical block below, so the horizontal checks never saw it.
+            if (nearSlime) recentSlime.put(playerId, now);
+            Long slimeTs = recentSlime.get(playerId);
+            boolean slimeGrace = slimeTs != null && (now - slimeTs) < SLIME_GRACE_MS;
+
             // On-foot states (vertical and item-use checks use their own physics)
             boolean groundType = moveType == MovementType.WALKING
                     || moveType == MovementType.SPRINTING
@@ -521,9 +611,14 @@ public class MovementChecker implements Listener {
 
                 // Only alert after multiple consecutive violations
                 if (consecutive >= config.speedViolationsThreshold()) {
-                    setBack |= handleViolation(player, "SPEED",
-                        lang.format("alert.speed", typeName(moveType), horizontalDist, maxSpeed),
-                        horizontalDist, to);
+                    // Checked here rather than at the top: both are displacement the player
+                    // never asked for, and the piston lookup should only be paid for on the
+                    // would-flag path.
+                    if (!slimeGrace && !pistonShoved(to)) {
+                        setBack |= handleViolation(player, "SPEED",
+                            lang.format("alert.speed", typeName(moveType), horizontalDist, maxSpeed),
+                            horizontalDist, to);
+                    }
                     consecutiveSpeedViolations.put(playerId, 0);
                 }
             } else if (horizontalDist < maxSpeed * 0.7) {
@@ -557,11 +652,15 @@ public class MovementChecker implements Listener {
             // Vertical/fly checks only apply to on-foot movement. Swimming and
             // climbing have their own vertical physics and would false-positive.
             if (groundType) {
-                // Slime bounces launch far higher than the 2-block scan can see mid-flight,
-                // so remember the launch contact and keep the exemption during the rise.
-                if (nearSlime) recentSlime.put(playerId, now);
-                Long slimeTs = recentSlime.get(playerId);
-                boolean slimeGrace = slimeTs != null && (now - slimeTs) < SLIME_GRACE_MS;
+                // (slimeGrace is computed above, where the horizontal checks can see it too —
+                // a bounce launches far higher and further than the 2-block scan can follow.)
+
+                // Towering up: the player is building the ground they stand on, one block per
+                // jump. Applied to the hover check only — the vertical-burst and GroundSpoof
+                // checks stay armed, since pillaring produces neither a 3.5-block jump nor a
+                // player who is genuinely high above the ground.
+                Long pillarTs = recentPillar.get(playerId);
+                boolean pillarGrace = pillarTs != null && (now - pillarTs) < PILLAR_GRACE_MS;
 
                 boolean flyExempt = player.hasPotionEffect(PotionEffectType.LEVITATION)
                         || player.hasPotionEffect(PotionEffectType.SLOW_FALLING)
@@ -571,13 +670,22 @@ public class MovementChecker implements Listener {
                         // Reduced gravity means hanging in the air without descending is
                         // legitimate — which is precisely what the hover check looks for.
                         || CheckMath.hasReducedGravity(player)
+                        || isInFallSlowingBlock(player)
                         || isNearLiquid(player) || slimeGrace || nearBubble;
+
+                // An unloaded chunk has no blocks to find, so the scan would report "nothing
+                // below the player" for someone standing on perfectly solid ground that the
+                // server has not got in memory yet — and reading it would force a synchronous
+                // load from a movement handler, which is exactly what Folia forbids.
+                boolean chunkKnown = to.getWorld() != null
+                        && to.getWorld().isChunkLoaded(to.getBlockX() >> 4, to.getBlockZ() >> 4);
 
                 // One ground scan answers both vertical checks: "clearly airborne" (hover)
                 // and "high above ground" (GroundSpoof) differ only in the depth they
                 // accept. Scanning twice cost 35 block lookups per movement packet.
-                boolean wantsFlyScan = config.flyDetectionEnabled() && !flyExempt;
-                boolean wantsSpoofScan = config.groundSpoofDetectionEnabled() && !flyExempt && player.isOnGround();
+                boolean wantsFlyScan = config.flyDetectionEnabled() && !flyExempt && chunkKnown;
+                boolean wantsSpoofScan = config.groundSpoofDetectionEnabled() && !flyExempt
+                        && chunkKnown && player.isOnGround();
                 int support = (wantsFlyScan || wantsSpoofScan)
                         ? supportDepth(player, GROUNDSPOOF_SCAN_DEPTH) : 0;
                 // A block scan cannot see that the player is standing on a BOAT, a minecart,
@@ -593,9 +701,14 @@ public class MovementChecker implements Listener {
                     if (!flyExempt && verticalDist > maxVerticalSpeed && movement.getY() > 0) {
                         int consecutive = consecutiveFlyViolations.merge(playerId, 1, Integer::sum);
                         if (consecutive >= config.flyViolationsThreshold()) {
-                            setBack |= handleViolation(player, "FLY",
-                                lang.format("alert.fly", verticalDist, maxVerticalSpeed),
-                                verticalDist, to);
+                            // A piston lifts a player a full block per push with no velocity
+                            // packet to excuse it — elevators and flying machines do this all
+                            // day. Tested only here, on the would-flag path.
+                            if (!pistonShoved(to)) {
+                                setBack |= handleViolation(player, "FLY",
+                                    lang.format("alert.fly", verticalDist, maxVerticalSpeed),
+                                    verticalDist, to);
+                            }
                             consecutiveFlyViolations.put(playerId, 0);
                         }
                     } else if (verticalDist < maxVerticalSpeed * 0.5) {
@@ -608,16 +721,18 @@ public class MovementChecker implements Listener {
                     // (b) Sustained hover: airborne across many samples without ever
                     // falling. Speed potions / sprinting are irrelevant here — only the
                     // vertical state matters, so legitimate fast running is unaffected.
-                    if (!flyExempt && clearlyAirborne) {
+                    if (!flyExempt && !pillarGrace && clearlyAirborne) {
                         if (movement.getY() < -0.08) {
                             // Falling under gravity → legitimate, reset
                             consecutiveHoverTicks.remove(playerId);
                         } else {
                             int hover = consecutiveHoverTicks.merge(playerId, 1, Integer::sum);
                             if (hover >= config.flyViolationsThreshold()) {
-                                setBack |= handleViolation(player, "FLY",
-                                    lang.format("alert.hover", hover),
-                                    verticalDist, to);
+                                if (!pistonShoved(to)) {
+                                    setBack |= handleViolation(player, "FLY",
+                                        lang.format("alert.hover", hover),
+                                        verticalDist, to);
+                                }
                                 consecutiveHoverTicks.put(playerId, 0);
                             }
                         }
@@ -633,8 +748,10 @@ public class MovementChecker implements Listener {
                         && player.isOnGround() && highAboveGround) {
                     int gs = consecutiveGroundSpoof.merge(playerId, 1, Integer::sum);
                     if (gs >= config.groundSpoofViolations()) {
-                        setBack |= handleViolation(player, "GROUNDSPOOF",
-                            lang.get("alert.groundspoof"), 0, to);
+                        if (!pistonShoved(to)) {
+                            setBack |= handleViolation(player, "GROUNDSPOOF",
+                                lang.get("alert.groundspoof"), 0, to);
+                        }
                         consecutiveGroundSpoof.put(playerId, 0);
                     }
                 } else {
@@ -709,8 +826,8 @@ public class MovementChecker implements Listener {
         if (lastJoin != null && (now - lastJoin) < JOIN_GRACE_MS) return true;
 
         // After gliding/riptiding the residual momentum would read as a Speed/Fly violation.
-        Long lastGlide = recentGlide.get(playerId);
-        if (lastGlide != null && (now - lastGlide) < GLIDE_GRACE_MS) return true;
+        Long graceUntil = momentumGraceUntil.get(playerId);
+        if (graceUntil != null && now < graceUntil) return true;
 
         Long lastKnockback = recentKnockback.get(playerId);
         if (lastKnockback != null && (now - lastKnockback) < KNOCKBACK_IMMUNITY_MS) {
@@ -723,9 +840,17 @@ public class MovementChecker implements Listener {
     }
 
     /**
-     * Elytra/Riptide speed-ceiling check. One move event covers ~one tick of movement,
-     * so per-event distance × 20 approximates blocks per second, compared against the
-     * per-mode ceiling (Constants) with the same ping tolerance as getMaxSpeed().
+     * Elytra/Riptide speed-ceiling check.
+     *
+     * <p>Speed is averaged over a real elapsed window ({@link #ELYTRA_SAMPLE_WINDOW_MS})
+     * rather than derived from a single move event. A move event is not reliably one tick:
+     * the client may send several position packets per tick, and — the damaging direction —
+     * a packet gap while flying over loading chunks delivers one event carrying several ticks
+     * of travel. Multiplying such an event by 20 invents speed that was never flown, which is
+     * how a routine rocket flight produced a tidy 110→100 b/s "over-speed" curve. Dividing by
+     * the time that actually passed makes a gap harmless: distance and elapsed time grow
+     * together. The window also means the {@code elytra_violations} threshold now spans
+     * ~0.75s of sustained over-speed, which noise cannot fake.
      */
     private void checkElytraSpeed(Player player, UUID playerId, MovementType moveType, Location from, Location to) {
         long now = System.currentTimeMillis();
@@ -735,8 +860,24 @@ public class MovementChecker implements Listener {
         if (lastJoin != null && (now - lastJoin) < JOIN_GRACE_MS) return;
         if (!from.getWorld().equals(to.getWorld())) return;
 
-        double bps = from.distance(to) * 20.0;
-        double max = moveType == MovementType.ELYTRA ? Constants.ELYTRA_MAX_SPEED : Constants.RIPTIDE_MAX_SPEED;
+        Location sampleFrom = elytraSampleFrom.get(playerId);
+        Long sampleAt = elytraSampleAt.get(playerId);
+        // Open a new window: no baseline yet, a world change, or the previous one is stale
+        // (the player stopped flying in between and momentum no longer connects the points).
+        if (sampleFrom == null || sampleAt == null || !sampleFrom.getWorld().equals(to.getWorld())
+                || now - sampleAt > ELYTRA_SAMPLE_WINDOW_MS * 4) {
+            elytraSampleFrom.put(playerId, to.clone());
+            elytraSampleAt.put(playerId, now);
+            return;
+        }
+        long elapsed = now - sampleAt;
+        if (elapsed < ELYTRA_SAMPLE_WINDOW_MS) return; // keep accumulating
+
+        double bps = sampleFrom.distance(to) / (elapsed / 1000.0);
+        elytraSampleFrom.put(playerId, to.clone());
+        elytraSampleAt.put(playerId, now);
+
+        double max = moveType == MovementType.ELYTRA ? config.elytraMaxSpeed() : config.riptideMaxSpeed();
         max *= CheckMath.pingSlack(effectivePing(player));
 
         if (bps > max) {
@@ -838,9 +979,16 @@ public class MovementChecker implements Listener {
      */
     private boolean isSupportive(org.bukkit.block.Block block) {
         Material m = block.getType();
+        // Air first: it is by far the most common result of a ground scan, and answering it
+        // without the isPassable() call saves a block-data lookup on every sample.
+        if (m == Material.AIR || m == Material.CAVE_AIR || m == Material.VOID_AIR) return false;
         if (m == Material.POWDER_SNOW || m == Material.SCAFFOLDING || m == Material.COBWEB) return true;
         if (m == Material.WATER || m == Material.LAVA || m == Material.BUBBLE_COLUMN) return true;
         if (isClimbableMaterial(m)) return true;
+        // Full blocks are settled by the material alone. isPassable() is still needed for
+        // everything whose collision depends on its state — trapdoors, gates, doors — but
+        // those are a small minority of what a ground scan walks over.
+        if (m.isSolid()) return true;
         return !block.isPassable();
     }
 
@@ -895,6 +1043,40 @@ public class MovementChecker implements Listener {
         for (int[] o : offsets) {
             if (loc.getBlock().getRelative(o[0], o[1], o[2]).getType().isSolid()) return true;
             if (loc.getBlock().getRelative(o[0], o[1] + 1, o[2]).getType().isSolid()) return true;
+        }
+        return false;
+    }
+
+    /**
+     * True when the player is inside a block that slows their descent below the rate the
+     * hover check accepts as falling ({@code movement.getY() < -0.08}).
+     *
+     * <p>Cobwebs and powder snow do physically what Slow Falling does, and Slow Falling is
+     * already exempt. {@link #isSupportive} does count both as footing, but
+     * {@link #supportDepth} only ever scans DOWNWARD from the feet — a web holding the player
+     * at body height above a cave therefore reads as "airborne", while the player sinks too
+     * slowly to ever reset the counter. Both halves of the hover signature at once, from
+     * standing in a mineshaft.
+     */
+    static boolean isInFallSlowingBlock(Player player) {
+        return isInFallSlowingBlock(player.getLocation());
+    }
+
+    /** Location-only form, so the block reasoning can be tested without a player. */
+    static boolean isInFallSlowingBlock(Location loc) {
+        Material at = loc.getBlock().getType();
+        Material above = loc.getBlock().getRelative(0, 1, 0).getType();
+        if (at == Material.COBWEB || above == Material.COBWEB
+                || at == Material.POWDER_SNOW || above == Material.POWDER_SNOW) {
+            return true;
+        }
+        // Sliding down a honey-block wall is the same situation seen sideways: the block
+        // doing the slowing is BESIDE the player, where a downward scan never looks, and the
+        // slide is far slower than the rate counted as falling.
+        int[][] sides = {{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}};
+        for (int[] s : sides) {
+            if (loc.getBlock().getRelative(s[0], s[1], s[2]).getType() == Material.HONEY_BLOCK) return true;
+            if (loc.getBlock().getRelative(s[0], s[1] + 1, s[2]).getType() == Material.HONEY_BLOCK) return true;
         }
         return false;
     }
@@ -959,11 +1141,14 @@ public class MovementChecker implements Listener {
         consecutiveSpider.remove(playerId);
         consecutiveStep.remove(playerId);
         consecutiveElytra.remove(playerId);
+        elytraSampleFrom.remove(playerId);
+        elytraSampleAt.remove(playerId);
         recentKnockback.remove(playerId);
         recentTeleport.remove(playerId);
         recentJoin.remove(playerId);
-        recentGlide.remove(playerId);
+        momentumGraceUntil.remove(playerId);
         recentSlime.remove(playerId);
+        recentPillar.remove(playerId);
         recentIce.remove(playerId);
     }
 

@@ -52,6 +52,9 @@ public class WorldChecker implements Listener {
     // FastBreak: when the player started digging which block
     private final Map<UUID, DigState> digStart = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> consecutiveFastBreak = new ConcurrentHashMap<>();
+    // Nuker/FastPlace: consecutive one-second windows over the rate limit
+    private final Map<UUID, Integer> consecutiveNuker = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> consecutiveFastPlace = new ConcurrentHashMap<>();
 
     private record DigState(long startMs, long expectedMs, String world, int x, int y, int z) {
         boolean matches(Block block) {
@@ -123,13 +126,24 @@ public class WorldChecker implements Listener {
         DigState dig = digStart.remove(id);
         if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
 
-        // Nuker: too many blocks per second
+        // Nuker: too many blocks per second.
+        // The rate alone is not enough to flag on. Plugins that break several blocks in one
+        // action (vein miners, tree fellers, MMOItems-style tools) fire a burst of
+        // BlockBreakEvents inside a single tick, and instamining with Efficiency V plus Haste
+        // reaches ~20 blocks/s by hand — both sit close enough to the cap that one bundled
+        // window crosses it. A cheat holds the rate up; a burst does not, so require the
+        // window to come back over the limit repeatedly.
         if (config.nukerDetectionEnabled()) {
             int rate = recordAndCount(breaks, id);
             int max = config.nukerMaxBreaksPerSecond();
             if (rate > max) {
                 breaks.get(id).clear(); // reset so it must re-accumulate
-                handleViolation(player, "NUKER", lang.format("alert.nuker", rate, max), rate, event.getBlock().getLocation());
+                int c = consecutiveNuker.merge(id, 1, Integer::sum);
+                if (c >= config.nukerViolations()) {
+                    handleViolation(player, "NUKER", lang.format("alert.nuker", rate, max), rate,
+                            event.getBlock().getLocation());
+                    consecutiveNuker.put(id, 0);
+                }
             }
         }
 
@@ -178,7 +192,13 @@ public class WorldChecker implements Listener {
             int max = config.fastPlaceMaxPerSecond();
             if (rate > max) {
                 places.get(id).clear();
-                handleViolation(player, "FASTPLACE", lang.format("alert.fastplace", rate, max), rate, event.getBlock().getLocation());
+                // Same reasoning as Nuker: one bundled window is not evidence.
+                int c = consecutiveFastPlace.merge(id, 1, Integer::sum);
+                if (c >= config.fastPlaceViolations()) {
+                    handleViolation(player, "FASTPLACE", lang.format("alert.fastplace", rate, max), rate,
+                            event.getBlock().getLocation());
+                    consecutiveFastPlace.put(id, 0);
+                }
             }
         }
 
@@ -249,5 +269,7 @@ public class WorldChecker implements Listener {
         consecutiveScaffold.remove(playerId);
         digStart.remove(playerId);
         consecutiveFastBreak.remove(playerId);
+        consecutiveNuker.remove(playerId);
+        consecutiveFastPlace.remove(playerId);
     }
 }

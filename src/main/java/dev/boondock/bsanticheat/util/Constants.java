@@ -82,8 +82,15 @@ public final class Constants {
     public static final double STRIDER_MAX_SPEED = 8.0;
     public static final double BOAT_MAX_SPEED = 10.0;
     public static final double MINECART_MAX_SPEED = 20.0;
-    public static final double ELYTRA_MAX_SPEED = 100.0;
-    public static final double RIPTIDE_MAX_SPEED = 50.0;
+    // Elytra: gliding tops out near 3 b/t, but a rocket-assisted dive legitimately reaches
+    // 5–6 b/t (100–120 b/s). The old 100 sat right in that legitimate band and flagged
+    // ordinary rocket flight — live alert data showed a clean 110→100 b/s decay curve, i.e.
+    // a boost bleeding off, not sustained impossible speed.
+    public static final double ELYTRA_MAX_SPEED = 140.0;
+    // Riptide: vanilla launches the player at (1.5 + 0.5 × level) blocks/tick, so Riptide III
+    // alone is 3 b/t = 60 b/s before any sprint or fall momentum is added. The old 50 was
+    // below what the enchantment does by design; live data flagged 50.5–51.5 b/s.
+    public static final double RIPTIDE_MAX_SPEED = 75.0;
     public static final double OTHER_VEHICLE_MAX_SPEED = 20.0;
 
     // Elytra/Riptide: consecutive over-speed samples before flagging (speeds above are b/s)

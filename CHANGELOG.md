@@ -4,6 +4,213 @@ All notable changes to BSAntiCheat are documented in this file.
 
 ---
 
+## [1.0.4] - 2026-08-15
+
+False-positive fixes derived from live alert data on the Rattenkolonie server. Over one
+hour of ordinary play, one player produced 54 alerts across six checks — every single one
+of them wrong. Each fix below is tied to the alert pattern that exposed it.
+
+### Fixed — false positives
+
+- **Towering up is no longer Fly.** Placing a block under your own feet and landing on it
+  produces exactly the hover signature the check hunts for: the fresh block catches the
+  player before gravity shows, so the fall the check waits for never comes, and at the apex
+  of each jump the previous solid block has already dropped out of the support scan. A
+  block placed within 3 blocks below and 1.5 sideways of the player's feet now suppresses
+  the hover counter for 1.5s. The vertical-burst and GroundSpoof checks stay armed —
+  pillaring produces neither a 3.5-block jump nor a player genuinely high above ground.
+  *Live data: 31 hover alerts climbing Y 91→302, against 752 clay blocks placed and removed
+  over the same Y range in the same minutes.*
+- **Cobwebs, powder snow and honey walls are no longer Fly.** All three slow a descent below
+  `-0.08` blocks/tick, which the hover check does not count as falling, so the counter keeps
+  climbing while the player is in fact sinking. `isSupportive()` does accept cobweb and
+  powder snow as footing, but `supportDepth()` only ever scans DOWNWARD from the feet — a web
+  holding the player at body height above a cave, or a honey block on the wall beside them,
+  is never seen, and `clearlyAirborne` becomes true. Both halves of the hover signature, from
+  standing in a mineshaft. Slow Falling was already exempt; these do the same thing
+  physically and now are too.
+  *Live data: two hover alerts at Y −14, each within a few blocks of a cobweb the player
+  broke in the same second.*
+- **Riptide momentum is no longer Speed.** Vanilla clears `isRiptiding()` after the ~0.5s
+  animation while the player is still travelling several blocks per tick, dropping them
+  into the walking check at a 0.4 b/t cap. The post-glide grace is now 3s for riptide
+  (elytra keeps 1.5s, where momentum drops fast).
+  *Live data: SPEED alerts of 1.52 / 1.03 / 0.72 b/t — a decay curve — at the same second
+  and coordinates as RIPTIDE alerts.*
+- **Elytra/Riptide speed is measured over real elapsed time.** The check derived b/s from a
+  single move event × 20, assuming one event equals one tick. It does not: a packet gap
+  while flying over loading chunks delivers one event carrying several ticks of travel, and
+  multiplying it by 20 invents speed that was never flown. Speed is now averaged over a
+  250 ms window, so distance and elapsed time grow together and a gap is harmless.
+  *Live data: a tidy 110→100 b/s "over-speed" curve from a routine rocket flight.*
+- **Elytra and Riptide ceilings raised to what vanilla actually does.** Riptide III launches
+  at 3 blocks/tick = 60 b/s by design, but the ceiling was 50; rocket-assisted elytra dives
+  legitimately reach 100–120 b/s against a ceiling of 100. Now 75 and 140.
+
+- **Holding the mouse button is no longer AutoClicker.** The held-button exclusion was keyed
+  off the CPS count (accepted 18-22), and flagging began at 23 — two ranges meeting without
+  overlap. But CPS is counted in a sliding window over packet ARRIVAL times: the client sends
+  exactly one swing per tick (20/s), and network jitter bunches those arrivals so the window
+  reads 21-23 while nothing about the clicking changed. Held swings then fell into the gap
+  between "recognised as held" and "flagged".
+  The exclusion now identifies a held button by the rate its swings arrive at — the median
+  interval sits at one tick (50 ms) however much individual arrivals jitter — instead of by
+  how many land in a window. A hand clicking at 23 CPS has a ~43.5 ms interval and is still
+  not excluded, so closing the false positive did not open a hiding place. Median and MAD are
+  used rather than mean and standard deviation, because a single pause between swings shifts
+  a mean and explodes a deviation while leaving the median where it is.
+  *Live data: four alerts, all reading exactly "23 CPS (Max: 22)", with no block broken at
+  the time — swinging with nothing in reach, which the `START_DIGGING`-based mining
+  exclusion never covered.*
+- **`autoclicker_max_cps` raised from 22 to 25.** Butterfly clicking reaches 20-25 CPS by
+  hand, so the old cap sat inside human range.
+
+- **Pistons no longer read as Speed, Fly, GroundSpoof or InventoryMove.** A piston displaces
+  a player without applying velocity — it fires no `PlayerVelocityEvent` — so the knockback
+  immunity every other check relies on never engaged. The player is simply somewhere else
+  next tick, which reads as movement they made themselves. Piston elevators, flying machines
+  and door mechanisms all produce it. A new `PistonTracker` records where pistons fired into
+  a bounded ring buffer; the checks consult it only on their would-flag paths, so a clock
+  circuit costs nothing but an append.
+- **Timer no longer fires on a stalled connection.** A gap in the packet stream means the
+  client stopped sending; what follows is it flushing the backlog, and every queued packet
+  credits a full tick with no real time attached, so the balance climbs by the whole backlog
+  at once. The existing sustained-excursion rule does not help — an eight-second backlog is
+  not paid off in a few hundred milliseconds either. A gap over 400 ms now discards the
+  balance and leaves the catch-up unjudged for 3 s.
+  *Live data: two TIMER alerts, one of 8284 ms, inside the minutes a player was timing out
+  and reconnecting.*
+- **InventoryMove no longer fires on momentum.** Vanilla friction needs several ticks to
+  bring a sprint below the 0.15 threshold, and the player steers none of them. Judging now
+  waits 1 s after the container opens, and skips airborne players entirely — walking off a
+  ledge carries horizontal speed the whole way down with no key input behind it.
+  *Live data: three alerts measuring 0.150 / 0.165 / 0.278 against a 0.15 threshold.*
+- **Slime launchers no longer read as Speed.** The slime grace was computed inside the
+  vertical block, so only the fly checks ever saw it — but a slime launcher throws a player
+  sideways just as readily, and the bounce needs no key input either.
+- **Dismounting at speed is no longer Speed.** Leaving a galloping horse or an ice boat hands
+  the player its momentum; the grace that covers elytra landings now covers dismounts too.
+- **Nuker and FastPlace require repeated windows.** Both flagged on a single one-second
+  window over the limit. Plugins that break several blocks per action (vein miners, custom
+  tools) fire a burst of events inside one tick, and instamining with Efficiency V and Haste
+  reaches ~20 blocks/s by hand — close enough to the cap that one bundled window crosses it.
+  A cheat holds the rate up across windows; a burst does not.
+- **KillAura multi-target requires a streak.** Reach and aim angle each needed three
+  suspicious hits; hitting several targets did not, so one burst flagged outright — and a
+  crowded team fight legitimately puts three players within reach inside 250 ms.
+- **AimSnap now requires the flick to be fast in time, not just in packet order.** The check
+  compares three consecutive rotation packets, which should span ~2 ticks, but nothing bound
+  how far apart they actually arrived. A packet gap handed it three rotations seconds apart —
+  and turning to look at something and back is ordinary over a second. Capped at 150 ms.
+- **FastUse reads the item's own use time.** The 600 ms floor assumed vanilla eat times;
+  custom consumables that are legitimately quicker were flagged for being what they are. The
+  floor is now the lower of the configured value and what the item actually needs.
+- **Mining outside the overworld is accounted for.** `STONE_TYPES` — the spoil that forms the
+  ratio's denominator and decides whether a player counts as searching — listed only
+  overworld rock. Netherrack was absent, so in the nether the ratio check could never run at
+  all and `stoneMined` stayed at zero however much was dug. Ancient debris has a threshold of
+  3, is a rare ore, sits buried in netherrack (so it reads as hidden) and generates in
+  scattered singles (so it passes the vein requirement): hunting it produced alerts with
+  nothing able to account for the rock moved to find it. Netherrack, basalt, blackstone, soul
+  sand/soil, end stone, sandstone and dripstone now count as spoil. The per-ore thresholds and the
+  combined rare-ore count knew nothing about spoil, so a tunnel through ore-rich rock could
+  pass a per-minute threshold on luck alone — copper (40), coal (30) and iron (25) all sit
+  within reach of a good vein or two — with nothing in either check able to see the hundreds
+  of blocks of stone that explain it. Someone moving that much stone is visibly searching,
+  which is the opposite of what X-Ray is for. Above `XRAY_MIN_STONE_FOR_RATIO_CHECK` stone in
+  the window, checks 1 and 3 now stand down and the ore-to-stone ratio decides; below it,
+  they decide and the ratio stands down. The two cover disjoint cases instead of overlapping,
+  and nothing falls between them. The broken-block record this relies on is size-capped like
+  the placed-block one; at several hundred blocks a minute per player, waiting for the
+  5-minute cleanup would let it reach tens of thousands of entries in between.
+  *Trade-off, stated plainly: a player who digs spoil as camouflage now only has to beat the
+  ratio. With ten hidden diamonds that means ~67 stone at the default 0.15 — they have to
+  genuinely dig, but it is reachable. Live data from the source server shows every real
+  tunnelling minute at a rare-ore ratio of 0.000 across up to 378 blocks of stone, so the
+  0.15 default has a great deal of slack in it and is worth revisiting.*
+- **X-Ray counts only ore that was hidden.** This is the flaw underneath all three X-Ray
+  checks, and it inverts their central assumption. The detector treats "much ore, little
+  stone" as suspicious — but X-Ray tells someone where ore is that they *cannot see*, and
+  acting on that means **digging to it**, which produces stone. Clearing an open cave means
+  taking ore off walls that were visible all along and digging *nothing*. The player who
+  never touches stone is the one doing it legitimately; the ratio points the wrong way.
+  Ore is now recorded with whether it was exposed to open space when broken, and the
+  thresholds, the ore-to-stone ratio and the combined rare-ore count all judge hidden ore
+  only. Faces the player opened themselves inside the window do not count as exposure, so a
+  tunnel dug straight to a concealed vein still counts against them. Off via
+  `xray_require_hidden: false`.
+  *Live data: three X-Ray alerts against a player who had entered an untouched cave system —
+  283 lava blocks, amethyst geodes and creeper explosions across the same coordinates, and
+  no one had ever mined there. 45 ore against 12 stone: the signature of a cave, not a cheat.*
+- **X-Ray counts deposits, not blocks.** The per-ore threshold looked only at how many ore
+  blocks were broken in the window, which says nothing about how they were found: one thick
+  vein produces the same number as a dozen scattered ones. Copper and redstone veins run past
+  20 blocks, a lucky pair of overlapping diamond veins reaches ten, and any vein-miner style
+  tool takes a whole vein in a single action — all of them crossed a threshold without anyone
+  knowing anything they should not. What X-Ray actually provides is knowing where several
+  SEPARATE deposits are without searching for them, so the ore must now also come from at
+  least `xray_min_veins` distinct veins (blocks within 2 on every axis, linked transitively,
+  count as one). The vein count is computed only for an ore that already crossed its
+  threshold, so normal mining pays nothing for it.
+  *Checked against live data: the three X-Ray alerts of 2026-08-15 drew from 4, 4 and 3
+  distinct veins and still fire — this narrows what counts as evidence without blunting it.*
+- **Vertical checks skip unloaded chunks.** A block scan in a chunk the server has not got in
+  memory finds nothing and reports "airborne" for a player standing on solid ground — and
+  reading it would force a synchronous chunk load from a movement handler, which Folia
+  forbids outright.
+
+### Added
+- **A test suite (74 tests).** The project had none, so every fix in this release was
+  verified by compiling it and reasoning about it — which is how several of them nearly
+  shipped wrong. `mvn test` now runs JUnit 6 with MockBukkit, both as unit tests over the
+  decision logic and as **scenarios driven through real event sequences** — a player walking,
+  towering, being shoved by a piston, emptying a cave, digging a tunnel. That level matters
+  because it is where the live false positives happened: no single sample was wrong, a
+  counter simply never reset.
+
+  Every scenario is written as a pair — the false positive that must fall silent, and the
+  detection that must survive it — because an exemption is only worth having if what it
+  exempts is still caught. Scenarios cover:
+  - **AutoClicker** — the held-button cadence: jitter must not break the exclusion, and a
+    hand clicking at 23 CPS must not slip into it.
+  - **X-Ray deposits** — one thick vein counts once, scattered finds count separately. The
+    suite replays real coordinates from the 2026-08-15 alerts, so a change that quietly
+    stops detecting them fails the build rather than the server.
+  - **X-Ray visibility** — ore on a cave wall is visible; ore behind a tunnel the player just
+    dug is not. This is the distinction the whole detector now rests on.
+  - **Fly exemptions** — cobwebs, powder snow and honey walls are exempt, open air is not.
+  - **Pistons** — displacement is covered near the piston, not across the map or into
+    another world, and a clock circuit cannot grow the buffer without bound.
+  - **Latency slack**, which widens nearly every threshold in the plugin.
+
+  Making this testable meant lifting six functions out of their event handlers into
+  package-private, state-free forms (`isHeldButton`, `countVeins`, `wasVisible`,
+  `isInFallSlowingBlock`, `median`, `medianAbsoluteDeviation`), and answering air and full
+  blocks from the material alone in `isSupportive` before consulting `isPassable()` — which
+  is also one fewer block-state lookup per ground scan. No behaviour changed.
+
+  **Verified by mutation:** each of the twelve fixes in this release was broken on purpose
+  and the suite confirmed to go red — the cobweb exemption, the pillar exemption, the piston
+  and slime exemptions, the Nuker/FastPlace/KillAura streaks, the InventoryMove grace, and
+  all four X-Ray rules (visibility, veins, the searching gate, netherrack as spoil). A green
+  suite that cannot go red is worth nothing: two scenarios passed at first for the wrong
+  reason and were only exposed this way — a cobweb placed at foot level registers as footing
+  and never reaches the exemption, and a mock player defaults to not being on the ground,
+  which silently disabled the InventoryMove check entirely.
+
+  Not covered: anything inside `PacketChecker` end to end (AutoClicker, Timer, AimSnap),
+  which needs PacketEvents objects MockBukkit cannot supply. Their decision logic is unit
+  tested instead.
+- `anticheat.speed_thresholds.elytra_bps` and `riptide_bps` — the two ceilings were compiled
+  in, so a server whose item plugins grant faster flight had no way to adjust them.
+- `anticheat.thresholds.nuker_violations`, `fastplace_violations` and
+  `killaura_multi_violations` — the streak requirements added above.
+- `anticheat.xray_min_veins` — how many separate deposits an over-threshold ore count must
+  come from.
+- `anticheat.xray_require_hidden` — count only ore that was still buried when broken.
+
+---
+
 ## [1.0.3] - 2026-08-05
 
 Full code-review release: correctness fixes found by auditing every source file against

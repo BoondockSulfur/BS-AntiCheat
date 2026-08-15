@@ -214,6 +214,18 @@ public class PluginConfig {
     public int elytraViolations() { return cfg.getInt("anticheat.thresholds.elytra_violations", Constants.ELYTRA_VIOLATIONS); }
     public int scaffoldViolations() { return cfg.getInt("anticheat.thresholds.scaffold_violations", Constants.SCAFFOLD_VIOLATIONS); }
     public int boatFlyViolations() { return cfg.getInt("anticheat.thresholds.boatfly_violations", Constants.BOATFLY_VIOLATIONS); }
+    // Rate checks need repeated windows over the limit: a plugin breaking several blocks in
+    // one action, or a bundle of place packets, crosses a per-second cap once without anyone
+    // cheating. See WorldChecker.
+    // X-Ray: how many separate deposits the ore must come from before a count over the
+    // threshold is treated as evidence. One vein is never proof, however big it is.
+    public int xrayMinVeins() { return cfg.getInt("anticheat.xray_min_veins", 3); }
+    // Count only ore that was hidden in rock when broken. Ore taken off an open cave wall
+    // was seen, not located — and clearing a cave produces the same statistics as X-Ray.
+    public boolean xrayRequireHidden() { return cfg.getBoolean("anticheat.xray_require_hidden", true); }
+    public int nukerViolations() { return cfg.getInt("anticheat.thresholds.nuker_violations", 3); }
+    public int fastPlaceViolations() { return cfg.getInt("anticheat.thresholds.fastplace_violations", 3); }
+    public int killAuraMultiViolations() { return cfg.getInt("anticheat.thresholds.killaura_multi_violations", 2); }
     public int vehicleSpeedViolations() { return cfg.getInt("anticheat.thresholds.vehicle_speed_violations", Constants.VEHICLE_SPEED_VIOLATIONS); }
     public int criticalsViolations() { return cfg.getInt("anticheat.thresholds.criticals_violations", Constants.CRITICALS_VIOLATIONS); }
     public int reachViolations() { return cfg.getInt("anticheat.thresholds.reach_violations", Constants.REACH_VIOLATIONS); }
@@ -248,7 +260,7 @@ public class PluginConfig {
     public double scaffoldMaxAngle() { return cfg.getDouble("anticheat.scaffold_max_angle", 80.0); }
     public boolean packetChecksEnabled() { return cfg.getBoolean("anticheat.packet_checks", true); }
     public boolean autoClickerDetectionEnabled() { return cfg.getBoolean("anticheat.autoclicker_detection", true); }
-    public int autoClickerMaxCps() { return cfg.getInt("anticheat.autoclicker_max_cps", 22); }
+    public int autoClickerMaxCps() { return cfg.getInt("anticheat.autoclicker_max_cps", 25); }
     public boolean autoClickerConsistencyEnabled() { return cfg.getBoolean("anticheat.autoclicker_consistency", false); }
     public int autoClickerMinSamples() { return cfg.getInt("anticheat.autoclicker_min_samples", 15); }
     public int autoClickerMinCps() { return cfg.getInt("anticheat.autoclicker_min_cps", 2); }
@@ -302,6 +314,11 @@ public class PluginConfig {
     public double teleportThreshold() { return cfg.getDouble("anticheat.speed_thresholds.teleport", 15.0); }
     public int speedViolationsThreshold() { return cfg.getInt("anticheat.speed_thresholds.violations_before_alert", 5); }
     public int flyViolationsThreshold() { return cfg.getInt("anticheat.speed_thresholds.fly_violations_before_alert", 10); }
+    // Elytra/Riptide ceilings in blocks per second. Server-specific: item plugins and
+    // custom rockets shift what is legitimately reachable, so these are configurable
+    // rather than compiled in.
+    public double elytraMaxSpeed() { return cfg.getDouble("anticheat.speed_thresholds.elytra_bps", Constants.ELYTRA_MAX_SPEED); }
+    public double riptideMaxSpeed() { return cfg.getDouble("anticheat.speed_thresholds.riptide_bps", Constants.RIPTIDE_MAX_SPEED); }
 
     // Punishments / Violation levels
     public boolean punishmentsEnabled() { return cfg.getBoolean("anticheat.punishments.enabled", false); }

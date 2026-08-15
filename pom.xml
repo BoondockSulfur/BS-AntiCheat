@@ -5,7 +5,7 @@
 
   <groupId>dev.boondock</groupId>
   <artifactId>bsanticheat</artifactId>
-  <version>1.0.3</version>
+  <version>1.0.4</version>
   <name>BSAntiCheat</name>
   <description>AntiCheat plugin for Paper 1.21.x with Movement and XRay detection</description>
 
@@ -15,6 +15,13 @@
     <paperapi.version>1.21.10-R0.1-SNAPSHOT</paperapi.version>
     <hikaricp.version>5.1.0</hikaricp.version>
     <sqlite.version>3.46.0.0</sqlite.version>
+    <!-- MockBukkit builds against JUnit 6, so the whole test stack has to be JUnit 6 —
+         mixing it with 5.x puts two incompatible junit-platform versions on the classpath
+         and Surefire dies before running anything. Surefire 3.5.6 for the same reason.
+         These need one online build to fetch; afterwards `mvn -o` works as before. -->
+    <junit.version>6.0.2</junit.version>
+    <surefire.version>3.5.6</surefire.version>
+    <mockbukkit.version>4.99.0</mockbukkit.version>
   </properties>
 
   <repositories>
@@ -37,6 +44,24 @@
   </repositories>
 
   <dependencies>
+    <!-- Tests cover the decision logic that can be reached without a running server:
+         the interval statistics behind AutoClicker and the vein clustering behind X-Ray.
+         Both are where this plugin's false positives came from, and both are pure
+         functions of their input once lifted out of the event handlers. -->
+    <!-- MockBukkit must come before paper-api: it provides a running server implementation
+         for tests, and the first match on the classpath wins. -->
+    <dependency>
+      <groupId>org.mockbukkit.mockbukkit</groupId>
+      <artifactId>mockbukkit-v1.21</artifactId>
+      <version>${mockbukkit.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>io.papermc.paper</groupId>
       <artifactId>paper-api</artifactId>
@@ -103,7 +128,33 @@
 
   <build>
     <finalName>BSAntiCheat-${project.version}</finalName>
+    <!-- plugin.yml takes its version from the POM. It used to carry a hand-written copy,
+         which silently went stale: a jar built as 1.0.4 still announced 1.0.3 to the server,
+         so /version and the startup log could not tell two different builds apart. Only
+         plugin.yml is filtered — config.yml and the language files must keep their contents
+         verbatim. -->
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>true</filtering>
+        <includes>
+          <include>plugin.yml</include>
+        </includes>
+      </resource>
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>false</filtering>
+        <excludes>
+          <exclude>plugin.yml</exclude>
+        </excludes>
+      </resource>
+    </resources>
     <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${surefire.version}</version>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>

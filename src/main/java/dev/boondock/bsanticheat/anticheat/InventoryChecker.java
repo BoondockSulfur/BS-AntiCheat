@@ -78,6 +78,13 @@ public class InventoryChecker implements Listener {
     // MovementChecker has always had this; InventoryMove was missing it.
     private final Map<UUID, Long> recentKnockback = new ConcurrentHashMap<>();
     private static final long KNOCKBACK_GRACE_MS = 2000;
+    // Momentum carries a player for a moment after the GUI opens: vanilla friction needs
+    // several ticks to bring a sprint (0.28 blocks/tick) below the 0.15 threshold, and the
+    // player is not steering during them. With inventorymove_violations at 8 that window
+    // alone could reach the alert — live data showed exactly that, three alerts measuring
+    // 0.150 / 0.165 / 0.278, all sitting on the threshold.
+    private static final long OPEN_GRACE_MS = 1000;
+    private PistonTracker pistons;
 
     public InventoryChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -100,6 +107,10 @@ public class InventoryChecker implements Listener {
 
     public void setViolationManager(ViolationManager violationManager) {
         this.violationManager = violationManager;
+    }
+
+    public void setPistonTracker(PistonTracker pistons) {
+        this.pistons = pistons;
     }
 
     // ==================== InventoryMove ====================
@@ -136,8 +147,11 @@ public class InventoryChecker implements Listener {
 
         Player player = event.getPlayer();
         UUID id = player.getUniqueId();
-        if (!containerOpenSince.containsKey(id)) return;
+        Long openedAt = containerOpenSince.get(id);
+        if (openedAt == null) return;
         if (ServerLoad.isLagging(config)) return;
+        // Let the momentum the player arrived with die down before judging them.
+        if (System.currentTimeMillis() - openedAt < OPEN_GRACE_MS) return;
 
         Location from = event.getFrom();
         Location to = event.getTo();
@@ -148,8 +162,14 @@ public class InventoryChecker implements Listener {
         // isFlying covers survival flight granted by another plugin (EssentialsX /fly):
         // those players drift with a GUI open and are not in creative gamemode, so the
         // gamemode exemption further down would never catch them.
+        // Airborne movement needs no key input either: a player who walks off a ledge or
+        // jumps before opening the container keeps their horizontal momentum the whole way
+        // down, and the vanilla client cannot steer it with a GUI open any more than it can
+        // start it. This trusts the client's on-ground flag, which a cheat could lie about to
+        // buy itself the exemption — that specific lie is what the GROUNDSPOOF check exists
+        // to catch, and it stays armed regardless of what any inventory is doing.
         if (player.isInsideVehicle() || player.isGliding() || player.isInWater()
-                || player.isFlying() || player.getAllowFlight()) {
+                || player.isFlying() || player.getAllowFlight() || !player.isOnGround()) {
             consecutiveInvMove.remove(id);
             return;
         }
@@ -172,7 +192,10 @@ public class InventoryChecker implements Listener {
         // keeps the player sliding above the threshold for many ticks, and colliding
         // entities (mob crowds, villager halls) push a player with an open GUI around.
         // Checked only after the speed gate — the entity query is the expensive part.
-        if (isOnIce(player) || isBeingPushed(player)) {
+        // A piston shoves a player without any velocity packet, so the knockback grace above
+        // never sees it — piston doors and elevators move players with GUIs open routinely.
+        if (isOnIce(player) || isBeingPushed(player)
+                || (pistons != null && pistons.wasPushedRecently(to))) {
             consecutiveInvMove.remove(id);
             return;
         }
@@ -298,17 +321,39 @@ public class InventoryChecker implements Listener {
         if (last == null) return;
         long interval = now - last;
 
-        // Fastest legit consumable (dried kelp) takes ~800ms; everything else 1.6s+.
-        if (interval < config.fastUseMinIntervalMs()) {
+        // The configured floor assumes vanilla eat times (dried kelp ~800ms, everything else
+        // 1.6s+). Item plugins ship consumables that are legitimately quicker, and judging
+        // those against a vanilla floor flags the player for using their own server's items.
+        // So take whichever is lower: the configured floor, or what this item actually needs.
+        long floor = config.fastUseMinIntervalMs();
+        long itemMs = itemUseMs(event.getItem(), player);
+        if (itemMs > 0) floor = Math.min(floor, itemMs);
+
+        if (interval < floor) {
             int c = consecutiveFastUse.merge(id, 1, Integer::sum);
             if (c >= config.fastUseViolations() && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
                 handleViolation(player, "FASTUSE",
-                        lang.format("alert.fastuse", interval, config.fastUseMinIntervalMs()),
+                        lang.format("alert.fastuse", interval, floor),
                         interval, player.getLocation());
                 consecutiveFastUse.put(id, 0);
             }
         } else {
             consecutiveFastUse.remove(id);
+        }
+    }
+
+    /**
+     * How long this item genuinely takes to consume, in ms — read from the item itself, so a
+     * custom consumable is judged against its own use time rather than a vanilla assumption.
+     * Returns 0 when the server cannot say, in which case the configured floor stands.
+     */
+    private long itemUseMs(org.bukkit.inventory.ItemStack item, Player player) {
+        if (item == null) return 0L;
+        try {
+            int ticks = item.getMaxItemUseDuration(player);
+            return ticks > 0 ? ticks * 50L : 0L;
+        } catch (Throwable t) {
+            return 0L; // API not present on this server build — fall back to the config value
         }
     }
 

@@ -64,6 +64,11 @@ public class XRayDetector implements Listener {
     // Key: Block location hash, Value: Timestamp when placed
     private final Map<String, Long> playerPlacedBlocks = new ConcurrentHashMap<>();
 
+    // Recently broken block positions, so an open face can be told from one the player just
+    // made. Key: block location hash, Value: when it was broken. Trimmed by the periodic
+    // cleanup along with everything else.
+    private final Map<String, Long> recentlyBroken = new ConcurrentHashMap<>();
+
     // Valuable ores to track
     private static final Set<Material> VALUABLE_ORES = Set.of(
         Material.COAL_ORE, Material.DEEPSLATE_COAL_ORE,
@@ -94,6 +99,19 @@ public class XRayDetector implements Listener {
         Material.LAPIS_ORE, Material.DEEPSLATE_LAPIS_ORE
     );
 
+    // Ore blocks this close on every axis are treated as one deposit (see countVeins).
+    private static final int VEIN_LINK_DISTANCE = 2;
+
+    /**
+     * What counts as spoil — the rock a player moves while searching. This is the denominator
+     * of the ore-to-stone ratio and decides whether a player is treated as searching at all,
+     * so anything missing here reads as "found ore without digging for it".
+     *
+     * <p>The nether matters most: mining there moves netherrack, and while that was absent
+     * the ratio check could never run in that dimension at all. Ancient debris has a
+     * threshold of 3 and is a rare ore, so hunting it produced alerts with nothing able to
+     * account for the rock that was moved to find it.
+     */
     private static final Set<Material> STONE_TYPES = Set.of(
         Material.STONE,
         Material.DEEPSLATE,
@@ -101,7 +119,20 @@ public class XRayDetector implements Listener {
         Material.GRANITE,
         Material.DIORITE,
         Material.TUFF,
-        Material.CALCITE
+        Material.CALCITE,
+        Material.DRIPSTONE_BLOCK,
+        // Nether
+        Material.NETHERRACK,
+        Material.BASALT,
+        Material.SMOOTH_BASALT,
+        Material.BLACKSTONE,
+        Material.SOUL_SAND,
+        Material.SOUL_SOIL,
+        // End
+        Material.END_STONE,
+        // Desert / mesa digging
+        Material.SANDSTONE,
+        Material.RED_SANDSTONE
     );
 
     public XRayDetector(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
@@ -156,6 +187,9 @@ public class XRayDetector implements Listener {
             int placedBlocksBeforeCleanup = playerPlacedBlocks.size();
             playerPlacedBlocks.entrySet().removeIf(entry -> entry.getValue() < placedBlockCutoff);
             int placedBlocksCleaned = placedBlocksBeforeCleanup - playerPlacedBlocks.size();
+
+            // Broken-block positions only matter for as long as the ore window they explain.
+            recentlyBroken.entrySet().removeIf(entry -> entry.getValue() < cutoff);
 
             // Enforce size limits to prevent memory issues on large servers.
             // Evict only the entries with the oldest recent activity — clearing the
@@ -311,7 +345,7 @@ public class XRayDetector implements Listener {
     /**
      * Generate a unique key for a block location.
      */
-    private String getLocationKey(org.bukkit.Location loc) {
+    static String getLocationKey(org.bukkit.Location loc) {
         return loc.getWorld().getName() + ":" + loc.getBlockX() + ":" + loc.getBlockY() + ":" + loc.getBlockZ();
     }
 
@@ -346,6 +380,31 @@ public class XRayDetector implements Listener {
         // Fully exempt worlds (resource/farm worlds where mass mining is normal)
         if (config.isXrayExemptWorld(block.getWorld().getName())) {
             return;
+        }
+
+        // Every break is remembered briefly, so the exposure test below can tell a face that
+        // was already open from one that was just broken open (see wasVisible).
+        //
+        // Bounded like playerPlacedBlocks: the periodic cleanup only runs every 5 minutes,
+        // while a single player can break several hundred blocks a minute (378/min measured
+        // on the source server), so waiting for it would let this grow to tens of thousands
+        // of entries in between. Entries older than the ore window are useless anyway.
+        long breakNow = System.currentTimeMillis();
+        boolean trackBreak = true;
+        if (recentlyBroken.size() >= Constants.XRAY_MAX_PLACED_BLOCKS_SIZE) {
+            long staleCutoff = breakNow - (config.xrayTimewindowSeconds() * 1000L);
+            recentlyBroken.entrySet().removeIf(e -> e.getValue() < staleCutoff);
+            if (recentlyBroken.size() >= Constants.XRAY_MAX_PLACED_BLOCKS_SIZE) {
+                // Every entry is still current. Skip only this bookkeeping and carry on —
+                // returning here would abandon the ore tracking below, which anyone could
+                // trigger on purpose by filling the map.
+                plugin.getLogger().warning("[XRay] recentlyBroken at size limit ("
+                        + Constants.XRAY_MAX_PLACED_BLOCKS_SIZE + "), skipping break tracking");
+                trackBreak = false;
+            }
+        }
+        if (trackBreak) {
+            recentlyBroken.put(getLocationKey(block.getLocation()), breakNow);
         }
 
         // Track stone mining (time-windowed)
@@ -426,7 +485,7 @@ public class XRayDetector implements Listener {
 
             // Clone location to avoid holding chunk references (memory optimization)
             Location mineLoc = block.getLocation().clone();
-            mines.add(new OreMineEvent(type, System.currentTimeMillis(), mineLoc));
+            mines.add(new OreMineEvent(type, System.currentTimeMillis(), mineLoc, wasVisible(block)));
 
             // Cleanup old events (older than timewindow) - CRITICAL for memory management
             // Removes both old timestamps AND their location references
@@ -472,18 +531,66 @@ public class XRayDetector implements Listener {
     private void checkSuspiciousPattern(Player player, UUID playerId, List<OreMineEvent> mines) {
         int timewindow = config.xrayTimewindowSeconds();
 
-        // Calculate ore breakdown and check per-ore thresholds
+        // Stone broken inside the window. Computed up front because it decides WHICH checks
+        // apply, not just how the ratio comes out.
+        //
+        // Trimming has to happen here: the deque is otherwise only trimmed when stone is
+        // broken or by the 5-minute cleanup task, so a player who mines stone and then
+        // switches to pure ore mining keeps a stale, inflated count for minutes.
+        ConcurrentLinkedDeque<Long> stoneTimestamps = playerStoneMines.get(playerId);
+        int stoneMined = 0;
+        if (stoneTimestamps != null) {
+            long stoneCutoff = System.currentTimeMillis() - (timewindow * 1000L);
+            Long oldest;
+            while ((oldest = stoneTimestamps.peekFirst()) != null && oldest < stoneCutoff) {
+                stoneTimestamps.pollFirst();
+            }
+            stoneMined = stoneTimestamps.size();
+        }
+
+        // Someone moving this much stone is visibly SEARCHING, which is the opposite of what
+        // X-Ray is for — its whole point is not having to. Strip mining therefore gets judged
+        // by hit RATE (check 2) rather than by raw counts (checks 1 and 3): a tunnel through
+        // ore-rich rock can pass a per-minute threshold on luck alone, with nothing in those
+        // checks able to see the hundreds of blocks of spoil that explain it.
+        //
+        // The two then cover disjoint cases instead of overlapping, and nothing falls between
+        // them: below the line raw counts decide, above it the ratio does. Deliberate spoil
+        // mining as camouflage does not buy much — with 10 hidden diamonds a player needs
+        // ~67 stone before the ratio drops under its threshold, i.e. they have to genuinely
+        // dig, which is the behaviour being asked for.
+        boolean searching = stoneMined > Constants.XRAY_MIN_STONE_FOR_RATIO_CHECK;
+
+        // Calculate ore breakdown and check per-ore thresholds.
+        // The full breakdown is what gets reported; the thresholds are judged against ore
+        // that was HIDDEN when it was broken, because that is the only ore whose location
+        // X-Ray could have supplied. Ore taken off an open cave wall was simply seen.
         Map<String, Integer> oreBreakdown = calculateOreBreakdown(mines);
+        Map<String, Integer> hiddenBreakdown = config.xrayRequireHidden()
+                ? calculateOreBreakdown(mines, true) : oreBreakdown;
         Map<String, Integer> exceededOres = new HashMap<>();
 
-        // Check per-ore thresholds
-        for (Map.Entry<String, Integer> entry : oreBreakdown.entrySet()) {
-            String oreName = entry.getKey();
-            int count = entry.getValue();
-            int threshold = config.xrayThreshold(oreName);
+        // Check per-ore thresholds.
+        //
+        // Crossing the count alone is not evidence, because the count says nothing about how
+        // the ore was found. One thick vein produces the same number as a dozen scattered
+        // ones: copper and redstone veins run past 20 blocks, a lucky pair of overlapping
+        // diamond veins reaches ten, and any vein-miner style tool takes a whole vein in a
+        // single action. None of that is knowledge about where the ore was — which is the
+        // thing X-Ray actually gives someone. Walking to several SEPARATE deposits without
+        // searching is. So the ore must also come from at least xray_min_veins distinct
+        // veins; the vein count is computed only for ores that already crossed their
+        // threshold, so the common case pays nothing for it.
+        int minVeins = config.xrayMinVeins();
+        if (!searching) {
+            for (Map.Entry<String, Integer> entry : hiddenBreakdown.entrySet()) {
+                String oreName = entry.getKey();
+                int count = entry.getValue();
+                int threshold = config.xrayThreshold(oreName);
 
-            if (count >= threshold) {
-                exceededOres.put(oreName, count);
+                if (count >= threshold && countVeins(mines, oreName) >= minVeins) {
+                    exceededOres.put(oreName, count);
+                }
             }
         }
 
@@ -497,7 +604,10 @@ public class XRayDetector implements Listener {
             StringBuilder oreInfo = new StringBuilder();
             for (Map.Entry<String, Integer> e : exceededOres.entrySet()) {
                 if (oreInfo.length() > 0) oreInfo.append(", ");
+                // "x10/38" = ten of the thirty-eight were hidden when broken. The second
+                // number is what the player actually mined; the first is what counted.
                 oreInfo.append(e.getKey()).append(" x").append(e.getValue())
+                        .append("/").append(oreBreakdown.getOrDefault(e.getKey(), e.getValue()))
                         .append(" (max ").append(config.xrayThreshold(e.getKey())).append(")");
             }
             String message = lang.format("alert.xray_threshold", player.getName(), timewindow, locationInfo)
@@ -523,24 +633,17 @@ public class XRayDetector implements Listener {
             plugin.getLogger().info("[XRay] " + player.getName() + " - Kein Schwellenwert ueberschritten. Breakdown: " + oreBreakdown);
         }
 
-        // Check 2: Ore-to-stone ratio (only check if player mined enough stone).
-        // Trim the stone deque to the time window FIRST: it is otherwise only trimmed when
-        // stone is broken or by the 5-minute cleanup task, so a player who mines stone and
-        // then switches to pure ore mining keeps a stale, inflated denominator for minutes
-        // — which silently makes the ratio look better than it is.
-        ConcurrentLinkedDeque<Long> stoneTimestamps = playerStoneMines.get(playerId);
-        int stoneMined = 0;
-        if (stoneTimestamps != null) {
-            long stoneCutoff = System.currentTimeMillis() - (timewindow * 1000L);
-            Long oldest;
-            while ((oldest = stoneTimestamps.peekFirst()) != null && oldest < stoneCutoff) {
-                stoneTimestamps.pollFirst();
-            }
-            stoneMined = stoneTimestamps.size();
-        }
-        if (stoneMined > Constants.XRAY_MIN_STONE_FOR_RATIO_CHECK) {
-            // Only count rarer ores — common veins (coal/iron/...) would inflate the ratio
-            long relevantOreCount = mines.stream().filter(m -> !COMMON_ORES.contains(m.oreType)).count();
+        // Check 2: Ore-to-stone ratio — the check that judges a searching player, by how
+        // often the digging pays off rather than by how much came out of it.
+        if (searching) {
+            // Only count rarer ores — common veins (coal/iron/...) would inflate the ratio.
+            // Ore that was visible from open space is excluded for the same reason as in the
+            // threshold check: a player clearing a cave took it off a wall they could see,
+            // and a high ore-to-stone ratio is exactly what that looks like.
+            long relevantOreCount = mines.stream()
+                    .filter(m -> !COMMON_ORES.contains(m.oreType))
+                    .filter(m -> !config.xrayRequireHidden() || !m.visible)
+                    .count();
             double ratio = (double) relevantOreCount / stoneMined;
 
             // Get threshold from config (default: 0.10 = 10%)
@@ -564,13 +667,18 @@ public class XRayDetector implements Listener {
 
         // Check 3: Combined rare-ore count. Catches a player mixing several rare ores
         // where no single type crosses its individual threshold. Only runs when Check 1
-        // did NOT already flag an individual rare ore (avoids duplicate alerts).
+        // did NOT already flag an individual rare ore (avoids duplicate alerts), and — like
+        // Check 1 — only for a player who is not visibly searching: it is a raw count too,
+        // and the ratio above already measures exactly these ores against the spoil.
         boolean rareAlreadyFlagged = exceededOres.containsKey("DIAMOND_ORE")
                 || exceededOres.containsKey("EMERALD_ORE")
                 || exceededOres.containsKey("ANCIENT_DEBRIS");
 
-        if (!rareAlreadyFlagged) {
-            List<OreMineEvent> rareMines = mines.stream().filter(m -> RARE_ORES.contains(m.oreType)).toList();
+        if (!rareAlreadyFlagged && !searching) {
+            List<OreMineEvent> rareMines = mines.stream()
+                    .filter(m -> RARE_ORES.contains(m.oreType))
+                    .filter(m -> !config.xrayRequireHidden() || !m.visible)
+                    .toList();
             if (rareMines.size() >= config.xrayRareCombinedThreshold()) {
                 Map<String, Integer> rareBreakdown = new HashMap<>();
                 rareMines.forEach(m -> rareBreakdown.merge(m.oreType.name().replace("DEEPSLATE_", ""), 1, Integer::sum));
@@ -654,11 +762,117 @@ public class XRayDetector implements Listener {
      * Calculate breakdown of ores mined.
      * Normalizes ore names (e.g., DEEPSLATE_DIAMOND_ORE -> DIAMOND_ORE for consistent counting).
      */
+    /**
+     * Whether this ore was already exposed to open space when it was broken — i.e. whether
+     * the player could simply see it.
+     *
+     * <p>This is the distinction the block count cannot make. X-Ray tells someone where ore
+     * is that they <em>cannot</em> see, and acting on that means digging to it: the ore comes
+     * out of solid rock. Emptying a cave means taking ore off walls that were open all along,
+     * which produces the same "lots of ore, little stone" signature — in fact even less
+     * stone, because nothing has to be dug at all.
+     *
+     * <p>Faces broken within the time window do not count as exposure, otherwise the tunnel
+     * dug straight to a hidden ore would qualify it as visible. The record is not per-player
+     * on purpose: two accounts mining together — one opening the rock, one taking the ore —
+     * would otherwise excuse each other.
+     */
+    private boolean wasVisible(Block block) {
+        long cutoff = System.currentTimeMillis() - (config.xrayTimewindowSeconds() * 1000L);
+        return wasVisible(block, recentlyBroken, cutoff);
+    }
+
+    /**
+     * Testable form: everything this decision depends on is passed in, so the rule can be
+     * exercised against a built world without a plugin instance behind it.
+     */
+    static boolean wasVisible(Block block, Map<String, Long> recentlyBroken, long cutoff) {
+        int[][] faces = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+        for (int[] f : faces) {
+            Block side = block.getRelative(f[0], f[1], f[2]);
+            Material m = side.getType();
+            boolean open = m == Material.AIR || m == Material.CAVE_AIR || m == Material.VOID_AIR
+                    || m == Material.WATER || m == Material.LAVA;
+            if (!open) continue;
+            Long brokenAt = recentlyBroken.get(getLocationKey(side.getLocation()));
+            if (brokenAt == null || brokenAt < cutoff) return true; // open, and not by them
+        }
+        return false;
+    }
+
+    /**
+     * How many separate deposits the given ore was taken from within the window. Two blocks
+     * belong to the same vein when they sit within {@link #VEIN_LINK_DISTANCE} of each other
+     * on every axis, joined transitively — so a winding vein counts once however it is shaped,
+     * and two veins a couple of blocks apart (visible together from one spot) also count once.
+     *
+     * <p>O(n²) over the ore blocks of one type in a 60s window, and only reached once a
+     * threshold has already been crossed.
+     */
+    private int countVeins(List<OreMineEvent> mines, String oreName) {
+        List<Location> pts = new ArrayList<>();
+        for (OreMineEvent mine : mines) {
+            if (mine.oreType.name().replace("DEEPSLATE_", "").equals(oreName)) {
+                pts.add(mine.location);
+            }
+        }
+        return countVeins(pts);
+    }
+
+    /**
+     * Deposit count for a set of ore positions, by transitive linkage. Package-private and
+     * dependent on nothing but its argument, so the clustering can be tested against real
+     * mining coordinates.
+     */
+    static int countVeins(List<Location> pts) {
+        int n = pts.size();
+        if (n <= 1) return n;
+
+        int[] parent = new int[n];
+        for (int i = 0; i < n; i++) parent[i] = i;
+        for (int i = 0; i < n; i++) {
+            for (int j = i + 1; j < n; j++) {
+                if (sameVein(pts.get(i), pts.get(j))) {
+                    int a = findRoot(parent, i);
+                    int b = findRoot(parent, j);
+                    if (a != b) parent[a] = b;
+                }
+            }
+        }
+        Set<Integer> roots = new HashSet<>();
+        for (int i = 0; i < n; i++) roots.add(findRoot(parent, i));
+        return roots.size();
+    }
+
+    static boolean sameVein(Location a, Location b) {
+        if (a == null || b == null) return false;
+        if (a.getWorld() != null && b.getWorld() != null && !a.getWorld().equals(b.getWorld())) return false;
+        return Math.abs(a.getBlockX() - b.getBlockX()) <= VEIN_LINK_DISTANCE
+                && Math.abs(a.getBlockY() - b.getBlockY()) <= VEIN_LINK_DISTANCE
+                && Math.abs(a.getBlockZ() - b.getBlockZ()) <= VEIN_LINK_DISTANCE;
+    }
+
+    private static int findRoot(int[] parent, int i) {
+        while (parent[i] != i) {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        return i;
+    }
+
     private Map<String, Integer> calculateOreBreakdown(List<OreMineEvent> mines) {
+        return calculateOreBreakdown(mines, false);
+    }
+
+    /**
+     * Ore counts per type. With {@code hiddenOnly}, ore that was visible from open space is
+     * left out — see {@link #wasVisible}. Deepslate variants merge into their base ore
+     * (DEEPSLATE_DIAMOND_ORE -> DIAMOND_ORE) so both count against the same threshold.
+     */
+    private Map<String, Integer> calculateOreBreakdown(List<OreMineEvent> mines, boolean hiddenOnly) {
         Map<String, Integer> breakdown = new HashMap<>();
         for (OreMineEvent mine : mines) {
-            // Merge the deepslate variant into its base ore (DEEPSLATE_DIAMOND_ORE ->
-            // DIAMOND_ORE) so both variants count against the same threshold.
+            if (hiddenOnly && mine.visible) continue;
             String oreName = mine.oreType.name().replace("DEEPSLATE_", "");
             breakdown.merge(oreName, 1, Integer::sum);
         }
@@ -753,11 +967,14 @@ public class XRayDetector implements Listener {
         final Material oreType;
         final long timestamp;
         final org.bukkit.Location location;
+        /** Whether the ore was already visible from open space when it was broken. */
+        final boolean visible;
 
-        OreMineEvent(Material oreType, long timestamp, org.bukkit.Location location) {
+        OreMineEvent(Material oreType, long timestamp, org.bukkit.Location location, boolean visible) {
             this.oreType = oreType;
             this.timestamp = timestamp;
             this.location = location;
+            this.visible = visible;
         }
     }
 }

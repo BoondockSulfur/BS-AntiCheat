@@ -121,6 +121,14 @@ anticheat:
     step_max_height: 0.75          # vanilla auto-step is 0.6
     elytra_violations: 3
     scaffold_violations: 3
+    # Rate checks: how many one-second windows in a row must exceed the limit. Plugins that
+    # break several blocks per action (vein miners, custom tools) and packet bundles cross a
+    # per-second cap once without anyone cheating; a cheat holds the rate up.
+    nuker_violations: 3
+    fastplace_violations: 3
+    # KillAura multi-target: a crowded fight can legitimately put several players within
+    # reach inside the 250ms window once.
+    killaura_multi_violations: 2
     # Vehicle
     boatfly_violations: 10
     vehicle_speed_violations: 5
@@ -177,9 +185,10 @@ anticheat:
   scaffold_max_angle: 80.0
 
   # Packet-level: max clicks per second from arm-swings (mining swings are excluded).
-  # Skilled humans reach ~17-21 (butterfly/jitter clicking peaked at 21 in live testing);
-  # autoclickers usually exceed this.
-  autoclicker_max_cps: 22
+  # Skilled humans reach ~17-21 by jitter clicking and 20-25 by butterfly clicking, so 22
+  # sat inside what a hand can do. Note the count comes from a sliding window over packet
+  # ARRIVAL times, which network jitter can lift a little above what was actually clicked.
+  autoclicker_max_cps: 25
   # AutoClicker pattern analysis (EXPERIMENTAL, off by default): flags overly consistent
   # attack intervals. Can false-positive on held attacks; calibrate with debug_mode before
   # enabling.
@@ -216,6 +225,22 @@ anticheat:
 
   # XRay Settings
   xray_timewindow_seconds: 60
+  # How many SEPARATE deposits the ore must come from before a count over the threshold
+  # counts as evidence. The block count alone cannot tell one thick vein from a dozen
+  # scattered finds — copper and redstone veins run past 20 blocks, overlapping diamond
+  # veins reach ten, and a vein-miner tool takes a whole vein in one action. Knowing where
+  # several separate deposits are without searching is the thing X-Ray actually provides.
+  xray_min_veins: 3
+  # Count only ore that was still HIDDEN in rock when it was broken.
+  # X-Ray tells someone where ore is that they cannot see, and acting on that means digging
+  # to it. Emptying an open cave means taking ore off walls that were visible all along — it
+  # produces the same "lots of ore, hardly any stone" statistics, in fact even more extreme,
+  # because nothing has to be dug at all. Without this, a player who finds a large untouched
+  # cave system is flagged for having found it.
+  # Faces the player opened themselves within the time window do not count as visibility, so
+  # a tunnel dug straight to a hidden ore does not excuse it.
+  # Alerts read "DIAMOND x10/38" = ten of the thirty-eight broken were hidden.
+  xray_require_hidden: true
   xray_excluded_ores: []
   # Ore/stone ratio: cave and deepslate miners legitimately hit >10% (they mine the
   # ores they see plus little stone), so 0.15 leaves headroom for normal mining.
@@ -283,6 +308,12 @@ anticheat:
     teleport: 15.0
     violations_before_alert: 5
     fly_violations_before_alert: 10
+    # Elytra/Riptide ceilings in blocks per second, averaged over a 250 ms window.
+    # Reference points: rocket-assisted elytra dives reach 100-120 b/s, and a Riptide III
+    # trident launches at 3 blocks/tick = 60 b/s before sprint or fall momentum is added.
+    # Raise these if item plugins on your server grant faster flight.
+    elytra_bps: 140.0
+    riptide_bps: 75.0
 
 # Discord Webhook
 discord:
