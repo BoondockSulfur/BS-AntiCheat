@@ -57,8 +57,12 @@ class MovementSequenceTest {
         server = MockBukkit.mock();
         world = server.addSimpleWorld("moves");
         // The vertical checks stand down in unloaded chunks (a scan there would find no
-        // blocks and read as "airborne"), so the test area has to be loaded.
-        world.loadChunk(0, 0);
+        // blocks and read as "airborne"), so the test area has to be loaded — and the
+        // neighbouring chunks with it, because the scans reach one block sideways and the
+        // paths below run along x=0/z=0, right on a chunk border. Same 3x3 as ScenarioBase.
+        for (int cx = -1; cx <= 1; cx++) {
+            for (int cz = -1; cz <= 1; cz++) world.loadChunk(cx, cz);
+        }
         JavaPlugin plugin = MockBukkit.createMockPlugin("BSAntiCheat");
         PluginConfig config = new PluginConfig(plugin);
         LanguageManager lang = new LanguageManager(plugin, "en");

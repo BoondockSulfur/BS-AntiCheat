@@ -33,6 +33,12 @@ public final class Constants {
     // ==================== MOVEMENT CHECKER ====================
     // Phase 1: event sampling removed — every PlayerMoveEvent is checked.
     public static final double MOVEMENT_MIN_TIME_DELTA = 0.01;
+    // Longest gap between two movement packets that is still treated as ordinary play. A
+    // vanilla client sends one every tick even while standing still, so silence beyond this
+    // is a stalled connection: what arrives next is the backlog, carrying several ticks of
+    // travel in one event. Matches the Timer check's PACKET_GAP_MS, which exists for the
+    // same reason on the packet side.
+    public static final long MOVEMENT_MAX_GAP_MS = 400L;
 
     // ==================== XRAY DETECTOR ====================
     public static final long XRAY_PLACED_BLOCK_EXPIRY_MS = 3600000L;
@@ -104,6 +110,12 @@ public final class Constants {
 
     // Consecutive impossible (on-ground while airborne) samples before flagging GroundSpoof
     public static final int GROUNDSPOOF_VIOLATIONS = 4;
+    // Sustained ascent: how many consecutive climbing samples must fail to decay, and how much
+    // vertical speed a genuine ballistic rise sheds per tick. Vanilla gravity is 0.08 b/t; the
+    // floor is set below that so drag, a slow client and rounding cannot make a real arc look
+    // powered. 8 samples is ~0.4s of climbing that gravity cannot account for.
+    public static final int SUSTAINED_ASCENT_VIOLATIONS = 8;
+    public static final double SUSTAINED_ASCENT_MIN_DECAY = 0.05;
     // NoSlow: allowed fraction of walk speed while using an item, and consecutive samples.
     // Cap raised to 0.8 so normal walking-with-item (and transitions) don't false-flag.
     public static final double NOSLOW_SPEED_MULTIPLIER = 0.8;

@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Configuration manager for BSAntiCheat.
@@ -36,6 +37,17 @@ public class PluginConfig {
     private volatile Set<String> xrayExemptWorldsSet = Set.of();
     private volatile Set<String> restrictedWorldsSet = Set.of();
 
+    // Whether THIS PLUGIN has changed a config value since the file was last read.
+    //
+    // The shutdown save used to be unconditional, which quietly made the plugin the last
+    // writer of a file it had not edited: an admin who changes a threshold in config.yml
+    // while the server runs and does not run /bsac reload has their edit overwritten by the
+    // in-memory values at the next stop — and on a server that auto-restarts twice a day
+    // that happens within hours, with nothing in the log to explain it. Saving is now tied
+    // to the plugin actually having something to write: the whitelist and ore-exclusion
+    // commands, and the validator repairing an invalid value.
+    private final AtomicBoolean pluginModified = new AtomicBoolean(false);
+
     public PluginConfig(JavaPlugin plugin) {
         this.plugin = plugin;
         this.asyncSaver = new AsyncConfigSaver(plugin);
@@ -53,6 +65,8 @@ public class PluginConfig {
         validateConfig(fresh);
         this.cfg = fresh;
         rebuildCaches();
+        // Memory and file agree again, so nothing of ours is pending.
+        pluginModified.set(false);
     }
 
     /** Rebuild the hot-path lookup sets from the current config. */
@@ -124,6 +138,7 @@ public class PluginConfig {
         }
 
         if (hasErrors) {
+            pluginModified.set(true);
             asyncSaver.saveAsync();
         }
     }
@@ -177,6 +192,14 @@ public class PluginConfig {
     public boolean jesusDetectionEnabled() { return cfg.getBoolean("anticheat.jesus_detection", false); }
     public boolean spiderDetectionEnabled() { return cfg.getBoolean("anticheat.spider_detection", false); }
     public boolean stepDetectionEnabled() { return cfg.getBoolean("anticheat.step_detection", false); }
+    // Off by default: a heuristic that has never seen live data from the server it runs on.
+    // It watches for a climb that does not decay the way gravity requires — see
+    // MovementChecker#checkSustainedAscent — and closes the gap left by the hover check no
+    // longer counting ascent. Calibrate with debug_mode before switching it on.
+    public boolean sustainedAscentDetectionEnabled() { return cfg.getBoolean("anticheat.sustained_ascent_detection", false); }
+    public int sustainedAscentViolations() { return cfg.getInt("anticheat.thresholds.sustained_ascent_violations", Constants.SUSTAINED_ASCENT_VIOLATIONS); }
+    /** Vertical speed a climbing player must shed per tick to read as thrown rather than flown. */
+    public double sustainedAscentMinDecay() { return cfg.getDouble("anticheat.thresholds.sustained_ascent_min_decay", Constants.SUSTAINED_ASCENT_MIN_DECAY); }
     public boolean teleportDetectionEnabled() { return cfg.getBoolean("anticheat.teleport_detection", true); }
     public boolean elytraDetectionEnabled() { return cfg.getBoolean("anticheat.elytra_detection", true); }
     public boolean vehicleChecksEnabled() { return cfg.getBoolean("anticheat.vehicle_checks", true); }
@@ -348,28 +371,28 @@ public class PluginConfig {
     // Whitelist management
     public void addWhitelistPlayer(String uuid) {
         List<String> list = new ArrayList<>(anticheatWhitelistPlayers());
-        if (!list.contains(uuid)) { list.add(uuid); cfg.set("anticheat.whitelist_players", list); rebuildCaches(); asyncSaver.saveAsync(); }
+        if (!list.contains(uuid)) { list.add(uuid); cfg.set("anticheat.whitelist_players", list); rebuildCaches(); markAndSave(); }
     }
     public void removeWhitelistPlayer(String uuid) {
         List<String> list = new ArrayList<>(anticheatWhitelistPlayers());
-        if (list.remove(uuid)) { cfg.set("anticheat.whitelist_players", list); rebuildCaches(); asyncSaver.saveAsync(); }
+        if (list.remove(uuid)) { cfg.set("anticheat.whitelist_players", list); rebuildCaches(); markAndSave(); }
     }
     public void addWhitelistGroup(String group) {
         List<String> list = new ArrayList<>(anticheatWhitelistGroups());
-        if (!list.contains(group)) { list.add(group); cfg.set("anticheat.whitelist_groups", list); asyncSaver.saveAsync(); }
+        if (!list.contains(group)) { list.add(group); cfg.set("anticheat.whitelist_groups", list); markAndSave(); }
     }
     public void removeWhitelistGroup(String group) {
         List<String> list = new ArrayList<>(anticheatWhitelistGroups());
-        if (list.remove(group)) { cfg.set("anticheat.whitelist_groups", list); asyncSaver.saveAsync(); }
+        if (list.remove(group)) { cfg.set("anticheat.whitelist_groups", list); markAndSave(); }
     }
     public void addExcludedOre(String ore) {
         List<String> list = new ArrayList<>(xrayExcludedOres());
         String upper = ore.toUpperCase();
-        if (!list.contains(upper)) { list.add(upper); cfg.set("anticheat.xray_excluded_ores", list); asyncSaver.saveAsync(); }
+        if (!list.contains(upper)) { list.add(upper); cfg.set("anticheat.xray_excluded_ores", list); markAndSave(); }
     }
     public void removeExcludedOre(String ore) {
         List<String> list = new ArrayList<>(xrayExcludedOres());
-        if (list.remove(ore.toUpperCase())) { cfg.set("anticheat.xray_excluded_ores", list); asyncSaver.saveAsync(); }
+        if (list.remove(ore.toUpperCase())) { cfg.set("anticheat.xray_excluded_ores", list); markAndSave(); }
     }
 
     // Discord
@@ -379,8 +402,22 @@ public class PluginConfig {
 
     // Silent players
     public List<String> silentPlayers() { return cfg.getStringList("alerts.silent_players"); }
-    public void setSilentPlayers(List<String> players) { cfg.set("alerts.silent_players", players); asyncSaver.saveAsync(); }
+    public void setSilentPlayers(List<String> players) { cfg.set("alerts.silent_players", players); markAndSave(); }
 
     // Save
-    public void saveSyncOnShutdown() { asyncSaver.saveSyncOnShutdown(); }
+
+    /** Record that the plugin changed a value, then persist it. */
+    private void markAndSave() {
+        pluginModified.set(true);
+        asyncSaver.saveAsync();
+    }
+
+    /**
+     * Write the config on shutdown — but only if the plugin has something of its own to
+     * write. Otherwise the file on disk is the admin's, and it stays theirs.
+     */
+    public void saveSyncOnShutdown() {
+        if (!pluginModified.get()) return;
+        asyncSaver.saveSyncOnShutdown();
+    }
 }

@@ -52,9 +52,20 @@ public class WorldChecker implements Listener {
     // FastBreak: when the player started digging which block
     private final Map<UUID, DigState> digStart = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> consecutiveFastBreak = new ConcurrentHashMap<>();
-    // Nuker/FastPlace: consecutive one-second windows over the rate limit
-    private final Map<UUID, Integer> consecutiveNuker = new ConcurrentHashMap<>();
-    private final Map<UUID, Integer> consecutiveFastPlace = new ConcurrentHashMap<>();
+    // Nuker/FastPlace: one-second windows over the rate limit, counted within a time window.
+    // State: [0]=count, [1]=timestamp of the last over-limit window (ms).
+    //
+    // These are the only rate checks whose counter cannot be reset by an ordinary event:
+    // a window that stays UNDER the limit produces no event at all here — the counters are
+    // only touched on the would-flag path — so a plain counter never came down again and
+    // single bursts simply accumulated over a session. Three vein-miner uses hours apart
+    // then read as "the rate was held up", which is exactly what the requirement was meant
+    // to exclude. CombatChecker solves the same problem the same way (see its bumpStreak).
+    private final Map<UUID, long[]> nukerStreak = new ConcurrentHashMap<>();
+    private final Map<UUID, long[]> fastPlaceStreak = new ConcurrentHashMap<>();
+    // How long an over-limit window keeps counting towards the next one. A cheat crosses
+    // the limit again within seconds; unrelated bursts are minutes apart.
+    private static final long RATE_STREAK_WINDOW_MS = 10_000L;
 
     private record DigState(long startMs, long expectedMs, String world, int x, int y, int z) {
         boolean matches(Block block) {
@@ -84,6 +95,27 @@ public class WorldChecker implements Listener {
 
     public void setViolationManager(ViolationManager violationManager) {
         this.violationManager = violationManager;
+    }
+
+    private static int bumpStreak(Map<UUID, long[]> map, UUID id) {
+        return bumpStreak(map, id, System.currentTimeMillis(), RATE_STREAK_WINDOW_MS);
+    }
+
+    /**
+     * Over-limit-window streak: increment while the previous one is still recent, restart
+     * once it has lapsed. Returns the current streak length.
+     *
+     * <p>Package-private and taking its clock as an argument, so the lapse rule can be
+     * tested without a test that sleeps for the length of the window.
+     */
+    static int bumpStreak(Map<UUID, long[]> map, UUID id, long now, long windowMs) {
+        long[] st = map.compute(id, (k, v) -> {
+            if (v == null || now - v[1] > windowMs) return new long[]{1, now};
+            v[0]++;
+            v[1] = now;
+            return v;
+        });
+        return (int) st[0];
     }
 
     /** Track when a player starts digging a block (for the per-block FastBreak timing). */
@@ -138,11 +170,11 @@ public class WorldChecker implements Listener {
             int max = config.nukerMaxBreaksPerSecond();
             if (rate > max) {
                 breaks.get(id).clear(); // reset so it must re-accumulate
-                int c = consecutiveNuker.merge(id, 1, Integer::sum);
+                int c = bumpStreak(nukerStreak, id);
                 if (c >= config.nukerViolations()) {
                     handleViolation(player, "NUKER", lang.format("alert.nuker", rate, max), rate,
                             event.getBlock().getLocation());
-                    consecutiveNuker.put(id, 0);
+                    nukerStreak.remove(id);
                 }
             }
         }
@@ -192,12 +224,13 @@ public class WorldChecker implements Listener {
             int max = config.fastPlaceMaxPerSecond();
             if (rate > max) {
                 places.get(id).clear();
-                // Same reasoning as Nuker: one bundled window is not evidence.
-                int c = consecutiveFastPlace.merge(id, 1, Integer::sum);
+                // Same reasoning as Nuker: one bundled window is not evidence, and windows
+                // far apart are not a streak.
+                int c = bumpStreak(fastPlaceStreak, id);
                 if (c >= config.fastPlaceViolations()) {
                     handleViolation(player, "FASTPLACE", lang.format("alert.fastplace", rate, max), rate,
                             event.getBlock().getLocation());
-                    consecutiveFastPlace.put(id, 0);
+                    fastPlaceStreak.remove(id);
                 }
             }
         }
@@ -269,7 +302,7 @@ public class WorldChecker implements Listener {
         consecutiveScaffold.remove(playerId);
         digStart.remove(playerId);
         consecutiveFastBreak.remove(playerId);
-        consecutiveNuker.remove(playerId);
-        consecutiveFastPlace.remove(playerId);
+        nukerStreak.remove(playerId);
+        fastPlaceStreak.remove(playerId);
     }
 }

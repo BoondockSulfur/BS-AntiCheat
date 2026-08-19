@@ -69,6 +69,15 @@ public class VehicleChecker implements Listener {
     // the allowance would collapse to the base speed mid-hop while the momentum persists.
     private final Map<UUID, double[]> recentIce = new ConcurrentHashMap<>();
     private static final long ICE_MOMENTUM_GRACE_MS = 3000;
+    // Start of the current speed sample. Speed is measured across a fixed span of real time
+    // instead of per move event, for the reason documented on the elytra check: a move event
+    // is not reliably one tick, and a packet gap while riding over loading chunks delivers a
+    // single event carrying several ticks of travel. Multiplying that by 20 invents speed
+    // that was never driven. Dividing by the time that actually passed makes a gap harmless,
+    // because distance and elapsed time grow together.
+    private final Map<UUID, Location> speedSampleFrom = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> speedSampleAt = new ConcurrentHashMap<>();
+    private static final long SPEED_SAMPLE_WINDOW_MS = 250;
     // A single vehicle move larger than this is a teleport (Multiverse portal, /tp of a
     // ridden horse, a plugin repositioning the boat), not movement. Vanilla vehicles stay
     // far below one block per tick; the elytra-class speeds do not apply to vehicles.
@@ -130,6 +139,7 @@ public class VehicleChecker implements Listener {
         if (ServerLoad.isLagging(config)) {
             consecutiveBoatFly.remove(playerId);
             consecutiveVehicleSpeed.remove(playerId);
+            resetSpeedSample(playerId);
             return;
         }
 
@@ -138,6 +148,7 @@ public class VehicleChecker implements Listener {
         if (from.distance(to) > VEHICLE_TELEPORT_DISTANCE) {
             consecutiveBoatFly.remove(playerId);
             consecutiveVehicleSpeed.remove(playerId);
+            resetSpeedSample(playerId);
             return;
         }
 
@@ -172,8 +183,26 @@ public class VehicleChecker implements Listener {
             }
         }
 
-        // --- Vehicle speed: per-event distance is ~one tick of movement → ×20 = b/s ---
-        double bps = from.distance(to) * 20.0;
+        // --- Vehicle speed, averaged over a real elapsed window (see the field comment) ---
+        long now = System.currentTimeMillis();
+        Location sampleFrom = speedSampleFrom.get(playerId);
+        Long sampleAt = speedSampleAt.get(playerId);
+        // Open a new window: no baseline yet, a world change, or a stale one (the player
+        // stopped riding in between, so the two points are not connected by one journey).
+        if (sampleFrom == null || sampleAt == null || sampleFrom.getWorld() == null
+                || !sampleFrom.getWorld().equals(to.getWorld())
+                || now - sampleAt > SPEED_SAMPLE_WINDOW_MS * 4) {
+            speedSampleFrom.put(playerId, to.clone());
+            speedSampleAt.put(playerId, now);
+            return;
+        }
+        long elapsed = now - sampleAt;
+        if (elapsed < SPEED_SAMPLE_WINDOW_MS) return; // keep accumulating
+
+        double bps = sampleFrom.distance(to) / (elapsed / 1000.0);
+        speedSampleFrom.put(playerId, to.clone());
+        speedSampleAt.put(playerId, now);
+
         double max = maxSpeedFor(vehicle, iceMult)
                 * dev.boondock.bsanticheat.util.CheckMath.pingSlack(effectivePing(player));
 
@@ -205,6 +234,13 @@ public class VehicleChecker implements Listener {
             }
         }
         return true;
+    }
+
+    /** Drop the speed baseline, so the next move opens a fresh window instead of measuring
+     *  across a teleport or a lag pause. */
+    private void resetSpeedSample(UUID playerId) {
+        speedSampleFrom.remove(playerId);
+        speedSampleAt.remove(playerId);
     }
 
     /** Ice multiplier within 3 blocks below the boat (shared scan, vehicle constants). */
@@ -258,5 +294,6 @@ public class VehicleChecker implements Listener {
         consecutiveBoatFly.remove(playerId);
         consecutiveVehicleSpeed.remove(playerId);
         recentIce.remove(playerId);
+        resetSpeedSample(playerId);
     }
 }

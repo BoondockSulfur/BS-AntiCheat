@@ -118,6 +118,7 @@ alert:
   speed: "Too fast (%s): %.2f b/t (max %.2f)"
   fly: "Illegal flight: %.2f b/t (max %.2f)"
   hover: "Hovering without falling (%d checks)"
+  sustained_ascent: "Climbing that gravity cannot explain: %.2f b/t, not slowing"
   groundspoof: "GroundSpoof: claims on-ground while airborne"
   noslow: "NoSlow: %.2f b/t while using an item (max %.2f)"
   jesus: "Jesus: walking on water"

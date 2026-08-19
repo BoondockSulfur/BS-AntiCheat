@@ -118,6 +118,7 @@ alert:
   speed: "Zu schnell (%s): %.2f b/t (Max: %.2f)"
   fly: "Illegales Fliegen: %.2f b/t (Max: %.2f)"
   hover: "Schwebt ohne zu fallen (%d Messungen)"
+  sustained_ascent: "Steigt ohne Schwerkraft: %.2f B/t, ohne abzubremsen"
   groundspoof: "GroundSpoof: behauptet Bodenkontakt in der Luft"
   noslow: "NoSlow: %.2f b/t waehrend Item-Benutzung (Max: %.2f)"
   jesus: "Jesus: laeuft auf Wasser"

@@ -47,6 +47,13 @@ anticheat:
   speed_detection: true
   fly_detection: true
   groundspoof_detection: true
+  # Sustained ascent — OFF by default. The hover check counts only genuine hanging (vertical
+  # movement inside one tick of gravity), because a climb is not hovering: a wind charge, a
+  # Wind Burst mace or a Breeze throws players upwards for longer than any knockback grace
+  # lasts. This check watches the gap that leaves — a climb that does NOT shed vertical speed
+  # the way gravity requires, i.e. one nothing threw. Calibrate with debug_mode (logs
+  # [ASCENT-DEBUG] dy and decay per sample) before switching it on.
+  sustained_ascent_detection: false
   # NoSlow/Jesus/Spider/Step are FP-prone movement micro-heuristics — OFF by default.
   # Enable them only if you accept occasional false positives (jumping next to a wall,
   # walking while using an item, crossing water fast can trigger them).
@@ -119,6 +126,8 @@ anticheat:
     spider_violations: 8
     step_violations: 5
     step_max_height: 0.75          # vanilla auto-step is 0.6
+    sustained_ascent_violations: 8    # consecutive climbing samples with too little decay (~0.4s)
+    sustained_ascent_min_decay: 0.05  # b/t a real ballistic rise sheds per tick (gravity is 0.08)
     elytra_violations: 3
     scaffold_violations: 3
     # Rate checks: how many one-second windows in a row must exceed the limit. Plugins that

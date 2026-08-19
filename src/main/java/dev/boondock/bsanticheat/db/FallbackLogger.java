@@ -6,7 +6,9 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -47,15 +49,19 @@ public class FallbackLogger {
      * @param type Log type
      * @param value Numeric value
      * @param description Description
+     * @param timeMs When the violation was detected. Passed in rather than read here: the
+     *               fallback receives whole batches at once when the database is failing, so
+     *               stamping at write time gave every entry of an outage the same moment.
      */
-    public void log(String type, double value, String description) {
+    public void log(String type, double value, String description, long timeMs) {
         // Check queue size to prevent memory issues
         if (queue.size() >= MAX_QUEUE_SIZE) {
             plugin.getLogger().warning("[Fallback] Queue full (" + MAX_QUEUE_SIZE + "), dropping entry: " + type);
             return;
         }
 
-        String timestamp = LocalDateTime.now().format(formatter);
+        String timestamp = formatter.format(
+                LocalDateTime.ofInstant(Instant.ofEpochMilli(timeMs), ZoneId.systemDefault()));
         String entry = String.format("%s | %s | %.2f | %s", timestamp, type, value, description);
         queue.offer(entry);
 

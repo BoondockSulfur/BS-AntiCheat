@@ -4,6 +4,166 @@ All notable changes to BSAntiCheat are documented in this file.
 
 ---
 
+## [1.0.5] - 2026-08-18
+
+A code review pass rather than an alert-data pass. 1.0.4 fixed the elytra speed check's
+assumption that one move event equals one tick; this release finds the same assumption in the
+two places it was left standing, and closes three further holes of the same kind — a check
+whose evidence never expires, a guard that covered less ground than it claimed, and state that
+was only maintained on the paths that happened to reach the end of the method.
+
+### Fixed — false positives
+
+- **A move event is no longer treated as one tick.** The ground speed and vertical checks
+  compared a per-event delta against a per-tick threshold (0.4 blocks walking, 3.5 vertical).
+  A move event is not reliably one tick: a client on a poor connection delivers one event
+  carrying several ticks of travel, and judging that as a single tick multiplies the apparent
+  speed by however many ticks were bundled. This is exactly the mistake 1.0.4 removed from the
+  elytra check, where live data caught it as a 110→100 b/s "over-speed" curve from a routine
+  rocket flight; the ground checks carried it unchanged. The delta is now divided by the ticks
+  it actually spans, clamped at one so a sub-tick event is never scaled *up*.
+- **The catch-up move after a packet gap is no longer judged.** Per-tick scaling handles the
+  ordinary case but cannot rescue the pathological one: a stalled connection flushing seconds
+  of backlog produces a single delta large enough for the TELEPORT threshold, which no
+  division makes innocent. A gap over 400 ms now leaves that one move unjudged — the movement
+  counterpart of the rule the Timer check has had since 1.0.4.
+- **Vehicle speed is measured over real elapsed time.** `VehicleChecker` derived blocks per
+  second from one move event × 20, the same assumption again, and a boat crossing loading
+  chunks on an ice highway is precisely the case that breaks it. Speed is now averaged over a
+  250 ms window, so distance and elapsed time grow together.
+- **Nuker and FastPlace evidence now expires.** Both ask for several one-second windows over
+  the rate limit before flagging, so that one bundled window — a vein miner, a burst of place
+  packets — is not evidence. But the counter could only be reset by flagging: a window that
+  stays *under* the limit produces no event on that path at all. The count therefore never
+  came down, and unrelated bursts spread across a session added up until the third one flagged.
+  The windows must now fall within 10 s of each other to count as consecutive, which is what
+  "the rate was held up" was supposed to mean. `CombatChecker` already solved this the same
+  way; these two were the ones that had not.
+- **The unloaded-chunk guard now covers the neighbourhood it reads.** It checked the chunk the
+  player stands in, but the checks behind it read the player's *neighbours*: the ground scan
+  samples all four footprint corners, the fall-slowing and liquid exemptions look sideways,
+  and Spider/Jesus look at the walls. On a chunk border those reach into the next chunk, where
+  an unloaded result reads as "nothing below the player" — and forces a synchronous chunk load
+  from inside a movement handler, which is what Folia forbids. The guard now covers one block
+  of margin in every direction, and the vertical checks stand down (dropping their streaks
+  rather than resuming them across the blind spot) when it is not satisfied.
+
+- **Rising is no longer counted as hovering.** The sustained-hover check counted every sample
+  that was not *falling*, which made a climb indistinguishable from hanging in the air. Live
+  data: four alerts fired while the player was moving UP at 0.12–0.20 b/t in a Trial Chamber —
+  a Breeze, a wind charge or a Wind Burst mace throws a player upwards for far longer than the
+  2 s knockback grace lasts, and the tail of that arc is a slow climb with nothing underneath.
+  Hovering now means what the name says: vertical movement inside one tick of gravity
+  (±0.08 b/t). Falling resets the counter as before; rising does too.
+- **New (opt-in, off by default): sustained ascent.** Narrowing the hover band leaves a slow
+  steady climb unwatched, so `anticheat.sustained_ascent_detection` covers it — by the one
+  thing that separates thrown from flown. A ballistic rise sheds about one tick of gravity of
+  vertical speed every tick and ends within a second or two; a climb that does not decay is
+  not one anything threw. It ships off because it is a heuristic with no live data behind it
+  yet: turn on `debug_mode`, watch the `[ASCENT-DEBUG]` decay values on your own server, then
+  enable it.
+
+### Fixed — other
+
+- **Setback no longer teleports to a stale position.** The movement handler returned early for
+  whitelisted, bypassing, OP-exempt, creative and spectator players without recording where
+  they were. The last known position is what a setback teleports to, so a spell in creative
+  froze it at the point of entry: the first violation after returning to survival sent the
+  player back there, possibly thousands of blocks and many minutes ago. Every exempt path now
+  keeps the baseline current. (Only reachable with `punishments.setback` enabled, which is off
+  by default.)
+- **The PacketFlood alert reports the rate it measured.** It reported the configured limit plus
+  one — the same number every time, from which neither the severity of a logged flood nor a
+  sensible limit could be read afterwards.
+- **Suspending checks under lag is announced.** Below `lag_exempt_tps` nearly every check backs
+  off, so a server sitting at 17 TPS runs with the anticheat effectively switched off. It now
+  logs when it stands down and when it resumes (after five confirming samples, so a server
+  hovering on the threshold does not log every second).
+
+### Fixed — the plugin no longer overwrites config.yml it did not change
+
+The config was saved on every shutdown whether the plugin had changed anything or not, which
+made it the last writer of a file it had not edited. An admin who edits a threshold in
+`config.yml` while the server runs and does not run `/bsac reload` has that edit silently
+replaced by the stale in-memory value at the next stop — and on a server with a scheduled
+restart twice a day, that is within hours, with nothing in the log to explain it. (Observed
+in the field: an `autoclicker_max_cps` change that had reverted to its old value.)
+
+Saving is now tied to the plugin actually having something of its own to write — the whitelist
+and ore-exclusion commands, and the validator repairing an invalid value. Everything else on
+disk stays the admin's. `/bsac reload` is still the way to make an edit take effect while the
+server runs; it just no longer costs you the edit if you forget it.
+
+### Fixed — log rows carry the time of the violation
+
+The `ts` column was left to `CURRENT_TIMESTAMP`, which stamps the moment the row is INSERTed.
+Entries are batched and flushed every 30 s, so every alert in a batch was written with the same
+timestamp, up to half a minute after the fact — visible in the data as clusters of rows sharing
+one second. That is exactly the column one needs to line an alert up against the server log, so
+the detection time is now recorded with the entry and written explicitly (same UTC format the
+default produced; existing rows and queries are unaffected). The fallback logger, which
+receives whole batches at once during a database outage, had the same problem and takes the
+same timestamp.
+
+### Build
+
+- **`maven-compiler-plugin` 3.11.0 → 3.14.0.** 3.11.0 cannot drive a JDK 25 toolchain: its
+  incremental-compile scan throws `CompilerException: ConcurrentModificationException` before
+  javac runs, so `mvn clean package` failed outright on any machine whose default JDK had
+  moved past 21. The bytecode target is unchanged — `release` is still 21.
+
+### Tests
+
+74 → 89. Ascent is covered as a pair, as the FP that must stay silent and the detection that
+must survive it: a ballistic arc raises nothing, genuine hanging still raises FLY, and the
+opt-in ascent check fires on a climb that never slows while ignoring one that does. Config
+ownership is covered byte for byte: Bukkit's `saveConfig()` rewrites YAML in
+its own style, so "was the file written" is directly observable against a fixture that is the
+shipped default verbatim — including the case an admin actually hit, an edit made without a
+reload having to survive the next shutdown. The rate-streak lapse is tested as a pure function with the clock passed in, so it
+does not need a test that sleeps for the length of the window; the per-tick scaling and the
+packet-gap rule are tested as scenarios, each verified to go red against the old behaviour.
+`MovementSequenceTest` now loads the same 3×3 chunk area as `ScenarioBase` — its paths run
+along x=0/z=0, right on a chunk border, which the widened guard correctly refuses to judge.
+
+Not covered end to end: the vehicle speed window, which needs a ridden vehicle MockBukkit
+cannot supply — the same gap `PacketChecker` has.
+
+### Investigated, not changed — elytra over-speed
+
+Seven alerts of 204–311 b/s against the 140 ceiling, one player, one flight of roughly 1300
+blocks. The hypothesis was the same class of bug as the rest of this release: a stalled client
+flushing its backlog delivers real distance with almost no real time attached, and the window
+that closes afterwards reports the lot. It did not survive a test — a stall poisons a single
+window, and the low-speed window the stall itself produces resets the streak before it can
+reach the three consecutive windows the check wants. Repeating the stall does not get there
+either.
+
+The data cannot settle it. Under 1.0.4 the `ts` column was the flush time, so all seven rows
+carry the same batch write and the only bound on the flight is "somewhere inside a 30 s
+window": 1300 blocks in 30 s is ordinary, in 4.5 s it is not. The geometry cannot break the
+tie either — the distance between alert positions and the reported speed both derive from the
+same 250 ms windows, so they agree whether or not the elapsed time was measured correctly.
+
+No change was made. A stall guard on the elytra path would have been a fix for an unproven
+cause, and a 3 s unjudged window after every 400 ms packet gap is something a cheat can ask
+for on purpose. The detection-time fix above is what makes this answerable next time; until
+then the elytra path at least has an end-to-end test that it fires on sustained over-speed,
+which nothing verified before.
+
+Context for anyone reading the same alerts: that player's connection dropped three times in
+five minutes, used `/fly` twice, and the server logged its own `moved too quickly!` in the
+same minute — none of which is proof either way.
+
+### Known limitation (documented, not changed)
+
+AutoClicker cannot distinguish a clicker running at ~20 CPS from a held mouse button. The
+held-button exclusion identifies a held button by its cadence (one swing per server tick,
+50 ms), and an autoclicker set to that rate produces the same packet stream a held button does.
+There is no signal left to separate them at that rate.
+
+---
+
 ## [1.0.4] - 2026-08-15
 
 False-positive fixes derived from live alert data on the Rattenkolonie server. Over one

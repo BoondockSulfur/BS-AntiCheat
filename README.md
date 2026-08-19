@@ -23,6 +23,14 @@ system. Built to be calibrated for *your* server rather than flag your legit pla
 - Exemptions for what looks like flight but is not: towering up (placing your own footing),
   and cobwebs, powder snow or honey walls, which slow a descent below the rate that counts
   as falling
+- Hovering means *hanging* — vertical movement inside one tick of gravity. Being thrown
+  upwards (wind charge, Wind Burst mace, a Breeze) is a climb, not a hover, and outlasts any
+  knockback grace, so it is not counted
+- Speed and vertical deltas are judged **per tick, not per packet** — a move event is not
+  reliably one tick, and a slow connection delivers several ticks of travel in one event.
+  The catch-up move after a packet gap (>400 ms of silence) is skipped entirely
+- Block-reading checks stand down where the surrounding chunks are not in memory, rather than
+  reading "no block found" as "nothing below the player"
 
 **Combat**
 - Reach (measured to the hitbox surface, honours the interaction-range attribute),
@@ -35,7 +43,9 @@ system. Built to be calibrated for *your* server rather than flag your legit pla
 - AutoClicker — CPS from arm-swings, plus opt-in interval-consistency analysis that catches
   slow-but-metronomic clickers. A held mouse button is recognised by its **cadence** (one
   swing per server tick) rather than by its click count, so network jitter cannot push
-  ordinary mining or swinging over the limit
+  ordinary mining or swinging over the limit. The flip side is a blind spot the check cannot
+  close: an autoclicker running at ~20 CPS produces the packet stream a held button produces,
+  because that *is* one swing per tick. Above that rate the cadence separates them again
 - BadPackets, Timer, crash protection (oversized book/sign packets), packet-flood
 
 **Vehicle** — Boat-Fly and per-type vehicle speed (via `VehicleMoveEvent`)
@@ -56,8 +66,9 @@ player-placed-ore exclusion. Three things keep honest miners out of it:
 **Inventory** — InventoryMove, ChestStealer, FastUse, BowSpam, AutoTotem
 
 > **Opt-in / off by default** (enable in `config.yml` if you want them): NoSlow, Jesus,
-> Spider, Step, AutoBlock, Velocity/AntiKnockback, the KillAura rotation-GCD check and the
-> AutoClicker consistency analysis. These are inherently false-positive-prone — calibrate
+> Spider, Step, AutoBlock, Velocity/AntiKnockback, sustained ascent (a climb that does not
+> decay the way gravity requires — the counterpart to hover only counting genuine hanging),
+> the KillAura rotation-GCD check and the AutoClicker consistency analysis. These are inherently false-positive-prone — calibrate
 > them with `debug_mode` before switching them on.
 >
 > **Criticals** is off for a different reason: the server only awards a critical hit to a
@@ -92,7 +103,7 @@ asserted: until 1.0.3 a missing PacketEvents actually prevented the plugin from 
 
 ## Installation
 
-1. Drop `BSAntiCheat-1.0.4.jar` into `plugins/`.
+1. Drop `BSAntiCheat-1.0.5.jar` into `plugins/`.
 2. (Recommended) Install **PacketEvents** for the packet-level checks.
 3. Start the server, then edit `plugins/BSAntiCheat/config.yml` and run `/bsac reload`.
 
@@ -112,6 +123,11 @@ Everything lives in `config.yml`. A few things worth knowing:
 - **`anticheat.thresholds.*`** — per-check violation counts and thresholds, all tunable via `/bsac reload`.
 - **`anticheat.transaction_interval_ticks`** — how often the latency system pings each player.
   Pure per-player packet overhead; raise it on high-population servers. Applied at startup.
+
+> **Editing `config.yml` on a running server:** the plugin only writes the file when it has
+> changed something itself (whitelist/ore commands, or repairing an invalid value), so your
+> edits are safe from being overwritten at shutdown. They still do not take effect until
+> `/bsac reload` — or the next restart.
 
 **Calibration workflow:** set `debug_mode: true` and `punishments.enabled: false`, watch the
 debug values while playing, tune `anticheat.thresholds.*`, apply with `/bsac reload` (no restart),
@@ -167,9 +183,11 @@ back to what the player was actually doing. If you find one, the alert text and
 ## Building
 
 ```bash
-mvn clean package    # → target/BSAntiCheat-1.0.4.jar
-mvn test             # 74 tests
+mvn clean package    # → target/BSAntiCheat-1.0.5.jar
+mvn test             # 89 tests
 ```
+
+Builds on JDK 21 or later; the bytecode target is 21 regardless of the JDK used.
 
 Tests cover the decision logic directly (interval statistics, deposit clustering, ore
 visibility, latency slack) and run scenarios through real event sequences against

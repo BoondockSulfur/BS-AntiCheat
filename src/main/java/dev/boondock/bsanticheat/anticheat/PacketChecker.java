@@ -267,14 +267,18 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
             }
             st[1]++;
             if (st[1] > config.packetFloodMaxPerSecond()) {
+                // Read the count BEFORE the window is restarted below. The alert used to
+                // report the configured limit plus one, which is the same number every time
+                // and says nothing about what was actually seen — a logged flood could not
+                // be told apart from a marginal one afterwards, nor the limit tuned from it.
+                long observed = st[1];
                 long over = ++st[2];
                 st[0] = now;
                 st[1] = 0;
                 if (over >= config.packetFloodWindows()) {
                     st[2] = 0;
-                    long rate = config.packetFloodMaxPerSecond() + 1;
                     String name = user.getName();
-                    flagSimple(id, name, "PACKETFLOOD", lang.format("alert.packetflood", rate), rate);
+                    flagSimple(id, name, "PACKETFLOOD", lang.format("alert.packetflood", observed), observed);
                 }
             }
         }

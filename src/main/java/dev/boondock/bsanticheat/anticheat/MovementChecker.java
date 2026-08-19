@@ -122,6 +122,19 @@ public class MovementChecker implements Listener {
     private final Map<UUID, double[]> recentIce = new ConcurrentHashMap<>();
     private static final long ICE_MOMENTUM_GRACE_MS = 2500;
 
+    // What counts as "hanging in the air". One tick of vanilla gravity is 0.08 blocks, so a
+    // player whose vertical movement stays inside this band is neither falling nor climbing —
+    // which is what hovering means. The check used to treat everything that was not FALLING as
+    // hovering, so every ascent counted: live data showed four hover alerts fired while the
+    // player was moving UP at 0.12-0.20 b/t, which no amount of grace tuning would have fixed
+    // because a rise is not the thing the check is looking for.
+    private static final double HOVER_STILL_BAND = 0.08;
+
+    // Sustained-ascent state (opt-in check): last vertical speed and how many samples in a row
+    // rose without the decay gravity imposes.
+    private final Map<UUID, Double> lastAscentDy = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> consecutiveAscent = new ConcurrentHashMap<>();
+
     // Ground-scan depths: nothing supportive within 2 blocks = clearly airborne (hover),
     // within 3 = high above ground (GroundSpoof). One scan to the deeper limit serves both.
     private static final int AIRBORNE_SCAN_DEPTH = 2;
@@ -493,22 +506,37 @@ public class MovementChecker implements Listener {
         // The per-move work is bounded (arithmetic + a few block lookups), so full coverage
         // is cheap even with many players.
 
-        // Skip checks for exempt players
+        // Skip checks for exempt players.
+        //
+        // Every one of these returns still records the position. The bookkeeping is not
+        // optional just because no check ran: the last known position is what a setback
+        // teleports to, and leaving it untouched while an exempt player moves means a
+        // creative-mode flight (or a bypass period) freezes the baseline where it started.
+        // The first violation after they return to survival then teleports them back there,
+        // which can be thousands of blocks and minutes ago.
         if (isPlayerWhitelisted(player)) {
             if (config.debugMode()) {
                 plugin.getLogger().fine("[AC] " + player.getName() + " is whitelisted, skipping");
             }
+            rebaseline(playerId, to);
             return;
         }
 
         // Check OPs bypass
         if (player.isOp() && config.opsBypass()) {
+            rebaseline(playerId, to);
             return;
         }
 
         // Defaults to false, so OPs never get it implicitly — an explicit grant is meant.
-        if (player.hasPermission("bsanticheat.bypass")) return;
-        if (player.getGameMode() == GameMode.CREATIVE || player.getGameMode() == GameMode.SPECTATOR) return;
+        if (player.hasPermission("bsanticheat.bypass")) {
+            rebaseline(playerId, to);
+            return;
+        }
+        if (player.getGameMode() == GameMode.CREATIVE || player.getGameMode() == GameMode.SPECTATOR) {
+            rebaseline(playerId, to);
+            return;
+        }
 
         // Determine movement type
         MovementType moveType = getMovementType(player);
@@ -554,20 +582,45 @@ public class MovementChecker implements Listener {
         }
 
         // A move is only judged when there is a usable baseline, the samples aren't
-        // microscopically close together, and no grace window is active. Note this is a
-        // condition, not an early return: the position bookkeeping at the end of the method
-        // must run either way, otherwise the last known position goes stale and a later
-        // setback would teleport the player seconds back in time.
+        // microscopically close together, no packet gap sits in between, and no grace window
+        // is active. Note this is a condition, not an early return: the position bookkeeping
+        // at the end of the method must run either way, otherwise the last known position
+        // goes stale and a later setback would teleport the player seconds back in time.
+        //
+        // The gap condition is the movement-side counterpart of the Timer check's: silence
+        // this long is a stalled connection, and what follows is the client flushing its
+        // backlog. Judging that catch-up means judging several ticks of travel as if they
+        // were one — which is how a routine flight over loading chunks produced a 110 b/s
+        // "over-speed" curve before 1.0.4. The per-tick scaling below handles the ordinary
+        // case; this rules out the pathological one, where the delta is large enough for the
+        // TELEPORT threshold that no scaling protects.
         boolean judge = lastLoc != null && lastTime != null && from.getWorld().equals(to.getWorld())
                 && (now - lastTime) / 1000.0 >= Constants.MOVEMENT_MIN_TIME_DELTA
+                && (now - lastTime) <= Constants.MOVEMENT_MAX_GAP_MS
                 && !hasMovementImmunity(player, playerId, now);
 
         if (judge) {
-            // Calculate movement
+            // Calculate movement. The raw distance answers the teleport check — that one asks
+            // how far the player jumped, not how fast they were going.
             Vector movement = to.toVector().subtract(from.toVector());
+            double totalDist = from.distance(to);
+
+            // Everything else below is a per-TICK rate compared against a per-tick threshold
+            // (0.4 blocks walking, 3.5 vertical, …), so the delta has to be divided by the
+            // ticks it actually spans. A move event is not reliably one tick: the client may
+            // send several position packets within a tick, and a slow connection delivers one
+            // event carrying several ticks of travel. Treating the latter as a single tick is
+            // the mistake the elytra check was built on until 1.0.4; the ground and vertical
+            // checks carried it unchanged.
+            //
+            // Clamped at one tick, so sub-tick events are never scaled UP: that direction
+            // would invent speed rather than remove it, and the whole point is to be
+            // conservative about deltas whose duration is uncertain.
+            double moveTicks = Math.max(1.0, (now - lastTime) / 50.0);
+            if (moveTicks > 1.0) movement.multiply(1.0 / moveTicks);
+
             double horizontalDist = Math.sqrt(movement.getX() * movement.getX() + movement.getZ() * movement.getZ());
             double verticalDist = Math.abs(movement.getY());
-            double totalDist = from.distance(to);
 
             // Get max allowed speed for this movement type
             double maxSpeed = getMaxSpeed(moveType, player);
@@ -649,9 +702,22 @@ public class MovementChecker implements Listener {
                 consecutiveNoSlow.remove(playerId);
             }
 
+            // Every check below reads blocks, and several of them read the player's
+            // NEIGHBOURS: the ground scan samples all four footprint corners, the
+            // fall-slowing and liquid tests look sideways, and Spider/Jesus look at the
+            // walls. Any of those can cross a chunk border, so the guard has to cover the
+            // neighbourhood rather than only the block the player stands in.
+            //
+            // Two things go wrong without it. An unloaded chunk has no blocks to find, so
+            // the scan reports "nothing below the player" for someone standing on perfectly
+            // solid ground the server has not got in memory yet. And reading it forces a
+            // synchronous chunk load from inside a movement handler — which is exactly what
+            // Folia forbids, and it was only ever avoided for the centre column.
+            boolean chunkKnown = neighbourhoodLoaded(to);
+
             // Vertical/fly checks only apply to on-foot movement. Swimming and
             // climbing have their own vertical physics and would false-positive.
-            if (groundType) {
+            if (groundType && chunkKnown) {
                 // (slimeGrace is computed above, where the horizontal checks can see it too —
                 // a bounce launches far higher and further than the 2-block scan can follow.)
 
@@ -673,19 +739,13 @@ public class MovementChecker implements Listener {
                         || isInFallSlowingBlock(player)
                         || isNearLiquid(player) || slimeGrace || nearBubble;
 
-                // An unloaded chunk has no blocks to find, so the scan would report "nothing
-                // below the player" for someone standing on perfectly solid ground that the
-                // server has not got in memory yet — and reading it would force a synchronous
-                // load from a movement handler, which is exactly what Folia forbids.
-                boolean chunkKnown = to.getWorld() != null
-                        && to.getWorld().isChunkLoaded(to.getBlockX() >> 4, to.getBlockZ() >> 4);
-
                 // One ground scan answers both vertical checks: "clearly airborne" (hover)
                 // and "high above ground" (GroundSpoof) differ only in the depth they
                 // accept. Scanning twice cost 35 block lookups per movement packet.
-                boolean wantsFlyScan = config.flyDetectionEnabled() && !flyExempt && chunkKnown;
+                // (The chunk neighbourhood is already known to be loaded — see above.)
+                boolean wantsFlyScan = config.flyDetectionEnabled() && !flyExempt;
                 boolean wantsSpoofScan = config.groundSpoofDetectionEnabled() && !flyExempt
-                        && chunkKnown && player.isOnGround();
+                        && player.isOnGround();
                 int support = (wantsFlyScan || wantsSpoofScan)
                         ? supportDepth(player, GROUNDSPOOF_SCAN_DEPTH) : 0;
                 // A block scan cannot see that the player is standing on a BOAT, a minecart,
@@ -722,8 +782,13 @@ public class MovementChecker implements Listener {
                     // falling. Speed potions / sprinting are irrelevant here — only the
                     // vertical state matters, so legitimate fast running is unaffected.
                     if (!flyExempt && !pillarGrace && clearlyAirborne) {
-                        if (movement.getY() < -0.08) {
-                            // Falling under gravity → legitimate, reset
+                        if (Math.abs(movement.getY()) > HOVER_STILL_BAND) {
+                            // Falling under gravity, or rising — neither is hovering. The rise
+                            // matters as much as the fall: a wind charge, a Wind Burst mace or
+                            // a Breeze throws a player upwards for longer than any knockback
+                            // grace lasts, and the tail of that arc is exactly a slow climb
+                            // with nothing underneath. Sustained climbing is judged separately,
+                            // by whether it decays the way gravity requires.
                             consecutiveHoverTicks.remove(playerId);
                         } else {
                             int hover = consecutiveHoverTicks.merge(playerId, 1, Integer::sum);
@@ -738,6 +803,18 @@ public class MovementChecker implements Listener {
                         }
                     } else {
                         consecutiveHoverTicks.remove(playerId);
+                    }
+
+                    // (b2) Sustained ascent (opt-in, off by default). Narrowing the hover band
+                    // above means a climb is no longer counted as hovering — correct, but it
+                    // leaves a slow steady rise unwatched. Gravity is what separates the two:
+                    // a player thrown upwards loses ~0.08 b/t of vertical speed every tick and
+                    // is back down within a second or two, while a flight cheat holds the climb.
+                    if (!flyExempt && !pillarGrace && clearlyAirborne) {
+                        setBack |= checkSustainedAscent(player, playerId, movement.getY(), moveTicks, to);
+                    } else {
+                        lastAscentDy.remove(playerId);
+                        consecutiveAscent.remove(playerId);
                     }
                 }
 
@@ -797,6 +874,18 @@ public class MovementChecker implements Listener {
                 } else {
                     consecutiveStep.remove(playerId);
                 }
+            } else if (groundType) {
+                // On-foot, but the surrounding chunks are not all in memory — typically a
+                // player walking into fresh terrain. Nothing here can be judged without
+                // reading blocks, so the streaks are dropped rather than carried across the
+                // blind spot: resuming a half-built hover count on the far side of it would
+                // flag on evidence that was never actually gathered.
+                consecutiveFlyViolations.remove(playerId);
+                consecutiveHoverTicks.remove(playerId);
+                consecutiveGroundSpoof.remove(playerId);
+                consecutiveJesus.remove(playerId);
+                consecutiveSpider.remove(playerId);
+                consecutiveStep.remove(playerId);
             }
         }
 
@@ -806,6 +895,61 @@ public class MovementChecker implements Listener {
             lastLocations.put(playerId, to.clone());
         }
         lastMoveTime.put(playerId, now);
+    }
+
+    /**
+     * Climbing that gravity cannot explain.
+     *
+     * <p>Ballistic motion has a signature: whatever threw the player upwards, the ascent loses
+     * about one tick of gravity (0.08 blocks) of vertical speed per tick and ends. A cheat
+     * holding a player in a climb does not decay. Only the missing decay is judged here, never
+     * the climb itself — being thrown upwards is ordinary, and a Trial Chamber full of Breezes
+     * does it all day.
+     *
+     * <p>Off by default. It is a heuristic on a check whose false positives have been the
+     * expensive part of this plugin's history, and it wants {@code debug_mode} data from the
+     * server it will run on before it is trusted.
+     *
+     * @return true when the player was set back
+     */
+    private boolean checkSustainedAscent(Player player, UUID playerId, double dy, double moveTicks, Location to) {
+        if (!config.sustainedAscentDetectionEnabled()) return false;
+
+        Double previous = lastAscentDy.put(playerId, dy);
+
+        // Not climbing → nothing to judge, and the streak is over.
+        if (dy <= HOVER_STILL_BAND) {
+            consecutiveAscent.remove(playerId);
+            return false;
+        }
+        // A sample spanning several ticks should have decayed by several ticks' worth of
+        // gravity, and the arithmetic for that is guesswork. Skip it rather than guess.
+        if (moveTicks > 1.5 || previous == null) return false;
+
+        double decay = previous - dy;
+        if (decay >= config.sustainedAscentMinDecay()) {
+            consecutiveAscent.remove(playerId); // slowing down like a thrown object should
+            return false;
+        }
+
+        int c = consecutiveAscent.merge(playerId, 1, Integer::sum);
+        if (config.debugMode()) {
+            plugin.getLogger().info(String.format(java.util.Locale.ROOT,
+                    "[ASCENT-DEBUG] %s dy=%.3f decay=%.3f (%d/%d)",
+                    player.getName(), dy, decay, c, config.sustainedAscentViolations()));
+        }
+        if (c < config.sustainedAscentViolations()) return false;
+
+        consecutiveAscent.remove(playerId);
+        if (pistonShoved(to)) return false; // a column of pistons lifts at a constant rate
+        return handleViolation(player, "FLY",
+                lang.format("alert.sustained_ascent", dy), dy, to);
+    }
+
+    /** Record a position as the new baseline without judging the move that led to it. */
+    private void rebaseline(UUID playerId, Location to) {
+        lastLocations.put(playerId, to.clone());
+        lastMoveTime.put(playerId, System.currentTimeMillis());
     }
 
     /**
@@ -950,6 +1094,34 @@ public class MovementChecker implements Listener {
      * client that spoofs its on-ground flag can still evade the hover check — full
      * prevention needs packet-level checks. Main-thread only.
      */
+    /**
+     * True when every chunk a block-reading check might touch is already in memory — the
+     * player's own chunk and those of the eight blocks around them.
+     *
+     * <p>One block of margin is enough for all of them: the ground scan offsets the footprint
+     * corners by 0.3 (more for a scaled player, but still well under a block), and the
+     * sideways tests look exactly one block out. Checking only the centre column left the
+     * corner of a scan free to reach into an unloaded chunk, which both forces a synchronous
+     * load — forbidden on a Folia region thread — and answers "no block here" for ground that
+     * simply has not been read yet.
+     */
+    private static boolean neighbourhoodLoaded(Location loc) {
+        org.bukkit.World world = loc.getWorld();
+        if (world == null) return false;
+        int minChunkX = (loc.getBlockX() - 1) >> 4;
+        int maxChunkX = (loc.getBlockX() + 1) >> 4;
+        int minChunkZ = (loc.getBlockZ() - 1) >> 4;
+        int maxChunkZ = (loc.getBlockZ() + 1) >> 4;
+        // Away from a chunk border all four bounds collapse to the same chunk, so this is a
+        // single isChunkLoaded call in the overwhelmingly common case.
+        for (int cx = minChunkX; cx <= maxChunkX; cx++) {
+            for (int cz = minChunkZ; cz <= maxChunkZ; cz++) {
+                if (!world.isChunkLoaded(cx, cz)) return false;
+            }
+        }
+        return true;
+    }
+
     private int supportDepth(Player player, int maxDepth) {
         if (player.isClimbing()) return 0;
         Location loc = player.getLocation();
@@ -1143,6 +1315,8 @@ public class MovementChecker implements Listener {
         consecutiveElytra.remove(playerId);
         elytraSampleFrom.remove(playerId);
         elytraSampleAt.remove(playerId);
+        lastAscentDy.remove(playerId);
+        consecutiveAscent.remove(playerId);
         recentKnockback.remove(playerId);
         recentTeleport.remove(playerId);
         recentJoin.remove(playerId);

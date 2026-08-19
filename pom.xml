@@ -5,7 +5,7 @@
 
   <groupId>dev.boondock</groupId>
   <artifactId>bsanticheat</artifactId>
-  <version>1.0.4</version>
+  <version>1.0.5</version>
   <name>BSAntiCheat</name>
   <description>AntiCheat plugin for Paper 1.21.x with Movement and XRay detection</description>
 
@@ -158,7 +158,12 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
-        <version>3.11.0</version>
+        <!-- 3.11.0 cannot be used with a JDK 25 toolchain: its incremental-compile scan
+             throws CompilerException: ConcurrentModificationException before javac ever
+             runs, so `mvn clean package` failed on any machine whose default JDK had moved
+             past 21. The release level below is what decides the bytecode target; the
+             plugin version only has to be new enough to drive a modern javac. -->
+        <version>3.14.0</version>
         <configuration>
           <release>21</release>
         </configuration>

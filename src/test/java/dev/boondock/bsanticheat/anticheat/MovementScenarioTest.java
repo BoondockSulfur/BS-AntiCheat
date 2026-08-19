@@ -207,4 +207,52 @@ class MovementScenarioTest extends ScenarioBase {
         walk(player, hover(80.0, 40));
         assertTrue(violations.count("FLY") > 0);
     }
+
+    // ==================== a move event is not one tick ====================
+
+    /** Feed a path through the checker with a chosen pause between events. */
+    private void walkPaced(PlayerMock player, long pauseMs, Location... path) throws InterruptedException {
+        for (int i = 1; i < path.length; i++) {
+            player.teleport(path[i - 1]);
+            checker.onPlayerMove(new PlayerMoveEvent(player, path[i - 1], path[i]));
+            Thread.sleep(pauseMs);
+        }
+    }
+
+    @Test
+    @DisplayName("Move events arriving slowly are judged per tick, not per event")
+    void slowlyArrivingPacketsAreNotSpeed() throws InterruptedException {
+        // The same 1.5 blocks per event that speedIsCaught flags — but spread over four
+        // ticks of real time each, which is what a client on a poor connection delivers.
+        // Per tick that is 0.36 blocks, comfortably inside the walking cap: the player
+        // covered the ground at walking pace, the packets simply arrived in fewer pieces.
+        // Judged per event it reads as 1.5 b/t and flags, which is the bug this holds shut.
+        floor(79, Material.STONE);
+        PlayerMock player = player(0.5, 80.0, 0.5);
+        clearGrace();
+        Location[] path = new Location[10];
+        for (int i = 0; i < 10; i++) path[i] = loc(0.5 + i * 1.5, 80.0, 0.5);
+        walkPaced(player, 210, path); // ~4.2 ticks per event
+        assertEquals(0, violations.count("SPEED"), "slow packets are not a fast player");
+    }
+
+    @Test
+    @DisplayName("The catch-up move after a packet gap is not judged at all")
+    void packetGapIsNotTeleport() throws InterruptedException {
+        // A stalled connection sends nothing for a while and then flushes its backlog. The
+        // resulting single event carries everything the player did meanwhile — far enough
+        // to cross the teleport threshold, which no per-tick scaling can rescue. It must be
+        // skipped outright. The same step without the gap does flag: teleportLikeMoveIsCaught.
+        floor(79, Material.STONE);
+        PlayerMock player = player(0.5, 80.0, 0.5);
+        clearGrace();
+        Location start = loc(0.5, 80.0, 0.5);
+        Location afterStall = loc(20.5, 80.0, 0.5);
+        player.teleport(start);
+        checker.onPlayerMove(new PlayerMoveEvent(player, start, loc(0.7, 80.0, 0.5)));
+        Thread.sleep(600); // longer than Constants.MOVEMENT_MAX_GAP_MS
+        checker.onPlayerMove(new PlayerMoveEvent(player, loc(0.7, 80.0, 0.5), afterStall));
+        assertEquals(0, violations.count("TELEPORT"), "a backlog flush is not a teleport");
+        assertEquals(0, violations.count("SPEED"));
+    }
 }
