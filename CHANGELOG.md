@@ -4,13 +4,14 @@ All notable changes to BSAntiCheat are documented in this file.
 
 ---
 
-## [1.0.5] - 2026-08-18
+## [1.0.5] - 2026-08-20
 
-A code review pass rather than an alert-data pass. 1.0.4 fixed the elytra speed check's
-assumption that one move event equals one tick; this release finds the same assumption in the
-two places it was left standing, and closes three further holes of the same kind — a check
-whose evidence never expires, a guard that covered less ground than it claimed, and state that
-was only maintained on the paths that happened to reach the end of the method.
+A code review pass, then two days of live alert data with `debug_mode` on. 1.0.4 fixed the
+elytra speed check's assumption that one move event equals one tick; this release finds the
+same assumption in the two places it was left standing, and closes several holes of the same
+shape — a check whose evidence never expired, a guard that covered less ground than it
+claimed, state that was only maintained on the paths that reached the end of the method, and
+a rate that measured the network rather than the player.
 
 ### Fixed — false positives
 
@@ -31,6 +32,34 @@ was only maintained on the paths that happened to reach the end of the method.
   second from one move event × 20, the same assumption again, and a boat crossing loading
   chunks on an ice highway is precisely the case that breaks it. Speed is now averaged over a
   250 ms window, so distance and elapsed time grow together.
+- **AutoClicker measures the click rate, not the packet arrival rate.** There are two ways to
+  read a rate off arm-swing packets, and both fail upwards — in different situations. Counting
+  arrivals in a sliding second puts the network in charge of the answer: a connection that
+  delivers a tick's swings in bundles makes the count read whatever the bundling lines up
+  with. Taking the typical interval instead is immune to that, but an interval is not a rate:
+  it spans the whole consistency window, so a short fast burst fills the window with burst
+  intervals and reports the speed *inside* the burst as though it were sustained.
+
+  Both were observed in the field. A player placing blocks was flagged at 26 CPS while the
+  interval median sat at exactly 50.0 ms — one server tick, the held-button cadence — through
+  the entire run-up; the MAD of 49 ms against that median describes a bimodal arrival pattern,
+  half the intervals near 0 ms and half near 100 ms, which is bundling and which also broke
+  the held-button exclusion, since that wants the spread tight. Separately, three alerts of
+  29–30 CPS had arrival counts for the same second of 5, 8 and 10 — a handful of quick clicks
+  in a row, which is an ordinary thing to do.
+
+  The rate is therefore the **smaller of the two** estimates. Neither can fall below the true
+  rate, so the minimum is safe in both directions: bundling is capped by the median, a burst is
+  capped by how many clicks actually arrived, and genuinely sustained fast clicking raises both
+  and is still caught. Note that raising `autoclicker_max_cps` does not help against either
+  artefact — the run-up went through 22, 23, 24 and 25 without pausing.
+- **Rising is no longer counted as hovering.** The sustained-hover check counted every sample
+  that was not *falling*, which made a climb indistinguishable from hanging in the air. Live
+  data: four alerts fired while the player was moving UP at 0.12–0.20 b/t in a Trial Chamber —
+  a Breeze, a wind charge or a Wind Burst mace throws a player upwards for far longer than the
+  2 s knockback grace lasts, and the tail of that arc is a slow climb with nothing underneath.
+  Hovering now means what the name says: vertical movement inside one tick of gravity
+  (±0.08 b/t). Falling resets the counter as before; rising does too.
 - **Nuker and FastPlace evidence now expires.** Both ask for several one-second windows over
   the rate limit before flagging, so that one bundled window — a vein miner, a burst of place
   packets — is not evidence. But the counter could only be reset by flagging: a window that
@@ -48,55 +77,34 @@ was only maintained on the paths that happened to reach the end of the method.
   of margin in every direction, and the vertical checks stand down (dropping their streaks
   rather than resuming them across the blind spot) when it is not satisfied.
 
-- **Rising is no longer counted as hovering.** The sustained-hover check counted every sample
-  that was not *falling*, which made a climb indistinguishable from hanging in the air. Live
-  data: four alerts fired while the player was moving UP at 0.12–0.20 b/t in a Trial Chamber —
-  a Breeze, a wind charge or a Wind Burst mace throws a player upwards for far longer than the
-  2 s knockback grace lasts, and the tail of that arc is a slow climb with nothing underneath.
-  Hovering now means what the name says: vertical movement inside one tick of gravity
-  (±0.08 b/t). Falling resets the counter as before; rising does too.
-- **New (opt-in, off by default): sustained ascent.** Narrowing the hover band leaves a slow
-  steady climb unwatched, so `anticheat.sustained_ascent_detection` covers it — by the one
-  thing that separates thrown from flown. A ballistic rise sheds about one tick of gravity of
-  vertical speed every tick and ends within a second or two; a climb that does not decay is
-  not one anything threw. It ships off because it is a heuristic with no live data behind it
-  yet: turn on `debug_mode`, watch the `[ASCENT-DEBUG]` decay values on your own server, then
-  enable it.
+### Added
 
-- **AutoClicker measures the click rate, not the packet arrival rate.** The rate came from a
-  sliding count of arrival times, which puts the network in charge of the answer: a connection
-  delivering a tick's swings in bundles makes the count read whatever the bundling lines up
-  with. Live evidence, captured with `debug_mode` on: an alert at 26 CPS from a player who was
-  placing blocks, whose interval median sat at exactly 50.0 ms — one server tick, the
-  held-button cadence — through the entire run-up, while the count climbed 14, 15, 16 … 26
-  inside a single second and reset to 1 the moment it flagged. The MAD read 49 ms against that
-  50 ms median, which describes a bimodal arrival pattern: half the intervals near 0 ms, half
-  near 100 ms. That is bundling, and it also broke the held-button exclusion, which wants the
-  spread tight.
-  The rate is now derived from the typical interval — the same robust statistic the
-  held-button test already trusts, and the one that stayed correct throughout. Raising
-  `autoclicker_max_cps` from 22 to 25 had not helped and could not have: the run-up went
-  through 22, 23, 24 and 25 without pausing. All three AutoClicker alerts this plugin has
-  produced (23, 23, 26 CPS) were the same artefact.
-
-  **The median alone is not a rate, and taking it for one caused a regression.** It is measured
-  over the whole consistency window, so a short fast burst fills that window with burst
-  intervals and the median reports the speed *inside* the burst as though it were sustained.
-  Live data after the first fix shipped: three alerts of 29-30 CPS whose arrival count for the
-  same second was 5, 8 and 10 — eight quick clicks in a row, which is an ordinary thing to do,
-  and a case the old arrival counter had never flagged.
-
-  The rate is therefore the **smaller of the two** estimates. Both fail upwards and in
-  different situations — the arrival count under bundling, the median under bursts — and
-  neither can fall below the true rate, so the minimum is safe in both directions. Bundling is
-  capped by the median, a burst is capped by how many clicks actually arrived, and genuinely
-  sustained fast clicking raises both and is still caught.
-
-  (An earlier note here claimed the measured rate could not exceed ~20 CPS, so any cap above
-  that was unreachable. That was wrong — it assumed the median was a per-second rate.)
+- **Sustained ascent (opt-in, off by default).** Narrowing the hover band leaves a slow steady
+  climb unwatched, so `anticheat.sustained_ascent_detection` covers it — by the one thing that
+  separates thrown from flown. A ballistic rise sheds about one tick of gravity of vertical
+  speed every tick and ends within a second or two; a climb that does not decay is not one
+  anything threw. It ships off because it is a heuristic with no live data behind it yet: turn
+  on `debug_mode`, watch the `[ASCENT-DEBUG]` decay values on your own server, then enable it.
 
 ### Fixed — other
 
+- **The plugin no longer overwrites a `config.yml` it did not change.** The config was saved on
+  every shutdown regardless, which made the plugin the last writer of a file it had not edited.
+  An admin who edits a threshold while the server runs and does not run `/bsac reload` had that
+  edit silently replaced by the stale in-memory value at the next stop — on a server with a
+  scheduled restart twice a day, within hours, with nothing in the log to explain it. Saving is
+  now tied to the plugin actually having something of its own to write: the whitelist and
+  ore-exclusion commands, and the validator repairing an invalid value. Everything else on disk
+  stays the admin's. `/bsac reload` is still what makes an edit take effect on a running
+  server; it just no longer costs you the edit if you forget it.
+- **Log rows carry the time of the violation.** The `ts` column was left to `CURRENT_TIMESTAMP`,
+  which stamps the moment the row is INSERTed. Entries are batched and flushed every 30 s, so
+  every alert in a batch shared one timestamp, up to half a minute after the fact — visible in
+  the data as clusters of rows on the same second. That is exactly the column needed to line an
+  alert up against the server log. The detection time is now recorded with the entry and
+  written explicitly, in the same UTC format the default produced, so existing rows and queries
+  are unaffected. The fallback logger, which receives whole batches at once during a database
+  outage, had the same problem and takes the same timestamp.
 - **Setback no longer teleports to a stale position.** The movement handler returned early for
   whitelisted, bypassing, OP-exempt, creative and spectator players without recording where
   they were. The last known position is what a setback teleports to, so a spell in creative
@@ -109,33 +117,24 @@ was only maintained on the paths that happened to reach the end of the method.
   sensible limit could be read afterwards.
 - **Suspending checks under lag is announced.** Below `lag_exempt_tps` nearly every check backs
   off, so a server sitting at 17 TPS runs with the anticheat effectively switched off. It now
-  logs when it stands down and when it resumes (after five confirming samples, so a server
-  hovering on the threshold does not log every second).
+  logs when it stands down and when it resumes, after five confirming samples so a server
+  hovering on the threshold does not log every second.
 
-### Fixed — the plugin no longer overwrites config.yml it did not change
+### Diagnostics
 
-The config was saved on every shutdown whether the plugin had changed anything or not, which
-made it the last writer of a file it had not edited. An admin who edits a threshold in
-`config.yml` while the server runs and does not run `/bsac reload` has that edit silently
-replaced by the stale in-memory value at the next stop — and on a server with a scheduled
-restart twice a day, that is within hours, with nothing in the log to explain it. (Observed
-in the field: an `autoclicker_max_cps` change that had reverted to its old value.)
+`debug_mode` said nothing about the checks whose alerts most needed explaining, so they were
+instrumented:
 
-Saving is now tied to the plugin actually having something of its own to write — the whitelist
-and ore-exclusion commands, and the validator repairing an invalid value. Everything else on
-disk stays the admin's. `/bsac reload` is still the way to make an edit take effect while the
-server runs; it just no longer costs you the edit if you forget it.
-
-### Fixed — log rows carry the time of the violation
-
-The `ts` column was left to `CURRENT_TIMESTAMP`, which stamps the moment the row is INSERTed.
-Entries are batched and flushed every 30 s, so every alert in a batch was written with the same
-timestamp, up to half a minute after the fact — visible in the data as clusters of rows sharing
-one second. That is exactly the column one needs to line an alert up against the server log, so
-the detection time is now recorded with the entry and written explicitly (same UTC format the
-default produced; existing rows and queries are unaffected). The fallback logger, which
-receives whole batches at once during a database outage, had the same problem and takes the
-same timestamp.
+- **ChestStealer** had no debug output at all. It now logs the interval, click type, slot and
+  streak for every counted container click, including the pairs below the physical floor that
+  are deliberately ignored.
+- **The hover check** only logged on `getLogger().fine()`, which the default log level drops.
+  The counting path now logs on INFO: vertical speed, what the ground scan found below the
+  feet, the on-ground flag, the pillar grace and the tick span of the sample.
+- **AutoClicker** logs both rate estimates side by side (`cps=` and `arrivals=`), so a future
+  alert shows at a glance which one is driving it.
+- **The X-Ray "OP is still being checked" notice** fired on every block broken — 2843 identical
+  lines in one debug session, burying what the mode was turned on for. Once per player now.
 
 ### Build
 
@@ -146,38 +145,21 @@ same timestamp.
 
 ### Tests
 
-74 → 94. The bundled-arrival fixture reproduces the live alert's statistics exactly (median
-50.0 ms, MAD 49.0 ms) before asserting that the rate derived from them is 20 rather than 26,
-and that a genuine 38 ms clicker is still read as 26 and not excluded. Ascent is covered as a
-pair, as the FP that must stay silent and the detection that
-must survive it: a ballistic arc raises nothing, genuine hanging still raises FLY, and the
+74 → 96, each behavioural fix verified to go red against the behaviour it replaces.
+
+The AutoClicker fixtures reproduce the live statistics exactly — median 50.0 ms with a MAD of
+49.0 ms for the bundled case, the 33 ms cadence for the burst — and assert the rates that
+follow (20, not 26; 8, not 30) while a genuinely sustained 30 CPS still flags. Ascent is
+covered as a pair: a ballistic arc raises nothing, genuine hanging still raises FLY, and the
 opt-in ascent check fires on a climb that never slows while ignoring one that does. Config
-ownership is covered byte for byte: Bukkit's `saveConfig()` rewrites YAML in
-its own style, so "was the file written" is directly observable against a fixture that is the
-shipped default verbatim — including the case an admin actually hit, an edit made without a
-reload having to survive the next shutdown. The rate-streak lapse is tested as a pure function with the clock passed in, so it
-does not need a test that sleeps for the length of the window; the per-tick scaling and the
-packet-gap rule are tested as scenarios, each verified to go red against the old behaviour.
-`MovementSequenceTest` now loads the same 3×3 chunk area as `ScenarioBase` — its paths run
-along x=0/z=0, right on a chunk border, which the widened guard correctly refuses to judge.
+ownership is covered byte for byte — Bukkit's `saveConfig()` rewrites YAML in its own style,
+so "was the file written" is directly observable against a fixture that is the shipped default
+verbatim, including an edit made without a reload having to survive the next shutdown. The
+rate-streak lapse is tested as a pure function with the clock passed in, so no test has to
+sleep for the length of the window it tests.
 
 Not covered end to end: the vehicle speed window, which needs a ridden vehicle MockBukkit
 cannot supply — the same gap `PacketChecker` has.
-
-### Diagnostics
-
-`debug_mode` turned out to say nothing about two of the checks whose alerts most needed
-explaining, so both were instrumented:
-
-- **ChestStealer** had no debug output at all. It now logs the interval, click type, slot and
-  streak for every counted container click, including the pairs below the physical floor that
-  are deliberately ignored — a live alert of seven clicks at 33 ms could not be judged
-  afterwards, because nothing recorded whether those were clicks or bundled arrivals.
-- **The hover check** only logged on `getLogger().fine()`, which the default log level drops.
-  The counting path now logs on INFO: vertical speed, what the ground scan found below the
-  feet, the on-ground flag, the pillar grace and the tick span of the sample.
-- **The X-Ray "OP is still being checked" notice** fired on every block broken — 2843 identical
-  lines in one debug session, burying what the mode was turned on for. Once per player now.
 
 ### Investigated, not changed — elytra over-speed
 
@@ -201,15 +183,11 @@ for on purpose. The detection-time fix above is what makes this answerable next 
 then the elytra path at least has an end-to-end test that it fires on sustained over-speed,
 which nothing verified before.
 
-Context for anyone reading the same alerts: that player's connection dropped three times in
-five minutes, used `/fly` twice, and the server logged its own `moved too quickly!` in the
-same minute — none of which is proof either way.
-
-### Known limitation (documented, not changed)
+### Known limitation
 
 AutoClicker cannot distinguish a clicker running at ~20 CPS from a held mouse button. The
-held-button exclusion identifies a held button by its cadence (one swing per server tick,
-50 ms), and an autoclicker set to that rate produces the same packet stream a held button does.
+held-button exclusion identifies a held button by its cadence — one swing per server tick,
+50 ms — and an autoclicker set to that rate produces the same packet stream a held button does.
 There is no signal left to separate them at that rate.
 
 ---
