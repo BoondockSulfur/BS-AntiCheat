@@ -40,8 +40,11 @@ system. Built to be calibrated for *your* server rather than flag your legit pla
 - Nuker, FastPlace, Scaffold (blind placement), FastBreak (per-block dig time vs. expected)
 
 **Packet-level** *(requires PacketEvents)*
-- AutoClicker — CPS from arm-swings, plus opt-in interval-consistency analysis that catches
-  slow-but-metronomic clickers. A held mouse button is recognised by its **cadence** (one
+- AutoClicker — the click rate is the smaller of two estimates: how many swings arrived in the
+  last second, and what the typical interval between them implies. A connection that bundles
+  packets inflates the first; a short fast burst inflates the second; the minimum survives
+  both, and sustained fast clicking raises both and is still caught. Plus an opt-in interval-consistency analysis that catches slow-but-metronomic
+  clickers. A held mouse button is recognised by its **cadence** (one
   swing per server tick) rather than by its click count, so network jitter cannot push
   ordinary mining or swinging over the limit. The flip side is a blind spot the check cannot
   close: an autoclicker running at ~20 CPS produces the packet stream a held button produces,
@@ -184,7 +187,7 @@ back to what the player was actually doing. If you find one, the alert text and
 
 ```bash
 mvn clean package    # → target/BSAntiCheat-1.0.5.jar
-mvn test             # 89 tests
+mvn test             # 96 tests
 ```
 
 Builds on JDK 21 or later; the bytecode target is 21 regardless of the JDK used.

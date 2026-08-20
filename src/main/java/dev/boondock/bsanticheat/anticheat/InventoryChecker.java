@@ -270,6 +270,19 @@ public class InventoryChecker implements Listener {
         Long last = lastContainerClick.put(id, now);
         if (last == null) return;
         long interval = now - last;
+
+        // The check had no diagnostic output at all, which made a live alert — seven clicks
+        // at 33 ms — impossible to judge after the fact: nothing recorded whether those were
+        // real clicks or arrivals the network had bundled, nor which kind of click they were.
+        // Logged before the floor test below, so the ignored pairs are visible too.
+        if (config.debugMode()) {
+            plugin.getLogger().info(String.format(java.util.Locale.ROOT,
+                    "[CHEST-DEBUG] %s interval=%dms click=%s slot=%d streak=%d (floor %d, window %d, needs %d)",
+                    player.getName(), interval, click.name(), event.getSlot(),
+                    fastClickStreak.getOrDefault(id, 0),
+                    config.chestStealerMinIntervalMs(), config.chestStealerMaxIntervalMs(),
+                    config.chestStealerMinClicks()));
+        }
         // Below the physical floor the two clicks were delivered in one network bundle,
         // not actually made that fast — neither count nor reset, just ignore the pair.
         // A real ChestStealer clicks at 20-40ms, comfortably above the floor.

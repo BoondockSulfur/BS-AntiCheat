@@ -421,6 +421,7 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
 
         long now = System.currentTimeMillis();
         ConcurrentLinkedDeque<Long> buf = clicks.computeIfAbsent(id, k -> new ConcurrentLinkedDeque<>());
+
         buf.addLast(now);
         long minTime = now - CONSISTENCY_WINDOW_MS;
         Long head;
@@ -430,9 +431,10 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         Long[] times = buf.toArray(new Long[0]);
         int n = times.length;
 
-        // CPS = swings within the last second
-        int cps = 0;
-        for (Long t : times) if (t >= now - WINDOW_MS) cps++;
+        // Swings that arrived inside the last second. Kept for the debug line, but NOT used
+        // to judge: it counts ARRIVALS, and the network decides those. See below.
+        int arrivals = 0;
+        for (Long t : times) if (t >= now - WINDOW_MS) arrivals++;
 
         int maxCps = config.autoClickerMaxCps();
 
@@ -460,10 +462,22 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         double medianInterval = intervals.length >= MIN_INTERVALS_FOR_SD ? median(intervals) : -1;
         boolean heldButton = isHeldButton(intervals);
 
+        // The rate is derived from the TYPICAL INTERVAL, not from how many packets landed in
+        // the last second. A sliding count over arrival times is at the mercy of the network:
+        // when a connection delivers a tick's swings in bundles, the count reads whatever the
+        // bundling happens to line up, while nothing about the clicking changed.
+        //
+        // Live evidence for both halves of that: an alert at 26 CPS whose interval median sat
+        // at exactly 50.0 ms — one tick — through the entire run-up, while the count climbed
+        // 14, 15, 16 … 26 in a single second and reset to 1 the moment it flagged. The median
+        // was right the whole time; the count was not. It is also the same statistic the
+        // held-button test already trusts for the same reason.
+        int cps = cpsFromInterval(medianInterval, arrivals);
+
         if (config.debugMode()) {
             plugin.getLogger().info(String.format(
-                    "[AC-DEBUG] %s cps=%d median=%s mad=%s sd=%s cv=%s outliers=%s held=%b (max %d)",
-                    user.getName(), cps,
+                    "[AC-DEBUG] %s cps=%d arrivals=%d median=%s mad=%s sd=%s cv=%s outliers=%s held=%b (max %d)",
+                    user.getName(), cps, arrivals,
                     medianInterval < 0 ? "n/a" : String.format("%.1fms", medianInterval),
                     medianInterval < 0 ? "n/a"
                             : String.format("%.1fms", medianAbsoluteDeviation(intervals, medianInterval)),
@@ -522,6 +536,33 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         double m = median(intervals);
         return Math.abs(m - TICK_MS) <= HELD_TICK_TOLERANCE_MS
                 && medianAbsoluteDeviation(intervals, m) <= HELD_MAD_MAX_MS;
+    }
+
+    /**
+     * Clicks per second from the typical interval between swings, falling back to the raw
+     * arrival count while there are too few samples for a median to mean anything.
+     *
+     * <p>Package-private and free of server state, so the property that matters can be tested
+     * directly: bundled arrivals must not change the answer.
+     */
+    static int cpsFromInterval(double medianIntervalMs, int arrivalsInWindow) {
+        if (medianIntervalMs <= 0) return arrivalsInWindow;
+        int fromInterval = (int) Math.round(1000.0 / medianIntervalMs);
+        // Both estimates fail upwards, in different situations, so the smaller one is the
+        // only defensible answer.
+        //
+        // The arrival count is inflated by a network that delivers a tick's swings in
+        // bundles — that is what read 26 CPS off a held mouse button. The interval median is
+        // immune to that, but it is not a rate: it is measured over the whole consistency
+        // window, so a short fast burst fills it with burst intervals and the median reports
+        // the speed INSIDE the burst as though it were sustained. Live data: three alerts of
+        // 29-30 CPS where the arrival count for the same second was 5, 8 and 10 — eight quick
+        // clicks in a row, which is an ordinary thing to do.
+        //
+        // Neither can go below the true rate, so min() is safe in both directions: bundling
+        // is capped by the median, a burst is capped by how many clicks actually arrived, and
+        // genuinely sustained fast clicking raises both and is still caught.
+        return Math.min(fromInterval, arrivalsInWindow);
     }
 
     /** Median of a sample, or 0 for an empty one. */

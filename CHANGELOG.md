@@ -63,6 +63,38 @@ was only maintained on the paths that happened to reach the end of the method.
   yet: turn on `debug_mode`, watch the `[ASCENT-DEBUG]` decay values on your own server, then
   enable it.
 
+- **AutoClicker measures the click rate, not the packet arrival rate.** The rate came from a
+  sliding count of arrival times, which puts the network in charge of the answer: a connection
+  delivering a tick's swings in bundles makes the count read whatever the bundling lines up
+  with. Live evidence, captured with `debug_mode` on: an alert at 26 CPS from a player who was
+  placing blocks, whose interval median sat at exactly 50.0 ms — one server tick, the
+  held-button cadence — through the entire run-up, while the count climbed 14, 15, 16 … 26
+  inside a single second and reset to 1 the moment it flagged. The MAD read 49 ms against that
+  50 ms median, which describes a bimodal arrival pattern: half the intervals near 0 ms, half
+  near 100 ms. That is bundling, and it also broke the held-button exclusion, which wants the
+  spread tight.
+  The rate is now derived from the typical interval — the same robust statistic the
+  held-button test already trusts, and the one that stayed correct throughout. Raising
+  `autoclicker_max_cps` from 22 to 25 had not helped and could not have: the run-up went
+  through 22, 23, 24 and 25 without pausing. All three AutoClicker alerts this plugin has
+  produced (23, 23, 26 CPS) were the same artefact.
+
+  **The median alone is not a rate, and taking it for one caused a regression.** It is measured
+  over the whole consistency window, so a short fast burst fills that window with burst
+  intervals and the median reports the speed *inside* the burst as though it were sustained.
+  Live data after the first fix shipped: three alerts of 29-30 CPS whose arrival count for the
+  same second was 5, 8 and 10 — eight quick clicks in a row, which is an ordinary thing to do,
+  and a case the old arrival counter had never flagged.
+
+  The rate is therefore the **smaller of the two** estimates. Both fail upwards and in
+  different situations — the arrival count under bundling, the median under bursts — and
+  neither can fall below the true rate, so the minimum is safe in both directions. Bundling is
+  capped by the median, a burst is capped by how many clicks actually arrived, and genuinely
+  sustained fast clicking raises both and is still caught.
+
+  (An earlier note here claimed the measured rate could not exceed ~20 CPS, so any cap above
+  that was unreachable. That was wrong — it assumed the median was a per-second rate.)
+
 ### Fixed — other
 
 - **Setback no longer teleports to a stale position.** The movement handler returned early for
@@ -114,7 +146,10 @@ same timestamp.
 
 ### Tests
 
-74 → 89. Ascent is covered as a pair, as the FP that must stay silent and the detection that
+74 → 94. The bundled-arrival fixture reproduces the live alert's statistics exactly (median
+50.0 ms, MAD 49.0 ms) before asserting that the rate derived from them is 20 rather than 26,
+and that a genuine 38 ms clicker is still read as 26 and not excluded. Ascent is covered as a
+pair, as the FP that must stay silent and the detection that
 must survive it: a ballistic arc raises nothing, genuine hanging still raises FLY, and the
 opt-in ascent check fires on a climb that never slows while ignoring one that does. Config
 ownership is covered byte for byte: Bukkit's `saveConfig()` rewrites YAML in
@@ -128,6 +163,21 @@ along x=0/z=0, right on a chunk border, which the widened guard correctly refuse
 
 Not covered end to end: the vehicle speed window, which needs a ridden vehicle MockBukkit
 cannot supply — the same gap `PacketChecker` has.
+
+### Diagnostics
+
+`debug_mode` turned out to say nothing about two of the checks whose alerts most needed
+explaining, so both were instrumented:
+
+- **ChestStealer** had no debug output at all. It now logs the interval, click type, slot and
+  streak for every counted container click, including the pairs below the physical floor that
+  are deliberately ignored — a live alert of seven clicks at 33 ms could not be judged
+  afterwards, because nothing recorded whether those were clicks or bundled arrivals.
+- **The hover check** only logged on `getLogger().fine()`, which the default log level drops.
+  The counting path now logs on INFO: vertical speed, what the ground scan found below the
+  feet, the on-ground flag, the pillar grace and the tick span of the sample.
+- **The X-Ray "OP is still being checked" notice** fired on every block broken — 2843 identical
+  lines in one debug session, burying what the mode was turned on for. Once per player now.
 
 ### Investigated, not changed — elytra over-speed
 

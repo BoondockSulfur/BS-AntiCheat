@@ -64,6 +64,9 @@ public class XRayDetector implements Listener {
     // Key: Block location hash, Value: Timestamp when placed
     private final Map<String, Long> playerPlacedBlocks = new ConcurrentHashMap<>();
 
+    // Players already told about (once per session) that OP does not exempt them here.
+    private final Set<UUID> opNoticeLogged = ConcurrentHashMap.newKeySet();
+
     // Recently broken block positions, so an open face can be told from one the player just
     // made. Key: block location hash, Value: when it was broken. Trimmed by the periodic
     // cleanup along with everything else.
@@ -905,7 +908,12 @@ public class XRayDetector implements Listener {
                 if (debug) plugin.getLogger().info("[XRay] " + name + " ist OP und ops_bypass=true -> übersprungen");
                 return true;
             } else {
-                if (debug) plugin.getLogger().info("[XRay] " + name + " ist OP aber ops_bypass=false -> wird geprüft!");
+                // Once per player per session, not once per block broken: this fired on every
+                // single break and put 2843 identical lines into one debug session's log,
+                // burying what the mode was turned on for.
+                if (debug && opNoticeLogged.add(player.getUniqueId())) {
+                    plugin.getLogger().info("[XRay] " + name + " ist OP aber ops_bypass=false -> wird geprüft!");
+                }
             }
         }
 
@@ -952,6 +960,7 @@ public class XRayDetector implements Listener {
     public void cleanup(UUID playerId) {
         playerOreMines.remove(playerId);
         playerStoneMines.remove(playerId);
+        opNoticeLogged.remove(playerId);
     }
 
     /** Timestamp of a player's most recent ore mine, 0 if none (snapshot-safe for COW lists). */

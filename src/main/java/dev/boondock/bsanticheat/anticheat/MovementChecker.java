@@ -792,6 +792,19 @@ public class MovementChecker implements Listener {
                             consecutiveHoverTicks.remove(playerId);
                         } else {
                             int hover = consecutiveHoverTicks.merge(playerId, 1, Integer::sum);
+                            // The hover check's only debug output was on fine(), which the
+                            // default log level drops — so a live alert could not be taken
+                            // apart afterwards. Logged on the counting path only, which is
+                            // bounded by how often a player is genuinely airborne and still.
+                            // `support` is the ground scan's answer: 0-3 = blocks found that
+                            // far below the feet, -1 = nothing within reach.
+                            if (config.debugMode()) {
+                                plugin.getLogger().info(String.format(java.util.Locale.ROOT,
+                                        "[HOVER-DEBUG] %s dy=%.3f support=%d onGround=%b pillarGrace=%b ticks=%.1f (%d/%d)",
+                                        player.getName(), movement.getY(), support,
+                                        player.isOnGround(), pillarGrace, moveTicks,
+                                        hover, config.flyViolationsThreshold()));
+                            }
                             if (hover >= config.flyViolationsThreshold()) {
                                 if (!pistonShoved(to)) {
                                     setBack |= handleViolation(player, "FLY",

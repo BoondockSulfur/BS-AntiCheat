@@ -197,6 +197,11 @@ anticheat:
   # Skilled humans reach ~17-21 by jitter clicking and 20-25 by butterfly clicking, so 22
   # sat inside what a hand can do. Note the count comes from a sliding window over packet
   # ARRIVAL times, which network jitter can lift a little above what was actually clicked.
+  # Raw click rate, taken from the typical interval between arm-swings (not from how many
+  # packets arrive in a second — the network decides those, and bundling used to inflate them).
+  # NOTE: the client sends at most one swing per server tick, so the measured rate cannot
+  # exceed ~20 and any cap above that is unreachable by design. The raw-rate signal is
+  # therefore near-inert; real autoclicker detection is autoclicker_consistency below.
   autoclicker_max_cps: 25
   # AutoClicker pattern analysis (EXPERIMENTAL, off by default): flags overly consistent
   # attack intervals. Can false-positive on held attacks; calibrate with debug_mode before
