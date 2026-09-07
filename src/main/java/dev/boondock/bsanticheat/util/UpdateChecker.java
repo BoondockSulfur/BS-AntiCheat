@@ -72,7 +72,7 @@ public class UpdateChecker {
      */
     private UpdateResult checkModrinth() throws IOException, JsonSyntaxException {
         String apiUrl = MODRINTH_API_BASE + "/project/" + PROJECT_SLUG + "/version";
-        String userAgent = String.format(USER_AGENT_FORMAT, currentVersion);
+        String userAgent = String.format(java.util.Locale.ROOT, USER_AGENT_FORMAT, currentVersion);
 
         URL url = new URL(apiUrl);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -156,9 +156,15 @@ public class UpdateChecker {
             }
         }
 
-        // If no release found, fall back to first version (usually latest)
-        if (!versions.isEmpty()) {
-            return versions.get(0).getAsJsonObject().get("version_number").getAsString();
+        // If no release found, fall back to the first version that actually carries a
+        // number (usually the latest). The same guard as in the loop above: without it this
+        // line dereferences a missing field on exactly the malformed entry the loop skipped,
+        // and the NPE turns a "no stable release" into a generic "check failed".
+        for (int i = 0; i < versions.size(); i++) {
+            JsonObject version = versions.get(i).getAsJsonObject();
+            if (version.has("version_number") && !version.get("version_number").isJsonNull()) {
+                return version.get("version_number").getAsString();
+            }
         }
 
         return null;

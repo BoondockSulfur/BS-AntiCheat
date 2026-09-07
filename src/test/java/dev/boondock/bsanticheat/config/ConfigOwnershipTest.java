@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -82,6 +83,96 @@ class ConfigOwnershipTest {
 
         assertTrue(contents().contains("autoclicker_max_cps: 18"),
                 "the edit must still be there — the plugin had nothing of its own to write");
+    }
+
+    @Test
+    @DisplayName("A merged key brings its explanation with it")
+    void mergedKeysKeepTheirComments() throws Exception {
+        // An admin's file from before the key existed: the line AND the comment block that
+        // introduces it, which is what a file written by an older version actually looks
+        // like. Removing only the line leaves the explanation behind and the assertion below
+        // passes without the merge having done anything — this test failed that way first.
+        java.util.List<String> kept = new java.util.ArrayList<>();
+        java.util.List<String> pendingComments = new java.util.ArrayList<>();
+        for (String line : contents().split("\n", -1)) {
+            if (line.strip().startsWith("#")) {
+                pendingComments.add(line);
+                continue;
+            }
+            if (line.strip().startsWith("xray_max_count_per_vein:")) {
+                pendingComments.clear();   // drop the key and the block above it
+                continue;
+            }
+            kept.addAll(pendingComments);
+            pendingComments.clear();
+            kept.add(line);
+        }
+        kept.addAll(pendingComments);
+        Files.write(configFile.toPath(), String.join("\n", kept).getBytes(StandardCharsets.UTF_8));
+        plugin.reloadConfig();
+        assertFalse(contents().contains("xray_max_count_per_vein"), "fixture check: the key is gone");
+        assertFalse(contents().contains("How much a SINGLE deposit may contribute"),
+                "fixture check: and so is its explanation");
+
+        new PluginConfig(plugin);
+
+        String after = contents();
+        assertTrue(after.contains("xray_max_count_per_vein"), "the missing key has to be merged in");
+        assertTrue(after.contains("How much a SINGLE deposit may contribute"),
+                "and the shipped reasoning has to come with it");
+    }
+
+    @Test
+    @DisplayName("An edited punishment tier is not restored beside the admin's own")
+    void editedTiersAreLeftAlone() throws Exception {
+        // The reported case: "kick messages can't be edited, the plugin sets them back".
+        // The threshold is part of the KEY, so changing 40 to 10 looks to the merge like key
+        // "40" was lost — and it put the shipped tier back, default kick message and all,
+        // next to the admin's own. Everyone changes that threshold, because 40 is far out of
+        // reach for a per-check VL that decays every 5 minutes.
+        // The whole shipped tier block replaced by one of the admin's own, matched
+        // structurally rather than by its text — the defaults are tuning values and change.
+        Files.writeString(configFile.toPath(), contents().replaceAll(
+                "(?m)^    tiers:\\n(?:      .*\\n)+",
+                "    tiers:\n      \"10\":\n        - \"@kick Erwischt: %check%\"\n"));
+        plugin.reloadConfig();
+
+        PluginConfig config = new PluginConfig(plugin);
+
+        assertEquals(java.util.Set.of(10), config.punishmentTiers().keySet(),
+                "the admin's tier is the only one there is");
+        // The list ENTRY, not the word — "@notify" also appears in the comment that
+        // explains it, and that comment is supposed to stay.
+        assertFalse(contents().contains("- \"@notify\""),
+                "no shipped tier may come back into the file");
+    }
+
+    @Test
+    @DisplayName("An ore removed from the X-Ray thresholds stays removed")
+    void removedOreThresholdStaysRemoved() throws Exception {
+        Files.writeString(configFile.toPath(),
+                contents().replaceAll("(?m)^    coal: 30\\n", ""));
+        plugin.reloadConfig();
+
+        new PluginConfig(plugin);
+
+        assertFalse(contents().contains("coal: 30"), "a deleted threshold is a decision, not a gap");
+    }
+
+    @Test
+    @DisplayName("A section missing entirely is still filled in")
+    void absentSectionIsStillMerged() throws Exception {
+        // The other half: skipping admin-owned sections must not disable the merge for a
+        // config that predates the section completely.
+        Files.writeString(configFile.toPath(),
+                contents().replaceAll("(?s)  # Punishment / Violation-Level handling.*?\n  # OP Bypass", "  # OP Bypass"));
+        plugin.reloadConfig();
+        assertFalse(contents().contains("punishments:"), "fixture check: the section is gone");
+
+        PluginConfig config = new PluginConfig(plugin);
+
+        assertFalse(config.punishmentTiers().isEmpty(),
+                "a config from before the feature existed still gets the defaults");
     }
 
     @Test

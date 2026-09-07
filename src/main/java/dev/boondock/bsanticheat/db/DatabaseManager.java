@@ -17,7 +17,8 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -28,7 +29,14 @@ public class DatabaseManager {
     private final Plugin plugin;
     private final PluginConfig config;
     private HikariDataSource ds;
-    private final ConcurrentLinkedQueue<LogEntry> queue = new ConcurrentLinkedQueue<>();
+    /**
+     * Bounded rather than a ConcurrentLinkedQueue guarded by a size check: that check ran on
+     * every single logged violation, and {@code ConcurrentLinkedQueue.size()} walks the whole
+     * queue. Harmless while the queue is short — but it is only ever long during a database
+     * outage, i.e. exactly when every violation would then pay an O(n) scan. The capacity
+     * enforces the same limit in constant time.
+     */
+    private final BlockingQueue<LogEntry> queue = new LinkedBlockingQueue<>(Constants.DB_MAX_QUEUE_SIZE);
     private ScheduledTask flushTask;
     private ScheduledTask cleanupTask;
     private FallbackLogger fallbackLogger;
@@ -37,7 +45,7 @@ public class DatabaseManager {
     private static final int MAX_FAILURES_BEFORE_FALLBACK = 3;
     /** Exactly what SQLite's CURRENT_TIMESTAMP produces: UTC, second resolution. */
     private static final DateTimeFormatter SQLITE_TIMESTAMP =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneOffset.UTC);
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", java.util.Locale.ROOT).withZone(ZoneOffset.UTC);
 
     public DatabaseManager(Plugin plugin, PluginConfig config) {
         this.plugin = plugin;
@@ -85,8 +93,8 @@ public class DatabaseManager {
     }
 
     public void logAsync(String type, double value, String description) {
-        if (queue.size() >= Constants.DB_MAX_QUEUE_SIZE) return;
-        queue.add(new LogEntry(type, value, description, System.currentTimeMillis()));
+        // offer(), not add(): a full queue must drop the entry, not throw into a check.
+        queue.offer(new LogEntry(type, value, description, System.currentTimeMillis()));
     }
 
     private void flushBatchSafe() {
@@ -141,7 +149,9 @@ public class DatabaseManager {
         } catch (SQLException ex) {
             // Hand the polled entries back — otherwise a failed insert loses the whole
             // batch and the fallback logger only ever sees what was left in the queue.
-            queue.addAll(batch);
+            // offer() per entry, not addAll(): addAll on a bounded queue throws once it is
+            // full, which would replace a logging failure with an exception on the way out.
+            for (LogEntry le : batch) queue.offer(le);
             throw ex;
         }
     }

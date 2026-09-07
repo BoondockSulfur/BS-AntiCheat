@@ -58,6 +58,11 @@ public final class PacketIntegration {
         }
 
         PacketChecker checker = new PacketChecker(plugin, config, database, lang);
+        // Carries "did the client actually swing?" from the packet layer to the combat
+        // checks, so an item plugin's ranged ability is not judged as a melee hit.
+        MeleeTracker melee = new MeleeTracker();
+        checker.setMeleeTracker(melee);
+        combatChecker.setMeleeTracker(melee);
         checker.setLuckPerms(luckPerms);
         checker.setGeyser(geyser);
         checker.setAlertManager(alerts);
@@ -80,6 +85,11 @@ public final class PacketIntegration {
                 .registerListener(checker, PacketListenerPriority.NORMAL);
         transactions.start();
         return integration;
+    }
+
+    /** Re-apply config values that are only read when a task is scheduled. */
+    public void reload() {
+        transactionManager.restart();
     }
 
     /** Drop per-player state on disconnect. */

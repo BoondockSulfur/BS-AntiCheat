@@ -1,6 +1,7 @@
 package dev.boondock.bsanticheat.lang;
 
-import org.bukkit.ChatColor;
+import dev.boondock.bsanticheat.util.Messages;
+import net.kyori.adventure.text.Component;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -140,7 +141,15 @@ public class LanguageManager {
      */
     public String get(String key) {
         String message = messages.getOrDefault(key, key);
-        return ChatColor.translateAlternateColorCodes('&', message);
+        // Messages.legacy, not translateAlternateColorCodes: that one knows &0-&f and
+        // nothing else, so &#9863E7 and <#9863E7> reached the player as literal text. One
+        // parser now handles every spelling, here, which is why no call site had to change.
+        return Messages.legacy(message);
+    }
+
+    /** The same message as a component, for call sites that can send one. */
+    public Component component(String key) {
+        return Messages.component(messages.getOrDefault(key, key));
     }
 
     /**
@@ -162,7 +171,7 @@ public class LanguageManager {
     }
 
     /**
-     * Get a translated message formatted with String.format().
+     * Get a translated message formatted with {@code String.format}.
      * @param key The message key
      * @param args Format arguments
      * @return The formatted translated message

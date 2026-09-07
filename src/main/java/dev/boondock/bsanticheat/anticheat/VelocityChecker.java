@@ -91,12 +91,7 @@ public class VelocityChecker implements Listener {
         if (expectedH < Constants.VELOCITY_MIN_KB) return;   // not a real knockback
 
         // Legit reasons a knockback is reduced/blocked
-        // isFlying/getAllowFlight covers survival flight granted by another plugin
-        // (EssentialsX /fly): knockback barely displaces a flying player.
-        if (player.isInWater() || player.isInsideVehicle() || player.isGliding() || player.isRiptiding()
-                || player.isFlying() || player.getAllowFlight() || isOnClimbable(player)) {
-            return;
-        }
+        if (absorbsKnockback(player)) return;
 
         final Location start = player.getLocation().clone();
         final double dirX = v.getX() / expectedH;
@@ -124,6 +119,16 @@ public class VelocityChecker implements Listener {
         if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
         if (!player.getWorld().equals(start.getWorld())) return;
 
+        // The state that legitimately eats a knockback was only sampled when the velocity was
+        // applied — but the verdict is passed several ticks later, and being thrown into water,
+        // onto a vine, or into a boat during exactly those ticks is what a knockback does. The
+        // same test therefore has to hold at BOTH ends of the window.
+        if (absorbsKnockback(player)) return;
+        // Likewise for a wall: the probe at the start only reaches 0.6 blocks ahead, and the
+        // push travels roughly a block in this window, so the obstacle that stopped the player
+        // is frequently one they had not reached yet when it was applied.
+        if (isWall(player.getLocation(), dirX, dirZ)) return;
+
         Location now = player.getLocation();
         double dx = now.getX() - start.getX();
         double dz = now.getZ() - start.getZ();
@@ -133,7 +138,7 @@ public class VelocityChecker implements Listener {
         if (along < expectedH * config.velocityMinApplyRatio()) {
             int c = consecutive.merge(id, 1, Integer::sum);
             if (config.debugMode()) {
-                plugin.getLogger().info(String.format("[VELOCITY-DEBUG] %s applied=%.3f expected>=%.3f (%d/%d)",
+                plugin.getLogger().info(String.format(java.util.Locale.ROOT, "[VELOCITY-DEBUG] %s applied=%.3f expected>=%.3f (%d/%d)",
                         player.getName(), along, expectedH * config.velocityMinApplyRatio(), c, config.velocityViolations()));
             }
             if (c >= config.velocityViolations()) {
@@ -143,6 +148,18 @@ public class VelocityChecker implements Listener {
         } else {
             consecutive.remove(id);
         }
+    }
+
+    /**
+     * True when the player is in a state that legitimately swallows a knockback: water drag,
+     * a vehicle taking the push instead, gliding or riptiding physics, or flight — including
+     * survival flight granted by another plugin (EssentialsX {@code /fly}), which barely
+     * displaces a player at all.
+     */
+    private boolean absorbsKnockback(Player player) {
+        return player.isInWater() || player.isInsideVehicle() || player.isGliding()
+                || player.isRiptiding() || player.isFlying() || player.getAllowFlight()
+                || isOnClimbable(player);
     }
 
     /** True when a solid block sits directly in the knockback direction at body height. */

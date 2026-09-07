@@ -169,7 +169,7 @@ public class WorldChecker implements Listener {
             int rate = recordAndCount(breaks, id);
             int max = config.nukerMaxBreaksPerSecond();
             if (rate > max) {
-                breaks.get(id).clear(); // reset so it must re-accumulate
+                clearWindow(breaks, id); // reset so it must re-accumulate
                 int c = bumpStreak(nukerStreak, id);
                 if (c >= config.nukerViolations()) {
                     handleViolation(player, "NUKER", lang.format("alert.nuker", rate, max), rate,
@@ -194,7 +194,7 @@ public class WorldChecker implements Listener {
                         && actualMs < (long) (expectedMs * config.fastBreakTolerance())) {
                     int c = consecutiveFastBreak.merge(id, 1, Integer::sum);
                     if (config.debugMode()) {
-                        plugin.getLogger().info(String.format("[FASTBREAK-DEBUG] %s actual=%dms expected=%dms (%d/%d)",
+                        plugin.getLogger().info(String.format(java.util.Locale.ROOT, "[FASTBREAK-DEBUG] %s actual=%dms expected=%dms (%d/%d)",
                                 player.getName(), actualMs, expectedMs, c, config.fastBreakViolations()));
                     }
                     if (c >= config.fastBreakViolations()) {
@@ -223,7 +223,7 @@ public class WorldChecker implements Listener {
             int rate = recordAndCount(places, id);
             int max = config.fastPlaceMaxPerSecond();
             if (rate > max) {
-                places.get(id).clear();
+                clearWindow(places, id);
                 // Same reasoning as Nuker: one bundled window is not evidence, and windows
                 // far apart are not a streak.
                 int c = bumpStreak(fastPlaceStreak, id);
@@ -251,7 +251,7 @@ public class WorldChecker implements Listener {
             if (toBlock.lengthSquared() > 1.0e-6) {
                 double angle = Math.toDegrees(look.angle(toBlock));
                 if (config.debugMode()) {
-                    plugin.getLogger().info(String.format("[SCAFFOLD-DEBUG] %s angle=%.0f (max %.0f)",
+                    plugin.getLogger().info(String.format(java.util.Locale.ROOT, "[SCAFFOLD-DEBUG] %s angle=%.0f (max %.0f)",
                             player.getName(), angle, config.scaffoldMaxAngle()));
                 }
                 if (angle > config.scaffoldMaxAngle()) {
@@ -266,6 +266,17 @@ public class WorldChecker implements Listener {
                 }
             }
         }
+    }
+
+    /**
+     * Empty a player's rate window if it is still there. The entry is created by
+     * {@link #recordAndCount} moments earlier, but a disconnect handled on another thread
+     * (Folia runs quit and block events on different threads) can remove it in between —
+     * and {@code map.get(id).clear()} then throws inside a block-break handler.
+     */
+    private static void clearWindow(Map<UUID, ConcurrentLinkedDeque<Long>> map, UUID id) {
+        ConcurrentLinkedDeque<Long> window = map.get(id);
+        if (window != null) window.clear();
     }
 
     /** Add a timestamp, trim to the sliding window and return the current count. */

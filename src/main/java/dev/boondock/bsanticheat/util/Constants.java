@@ -47,7 +47,40 @@ public final class Constants {
     // Raised from 20: cave miners legitimately break the ores they SEE plus little stone,
     // so a small sample flags instantly (21 stone + 3 diamonds = 14%). A meaningful ratio
     // needs a real tunnel-mining sample.
+    /** How much stone marks a player as visibly SEARCHING, over {@link #XRAY_STONE_WINDOW_SECONDS}. */
     public static final int XRAY_MIN_STONE_FOR_RATIO_CHECK = 60;
+    /**
+     * How far back the spoil is counted when deciding whether a player is searching.
+     *
+     * <p>Kept equal to the ore window. Widening it is tempting — digging and extracting are
+     * separated in time, so a miner who tunnels for minutes and then spends one minute pulling
+     * ore out shows almost no spoil in the window that judges the ore. But it does not
+     * separate anything: an X-Ray user tunnels straight from vein to vein and digs just as
+     * much, so a wider window hands THEM the searching exemption too. Measured on real data
+     * (2026-08-22): the honest miner's giveaway is not how much they dug, it is that eleven of
+     * twelve five-minute windows found NOTHING. Spoil volume alone cannot see that.
+     */
+    public static final int XRAY_STONE_WINDOW_SECONDS = 60;
+    /**
+     * How much a single deposit may contribute to a per-ore threshold.
+     * Emptying one thick vein is a single piece of knowledge however many blocks come out of
+     * it, and the hidden-ore test counts every block after the first as hidden (each one is
+     * exposed by breaking its neighbour). Without a cap two fat veins clear a threshold of
+     * ten on their own, which is what {@code xray_min_veins} was meant to prevent and cannot,
+     * because the count it guards stays block-based.
+     */
+    public static final int XRAY_MAX_COUNT_PER_VEIN = 2;
+    // ---- Shape vetoes (see MiningProfile for the measurements these come from) ----
+    /** Stone breaks needed before the shape of the digging says anything at all. */
+    public static final int XRAY_PROFILE_MIN_SAMPLE = 300;
+    /** How far back the shape profile looks. Wider than the ratio window, on purpose. */
+    public static final int XRAY_PROFILE_WINDOW_SECONDS = 300;
+    /** How tightly strip mining holds one level. Measured: 1.1-1.2 for three honest miners. */
+    public static final double XRAY_PROFILE_MAX_Y_STDDEV = 2.0;
+    /** How much of it is corridor rather than open excavation. Measured: 0.75-0.89. */
+    public static final double XRAY_PROFILE_MIN_CORRIDOR = 0.70;
+    /** How far the judged ore may sit from the corridor level. Measured spans: 3.0-3.6. */
+    public static final int XRAY_PROFILE_ORE_BAND = 4;
     public static final int XRAY_MAX_PLAYER_ENTRIES = 5000;
     // Combined rare-ore count (diamond + emerald + ancient debris) that triggers an
     // alert even when no single rare ore exceeded its individual threshold. Raised from
@@ -133,6 +166,12 @@ public final class Constants {
     public static final int REACH_VIOLATIONS = 3;
     // Slack on top of a player's actual entity_interaction_range attribute (vanilla 3.0)
     public static final double REACH_ATTRIBUTE_SLACK = 1.0;
+    /** Sprint speed, used to turn a round trip into the distance a target can have moved. */
+    public static final double SPRINT_BLOCKS_PER_SECOND = 5.6;
+    /** Ceiling on the latency allowance, so the compensation cannot grow without bound. */
+    public static final double REACH_MAX_LATENCY_BLOCKS = 3.0;
+    /** Above this measured round trip the reach check stands down instead of guessing. */
+    public static final int REACH_MAX_PING_MS = 400;
     public static final int KILLAURA_ANGLE_VIOLATIONS = 3;
     // Scaffold: consecutive "not looking at block" places before flagging
     public static final int SCAFFOLD_VIOLATIONS = 3;
@@ -172,9 +211,27 @@ public final class Constants {
     // AutoTotem: inventory-click totem refill faster than any human reaction after a pop
     public static final long AUTOTOTEM_MAX_REACTION_MS = 150L;
 
+    /**
+     * How much vertical speed a hover run may LOSE before it counts as falling instead.
+     * A hover holds its speed; a ballistic arc through the +-0.08 still band is still being
+     * pulled down by gravity, and the apex of a slow arc sits inside that band for many
+     * samples. 0.05 is well under one tick of vanilla gravity (0.08), so anything actually
+     * falling is excluded while a held altitude is not.
+     */
+    public static final double FLY_HOVER_MAX_DROP = 0.05;
+
     // Timer: the balance must stay over the limit this long before it counts. A bundle of
     // packets delivered together spikes it for a few hundred ms; a timer hack holds it.
     public static final long TIMER_SUSTAINED_MS = 1000L;
+    /**
+     * How much the balance must still GROW across the excursion before it counts as a hack.
+     * A connection catching up after a stall drains its backlog and then plateaus; a timer
+     * hack keeps gaining every tick it runs. Duration alone cannot tell those apart, which is
+     * what produced the 2026-08-23 alert on a 1275-1444ms link.
+     */
+    public static final long TIMER_MIN_GROWTH_MS = 150L;
+    /** Ceiling on how far a measured round trip may stretch the excursion window. */
+    public static final long TIMER_MAX_RTT_COMPENSATION_MS = 3000L;
     // PacketFlood: consecutive one-second windows over the limit before flagging. One
     // window is a connection catching up after a stall; an attack floods every window.
     public static final int PACKETFLOOD_WINDOWS = 2;

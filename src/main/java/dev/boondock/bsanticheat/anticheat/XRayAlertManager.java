@@ -102,7 +102,9 @@ public class XRayAlertManager {
      * Send a summary notification to admins.
      */
     private void notifyAdmins(Player suspect, Map<String, Integer> oreBreakdown, List<String> locations) {
-        String message = lang.get("alert.notify_xray", "%player%", suspect.getName());
+        // Resolved against the suspect; see the note in MovementAlertManager.
+        String message = dev.boondock.bsanticheat.util.Messages.placeholders(suspect,
+                lang.get("alert.notify_xray", "%player%", suspect.getName()));
         LegacyComponentSerializer legacy = LegacyComponentSerializer.legacySection();
         Component clickable = legacy.deserialize(message)
                 .clickEvent(ClickEvent.runCommand("/xrayalerts " + suspect.getName()))

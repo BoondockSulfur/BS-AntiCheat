@@ -95,7 +95,22 @@ anticheat:
   # Inventory checks: walking with open container, ChestStealer, FastUse, BowSpam, AutoTotem
   inventory_checks: true
   inventorymove_detection: true
-  cheststealer_detection: true
+  # OFF by default: the model this check uses cannot separate a bot from a player.
+  # It judges the INTERVAL between container clicks, and vanilla shift-drag — hold shift,
+  # hold the left button, sweep across slots — fires one InventoryClickEvent per slot crossed,
+  # at 10-40ms spacing. That is the exact band the check watches, so one hand movement reads
+  # as a burst of inhuman clicking. Measured on this server 2026-08-26: a player sorting
+  # storage for two hours produced 96 alerts; of their fast clicks, 88% landed on a slot
+  # ADJACENT to the previous one, i.e. a mouse path, not a click rate. Running total of the
+  # check's life: 97 alerts, 0 real findings.
+  #
+  # No threshold fixes that — widen the floor past 40ms and the check is dead, keep it below
+  # and it keeps catching sweeps. A ChestStealer's actual signature is a container standing
+  # EMPTY a fraction of a second after it was opened, which is a question about container
+  # state and open duration, not about click spacing. Until it is rebuilt on that, this stays
+  # off: an alert type that is wrong every time teaches everyone to ignore it, and then a real
+  # one goes unnoticed too.
+  cheststealer_detection: false
   fastuse_detection: true
   bowspam_detection: true
   autototem_detection: true
@@ -145,11 +160,31 @@ anticheat:
     # window (10s) — single hits are noisy (latency moves both hitboxes, flick hits are
     # judged against the pre-flick rotation).
     reach_violations: 3
+    # Latency handling for reach. What lag costs this check is not a percentage but a
+    # DISTANCE: the target keeps moving while the hit is in flight, so the error is
+    # speed x time. Measured here 2026-08-27 in a four-way PvP session at 373-1519ms round
+    # trips — a sprinting pair separates by 4.2 to 17.0 blocks in one round trip, the alerts
+    # ran to 14.61, and the old percentage model allowed only 4.7-5.5. Hence an additive
+    # allowance, capped, plus a ceiling above which the check simply stands down: past that
+    # the server cannot tell where either player was, and compensating further would only
+    # build a hole that grows with latency — which a cheat can fake by answering transaction
+    # pings late. NOTE: both numbers are derived from one session and want review against more.
+    reach_max_latency_blocks: 3.0
+    reach_max_ping_ms: 400
     killaura_angle_violations: 3
     criticals_violations: 3
     autoblock_violations: 2
     velocity_violations: 3
     velocity_min_apply_ratio: 0.33   # flag when applied knockback < expected * this
+    # How much vertical speed a hover run may LOSE before it is read as falling rather than
+    # hovering. The hover check counts any sample whose |dy| stays inside a +-0.08 band, and
+    # the apex of a slow arc sits in that band for many samples in a row — so a player simply
+    # being thrown upwards and coming back down accumulated the full count. Live alert
+    # 2026-08-26 on NewBeginnings: dy ran +0.067 -> -0.051 monotonically over all ten samples,
+    # with no potion, no gravity modifier and no teleport behind it. A hover HOLDS its
+    # vertical speed; gravity keeps taking it away. 0.05 is well under one tick of vanilla
+    # gravity (0.08), so real falling is excluded and a held altitude still flags.
+    fly_hover_max_drop: 0.05
     # World
     fastbreak_violations: 3
     fastbreak_tolerance: 0.7       # flag when dig time < expected * this
@@ -171,6 +206,11 @@ anticheat:
 
   # Combat: maximum allowed attack distance (blocks). Vanilla survival reach is ~3.0;
   # a generous default avoids false positives from latency/hitbox. Creative is exempt.
+  # Raising this to accommodate long-reach ITEMS is usually the wrong lever: item plugins
+  # (MMOItems and friends) do not extend melee reach, they add abilities that deal damage
+  # directly at range, and that damage arrives shaped exactly like a melee hit. Those are
+  # recognised by the absence of a client attack packet and skipped entirely — no threshold
+  # involved. Raise this only for genuinely longer SWINGS.
   reach_distance: 4.0
   # KillAura: flag hits landed more than this many degrees off the attacker's aim, or
   # hitting at least killaura_multi_targets distinct entities within a few milliseconds.
@@ -228,6 +268,19 @@ anticheat:
   # down, while a real timer hack holds it up for as long as it runs. Set to 0 to flag on
   # the first crossing (the old behaviour — expect false alerts on poor connections).
   timer_sustained_ms: 1000
+  # Two guards against punishing a bad connection. A link recovering from a stall delivers its
+  # backlog over roughly one round trip, and every packet in that burst credits a full tick
+  # against almost no real time — so the balance climbs for about that long through no fault
+  # of the player, without any single gap being long enough to trigger the stall grace.
+  #
+  # timer_min_growth_ms: the balance must still be GAINING at the end of the excursion. A
+  # catch-up drains and plateaus; a hack keeps climbing every tick it runs.
+  # timer_max_rtt_compensation_ms: caps how far the measured round trip may stretch the
+  # excursion window. The WINDOW is stretched, never the limit — a cheat that answers
+  # transaction pings late to fake latency then only delays its own flag instead of escaping
+  # it, because a hack holds the balance up indefinitely and a catch-up cannot.
+  timer_min_growth_ms: 150
+  timer_max_rtt_compensation_ms: 3000
   # AimSnap: catches a rotation that snaps to a target and back within ~1 tick (look A ->
   # far B -> back near A) — robotic aim used by rotation-spoofing scaffold/killaura. Flags
   # after this many snaps within the window. Raise min_angle / threshold if fast PvP flicks
@@ -245,6 +298,41 @@ anticheat:
   # veins reach ten, and a vein-miner tool takes a whole vein in one action. Knowing where
   # several separate deposits are without searching is the thing X-Ray actually provides.
   xray_min_veins: 3
+  # How much a SINGLE deposit may contribute to a per-ore threshold.
+  # The vein requirement above cannot do its job while the count it guards stays block-based:
+  # three veins of five blocks are fifteen, which clears a threshold of ten while being three
+  # finds, not fifteen. The hidden-ore rule below compounds it — every block of a vein after
+  # the first is exposed by breaking its neighbour, so a whole deposit counts as hidden.
+  # With the cap, emptying one vein counts as one find however many blocks come out of it,
+  # while ten scattered single ores still count ten. Raise it to make the check stricter.
+  xray_max_count_per_vein: 2
+  # How far back spoil is counted, and how much of it marks a player as visibly SEARCHING
+  # (searching players are judged by hit RATE instead of by raw counts — see
+  # xray_stone_ore_ratio).
+  # WARNING before you widen this: it looks like it should be longer than the ore window,
+  # because digging and extracting are separated in time — a miner tunnels for minutes and
+  # then spends one minute pulling ore out, showing almost no spoil in the window that judges
+  # the ore. But an X-Ray user tunnels straight from vein to vein and digs just as much, so a
+  # wider window hands them the same exemption. Raising this weakens the check against exactly
+  # what it is for.
+  xray_stone_window_seconds: 60
+  xray_min_stone_for_ratio: 60
+  # SHAPE VETOES. These can only ever SUPPRESS an alert, never raise one, so they cannot
+  # introduce a false positive. That is deliberate: the counting checks cannot tell a lucky
+  # miner from someone who knew where to walk, and the incriminating side of that has no
+  # confirmed X-Ray sample on this server to calibrate against — the exonerating side does.
+  #
+  # Strip mining is unmistakable in the shape of the digging. Measured over 4.5 months of
+  # this server's block log (three honest strip miners): 84-91% of their stone within one
+  # block of a single Y level, Y standard deviation 1.1-1.2, 75-89% of it in straight
+  # corridors, and their ore inside a 3.0-3.6 block Y band around those corridors.
+  # All four must hold, and the ore must lie in the band — otherwise a player could strip-mine
+  # honestly for ten minutes and have the veto cover the detours that were worth hiding.
+  xray_profile_window_seconds: 300
+  xray_profile_min_sample: 300      # below this the shape says nothing and the veto stands down
+  xray_profile_max_y_stddev: 2.0
+  xray_profile_min_corridor: 0.70
+  xray_profile_ore_band: 4          # blocks the ore may sit from the corridor level
   # Count only ore that was still HIDDEN in rock when it was broken.
   # X-Ray tells someone where ore is that they cannot see, and acting on that means digging
   # to it. Emptying an open cave means taking ore off walls that were visible all along — it
@@ -292,7 +380,15 @@ anticheat:
     enabled: false           # master switch — when false the plugin only alerts/logs
     decay_seconds: 300       # a player loses 1 VL per this many seconds without a violation
     setback: false           # teleport movement violators back to their last valid position
-    # Console commands per VL threshold. Placeholders: %player%, %check%, %vl%
+    # Console commands per VL threshold. Placeholders: %player%, %check%, %vl% — and, with
+    # PlaceholderAPI installed, any other placeholder as well, resolved against the punished
+    # player (so %player_world% says where THEY are).
+    #
+    # Colour codes in a kick REASON are deliberately not touched here: what happens to them
+    # is decided by whichever plugin owns /kick, not by this one. EssentialsX translates
+    # &-codes itself; vanilla's /kick passes the reason through as plain text. Put the colour
+    # in whatever spelling your kick command understands. Messages this plugin sends ITSELF
+    # (alerts, command replies in lang/*.yml) accept every format — see the header there.
     # %check% is the name of the check that flagged, e.g. SPEED, FLY, TELEPORT,
     # GROUNDSPOOF, ELYTRA, NOSLOW, JESUS, SPIDER, STEP, REACH, KILLAURA, CRITICALS,
     # AUTOBLOCK, VELOCITY, NUKER, FASTPLACE, FASTBREAK, SCAFFOLD, BOATFLY,
@@ -300,9 +396,35 @@ anticheat:
     # AUTOCLICKER, BADPACKETS, TIMER, AIMSNAP, CRASHER, PACKETFLOOD,
     # XRAY_THRESHOLD, XRAY_RATIO, XRAY_RARE_ORES, RESTRICTED_ZONE.
     # VL is tracked per check, so a tier fires when ONE check reaches the threshold.
+    #
+    # MIND THE ARITHMETIC when picking a threshold, because these three settings interact and
+    # the shipped 40 is deliberately very high. VL is per check and decays at
+    # decay_seconds, so reaching 40 means 40 alerts from the SAME check, arriving faster than
+    # one per 5 minutes — and each of those alerts already needs the check's own streak first
+    # (reach_violations is 3, so ~120 over-reach hits). On an ordinary server that tier is
+    # never reached, which looks exactly like punishments being broken. If you want them to
+    # act, start somewhere around 8-12 and watch `/bsac info <player>`, which prints the live
+    # VL per check. Every tier that fires is logged as [Punishment].
+    #
+    # "@kick [reason]" and "@notify [text]" are handled by the plugin itself rather than
+    # dispatched as commands. @notify reaches holders of bsanticheat.admin and nobody else —
+    # not "say", which would broadcast to everyone, tell the suspect they have been noticed,
+    # and spam the server for a verdict that may still be a false positive.
+    # Prefer it over a /kick: the reason keeps every colour format (a dispatched command hands
+    # its text to whichever plugin owns /kick, and vanilla's passes it through as plain text),
+    # it needs no such plugin to be installed, and it works the same on Paper and Folia. Leave
+    # the reason off to use punishment.kick_default from lang/<language>.yml, which is
+    # translated and supports line breaks. Everything that is NOT @kick is run as a console
+    # command exactly as before, so /tempban and friends keep working.
+    #
+    # Staggered on purpose. The low step only tells the admins, which costs nothing if the
+    # alert turns out to be a false positive; the kick sits far enough up that a player has to
+    # keep at it. Nothing bans automatically — that decision stays with a human.
     tiers:
-      "40":
-        - "kick %player% AntiCheat: suspicious %check% activity"
+      "12":
+        - "@notify"
+      "25":
+        - "@kick"
 
   # OP Bypass
   ops_bypass: false

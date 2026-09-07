@@ -43,10 +43,16 @@ class CombatScenarioTest extends ScenarioBase {
 
     @Test
     @DisplayName("Hitting from far outside reach raises REACH")
-    void reachIsCaught() {
+    void reachIsCaught() throws InterruptedException {
         PlayerMock attacker = player(0.5, 80.0, 0.5);
         PlayerMock victim = player(20.5, 80.0, 0.5); // 20 blocks away
-        for (int i = 0; i < config.reachViolations() + 2; i++) hit(attacker, victim);
+        // Spaced apart: the same attacker/victim pair inside one tick is now treated as one
+        // swing re-delivered by an item plugin, so a burst in a single millisecond collapses
+        // to a single hit and never builds a streak. Real weapon cooldowns are far longer.
+        for (int i = 0; i < config.reachViolations() + 2; i++) {
+            hit(attacker, victim);
+            Thread.sleep(70);
+        }
         assertTrue(violations.count("REACH") > 0, "20 blocks is far past any reach attribute");
     }
 

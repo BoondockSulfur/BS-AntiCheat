@@ -2,8 +2,12 @@ package dev.boondock.bsanticheat.anticheat;
 
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.enchantments.Enchantment;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -175,6 +179,170 @@ class MovementScenarioTest extends ScenarioBase {
             tick();
         }
         assertEquals(0, violations.count("SPEED"), "being shoved is not moving yourself");
+    }
+
+    // ==================== SPEED in water ====================
+
+    /**
+     * A water channel along +X, tall enough to submerge the player, inside loaded chunks.
+     * MockBukkit's isInWater() is a settable flag rather than a block lookup, so the caller
+     * sets it on the player as well; on a real server the server derives it from these blocks.
+     */
+    private void waterChannel() {
+        for (int x = -2; x <= 31; x++) {
+            for (int z = -2; z <= 2; z++) {
+                setBlock(x, 78, z, Material.STONE);
+                for (int y = 79; y <= 81; y++) setBlock(x, y, z, Material.WATER);
+            }
+        }
+    }
+
+    private void giveDepthStrider(PlayerMock player, int level) {
+        ItemStack boots = new ItemStack(Material.DIAMOND_BOOTS);
+        boots.addUnsafeEnchantment(Enchantment.DEPTH_STRIDER, level);
+        player.getInventory().setBoots(boots);
+    }
+
+    @Test
+    @DisplayName("Depth Strider III plus Dolphin's Grace does not raise SPEED")
+    void fastSwimmingIsQuiet() throws InterruptedException {
+        // Live case, 2026-08-21: twelve SPEED alerts between 0.42 and 2.12 b/t, all labelled
+        // "walking". The player was in water the whole time, but isSwimming() is only true in
+        // the horizontal swim POSE, so the water bonuses below were never reached.
+        waterChannel();
+        PlayerMock player = player(0.5, 80.0, 0.5);
+        player.setInWater(true);
+        giveDepthStrider(player, 3);
+        player.addPotionEffect(new PotionEffect(PotionEffectType.DOLPHINS_GRACE, 600, 0));
+        clearGrace();
+        Location[] path = new Location[20];
+        for (int i = 0; i < 20; i++) path[i] = loc(0.5 + i * 0.77, 80.0, 0.5); // the live peak
+        walk(player, path);
+        assertEquals(0, violations.count("SPEED"), "water physics were never applied");
+    }
+
+    @Test
+    @DisplayName("Wading through water at walking speed does not raise SPEED")
+    void wadingIsQuiet() throws InterruptedException {
+        // The other half of the fix: the swim cap is 0.8x walking, so routing every in-water
+        // move through it would flag someone strolling through a shallow pond. The cap must
+        // never drop below the walking cap.
+        waterChannel();
+        PlayerMock player = player(0.5, 80.0, 0.5);
+        player.setInWater(true);
+        clearGrace();
+        Location[] path = new Location[20];
+        for (int i = 0; i < 20; i++) path[i] = loc(0.5 + i * 0.35, 80.0, 0.5);
+        walk(player, path);
+        assertEquals(0, violations.count("SPEED"), "0.35 b/t is under the walking cap");
+    }
+
+    @Test
+    @DisplayName("Genuine speed hacking in water is still caught")
+    void speedHackInWaterIsCaught() throws InterruptedException {
+        // The exemption is only worth having if it is not a hiding place: 3 b/t is far above
+        // anything Depth Strider and Dolphin's Grace together allow.
+        waterChannel();
+        PlayerMock player = player(0.5, 80.0, 0.5);
+        player.setInWater(true);
+        giveDepthStrider(player, 3);
+        player.addPotionEffect(new PotionEffect(PotionEffectType.DOLPHINS_GRACE, 600, 0));
+        clearGrace();
+        Location[] path = new Location[10];
+        for (int i = 0; i < 10; i++) path[i] = loc(0.5 + i * 3.0, 80.0, 0.5);
+        walk(player, path);
+        assertTrue(violations.count("SPEED") > 0, "3 b/t is over even the swim cap");
+    }
+
+    @Test
+    @DisplayName("Being in water does not switch off the on-foot checks")
+    void waterDoesNotDisarmVerticalChecks() throws InterruptedException {
+        // The water speed bonus is applied to the CAP, not by reclassifying the movement as
+        // SWIMMING. That distinction matters: Step, Spider, GroundSpoof and the hover checks
+        // are all gated on an on-foot movement type, so reclassifying would have handed
+        // anyone standing in a puddle immunity from them.
+        PlayerMock player = player(0.5, 80.0, 0.5);
+        player.setInWater(true);
+        clearGrace();
+        walk(player, hover(80.0, 40));
+        assertTrue(violations.count("FLY") > 0, "water must not disable the hover check");
+    }
+
+    /**
+     * Drive a vertical profile: one move event per given dy, at a fixed X so the horizontal
+     * checks stay quiet.
+     */
+    private void fall(PlayerMock player, double startY, double... dys) throws InterruptedException {
+        double y = startY;
+        // One throwaway event first: the very first move of a session has no baseline to be
+        // judged against, so without it the profile is one sample short of the threshold and
+        // the scenario proves nothing either way.
+        Location seed = loc(0.5, y, 0.5);
+        player.teleport(seed);
+        checker.onPlayerMove(new PlayerMoveEvent(player, seed, loc(0.5, y, 0.5).add(0.001, 0, 0)));
+        tick();
+        for (int i = 0; i < dys.length; i++) {
+            Location from = loc(0.5 + i * 0.01, y, 0.5);
+            y += dys[i];
+            Location to = loc(0.5 + (i + 1) * 0.01, y, 0.5);
+            player.teleport(from);
+            checker.onPlayerMove(new PlayerMoveEvent(player, from, to));
+            tick();
+        }
+    }
+
+    @Test
+    @DisplayName("An arc through the still band is not hovering")
+    void ballisticArcIsNotHover() {
+        // The live alert of 2026-08-26 on NewBeginnings, replayed with its measured dy values.
+        // Every sample sits inside the +-0.08 still band, so the old rule counted all ten and
+        // flagged — but the sequence decays monotonically from +0.067 to -0.051, which is what
+        // gravity does to a thrown player and not what holding an altitude looks like.
+        PlayerMock player = player(0.5, 80.0, 0.5);
+        try {
+            clearGrace();
+            fall(player, 80.0, 0.067, 0.075, 0.053, 0.025, 0.013,
+                    -0.005, -0.023, -0.021, -0.063, -0.051);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        assertEquals(0, violations.count("FLY"),
+                "a decaying arc is falling, however slowly");
+    }
+
+    @Test
+    @DisplayName("A held altitude is still hovering")
+    void heldAltitudeStillFlags() throws InterruptedException {
+        // The other half: the drop rule must not disarm the check. A cheat holding a player
+        // up keeps the vertical speed where it is, so nothing decays away.
+        PlayerMock player = player(0.5, 80.0, 0.5);
+        clearGrace();
+        double[] flat = new double[40];
+        for (int i = 0; i < flat.length; i++) flat[i] = (i % 2 == 0) ? 0.004 : -0.004;
+        fall(player, 80.0, flat);
+        assertTrue(violations.count("FLY") > 0, "a held altitude is exactly what this catches");
+    }
+
+    @Test
+    @DisplayName("A hover entered from a rise is still caught")
+    void hoverEnteredFromRiseStillFlags() throws InterruptedException {
+        // The gap the drop rule opened: it measures against the FIRST sample of the run and
+        // that reference never moves, so a run which once exceeded the limit stayed silent
+        // for its whole length. Entering the still band from a rise (+0.06) and then holding
+        // -0.01 keeps the player inside the +-0.08 band indefinitely with a permanent drop of
+        // 0.07 — a hover that descends 0.2 blocks a second and could never be flagged.
+        // A restart of the run is what closes it, and it costs the arc above nothing.
+        PlayerMock player = player(0.5, 80.0, 0.5);
+        clearGrace();
+        double[] entry = {0.06, 0.03};
+        double[] held = new double[40];
+        java.util.Arrays.fill(held, -0.01);
+        double[] samples = new double[entry.length + held.length];
+        System.arraycopy(entry, 0, samples, 0, entry.length);
+        System.arraycopy(held, 0, samples, entry.length, held.length);
+        fall(player, 80.0, samples);
+        assertTrue(violations.count("FLY") > 0,
+                "a held descent of 0.01 per tick is a hover, not a fall");
     }
 
     // ==================== TELEPORT ====================

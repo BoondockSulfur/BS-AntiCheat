@@ -25,7 +25,7 @@ public class FallbackLogger {
     private final String logFilePath;
     private final ConcurrentLinkedQueue<String> queue = new ConcurrentLinkedQueue<>();
     private final AtomicBoolean isWriting = new AtomicBoolean(false);
-    private final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", java.util.Locale.ROOT);
 
     private static final int MAX_QUEUE_SIZE = 10000;
     private static final int FLUSH_THRESHOLD = 100;
@@ -62,7 +62,7 @@ public class FallbackLogger {
 
         String timestamp = formatter.format(
                 LocalDateTime.ofInstant(Instant.ofEpochMilli(timeMs), ZoneId.systemDefault()));
-        String entry = String.format("%s | %s | %.2f | %s", timestamp, type, value, description);
+        String entry = String.format(java.util.Locale.ROOT, "%s | %s | %.2f | %s", timestamp, type, value, description);
         queue.offer(entry);
 
         // Trigger flush if threshold reached
@@ -98,8 +98,8 @@ public class FallbackLogger {
             try {
                 flush();
             } catch (IOException e) {
-                plugin.getLogger().severe("[Fallback] Failed to write to fallback log: " + e.getMessage());
-                e.printStackTrace();
+                plugin.getLogger().log(java.util.logging.Level.SEVERE,
+                        "[Fallback] Failed to write to fallback log", e);
             } finally {
                 isWriting.set(false);
             }
@@ -111,6 +111,20 @@ public class FallbackLogger {
      */
     private void flush() throws IOException {
         if (queue.isEmpty()) {
+            return;
+        }
+
+        // Drain into a batch FIRST. Polling straight into the writer meant that a failure
+        // part-way through — a full disk, a revoked permission, exactly the situations this
+        // file exists for — had already removed those entries from the queue, so they were
+        // gone for good. This is the last line of defence during a database outage; it must
+        // not be the thing that loses the data.
+        java.util.List<String> batch = new java.util.ArrayList<>();
+        String entry;
+        while ((entry = queue.poll()) != null) {
+            batch.add(entry);
+        }
+        if (batch.isEmpty()) {
             return;
         }
 
@@ -129,19 +143,17 @@ public class FallbackLogger {
                 writer.newLine();
             }
 
-            // Write all queued entries
-            String entry;
-            int count = 0;
-            while ((entry = queue.poll()) != null) {
-                writer.write(entry);
+            for (String line : batch) {
+                writer.write(line);
                 writer.newLine();
-                count++;
             }
-
-            if (count > 0) {
-                plugin.getLogger().info("[Fallback] Wrote " + count + " entries to fallback log");
-            }
+        } catch (IOException e) {
+            // Hand them back so the next flush retries them.
+            queue.addAll(batch);
+            throw e;
         }
+
+        plugin.getLogger().info("[Fallback] Wrote " + batch.size() + " entries to fallback log");
     }
 
     /**
@@ -151,8 +163,8 @@ public class FallbackLogger {
         try {
             flush();
         } catch (IOException e) {
-            plugin.getLogger().severe("[Fallback] Failed to flush on shutdown: " + e.getMessage());
-            e.printStackTrace();
+            plugin.getLogger().log(java.util.logging.Level.SEVERE,
+                    "[Fallback] Failed to flush on shutdown", e);
         }
     }
 }

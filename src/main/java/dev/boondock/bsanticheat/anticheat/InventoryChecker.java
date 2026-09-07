@@ -286,6 +286,17 @@ public class InventoryChecker implements Listener {
         // Below the physical floor the two clicks were delivered in one network bundle,
         // not actually made that fast — neither count nor reset, just ignore the pair.
         // A real ChestStealer clicks at 20-40ms, comfortably above the floor.
+        //
+        // The baseline above advances even for an ignored pair, and must: leaving it in place
+        // would measure the next click that clears the floor against a much older one, so a
+        // single bundle of N arrivals turns into a fan of intervals and the ones landing in
+        // the detection window count as clicks that were never made. That trades a bypass for
+        // a false-positive source, which is the wrong direction for this check.
+        //
+        // The cost is a real blind spot: a client clicking faster than the floor produces
+        // nothing but sub-floor intervals and never starts a streak. Closing it needs the
+        // bundling analysis the AutoClicker check does on arrival CADENCE (see
+        // PacketChecker#isHeldButton), not a change to this floor.
         if (interval < config.chestStealerMinIntervalMs()) return;
         if (interval <= config.chestStealerMaxIntervalMs()) {
             int streak = fastClickStreak.merge(id, 1, Integer::sum);

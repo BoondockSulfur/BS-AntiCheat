@@ -128,9 +128,19 @@ public class AlertPreferenceManager {
      * Cleanup player data on disconnect (non-persistent preferences only).
      */
     public void cleanup(UUID playerId) {
-        // Only remove if not in persistent list
+        // Only remove if not in persistent list.
+        //
+        // startsWith, not contains: an entry is either "uuid" (everything muted) or
+        // "uuid:CATEGORY,CATEGORY" — the same two shapes updatePersistence writes, and which
+        // it also matches by prefix. An exact-string test only ever recognised the first
+        // form, so a player who had muted individual categories counted as non-persistent,
+        // had their preferences dropped on disconnect, and got those alerts back on rejoin
+        // (persistent preferences are only read from the config at startup). UUIDs are
+        // fixed-length, so the prefix cannot match a different player.
         List<String> persistentPlayers = config.silentPlayers();
-        if (!persistentPlayers.contains(playerId.toString())) {
+        String prefix = playerId.toString();
+        boolean persistent = persistentPlayers.stream().anyMatch(e -> e.startsWith(prefix));
+        if (!persistent) {
             mutedCategories.remove(playerId);
         }
     }

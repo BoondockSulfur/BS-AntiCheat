@@ -1,4 +1,16 @@
 # BSAntiCheat - English Language File
+#
+# COLOURS: every common format works, and they can be mixed in one line.
+#   &a &c &l &r              classic codes
+#   &#9863E7                 hex
+#   &x&9&8&6&3&E&7           hex, Spigot's long spelling
+#   <#9863E7> <red> <bold>   MiniMessage, including <gradient:#ff0000:#0000ff>
+# A colour code clears bold/italic the way it always has. Tags that are not colours are
+# left alone, which is why "/bsac <reload|info|version>" below still reads correctly.
+#
+# PLACEHOLDERS: %player%-style ones are filled in by the plugin. If PlaceholderAPI is
+# installed, any other placeholder is resolved too — in alerts and in punishment commands,
+# against the player the message is ABOUT.
 
 general:
   no_permission: "&cYou don't have permission to do that."
@@ -7,8 +19,11 @@ general:
   only_players: "&cThis command can only be used by players."
 
 bsac:
-  usage: "&eUsage: &f/bsac <reload|info|version> [player]"
+  usage: "&eUsage: &f/bsac <reload|info|version|test> [player]"
   version: "&7BSAntiCheat &fv%version%"
+  test_usage: "&eUsage: &f/bsac test <player> <CHECK> [count] &7- raises the level by hand; tiers run for real."
+  test_unavailable: "&cThe violation manager is not available."
+  test_done: "&a%player%&7: &f%check% &7is now at VL &f%vl%&7."
   info_header: "&6=== AntiCheat Info: &f%player% &6==="
   info_none: "&7No active violations."
   info_entry: "&7- &e%check%&7: &f%vl% VL"
@@ -181,3 +196,7 @@ alert:
   discord_position: "Position"
   discord_ores: "Ores"
   discord_positions: "Last positions"
+
+punishment:
+  kick_default: "&c&lAntiCheat\n&7You have been removed for suspicious behaviour.\n&7If you believe this is a mistake, contact a moderator."
+  notify_default: "&e[AC] &f%player% &7reached punishment level &f%vl% &7for &f%check%&7."

@@ -8,6 +8,7 @@ import com.github.retrooper.packetevents.protocol.player.DiggingAction;
 import com.github.retrooper.packetevents.protocol.player.User;
 import com.github.retrooper.packetevents.protocol.world.Location;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientEditBook;
+import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientInteractEntity;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerDigging;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerFlying;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPong;
@@ -66,10 +67,12 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
     private TransactionManager transactionManager;
+    private MeleeTracker meleeTracker;
 
     private final Map<UUID, ConcurrentLinkedDeque<Long>> clicks = new ConcurrentHashMap<>();
     // Timer balance per player: [0]=balance(centi-ms), [1]=last packet time(ms),
-    // [2]=time the balance first went over the limit (0 = currently under)
+    // [2]=time the balance first went over the limit (0 = currently under),
+    // [3]=balance at that moment, so a still-climbing balance can be told from a plateau
     private final Map<UUID, long[]> timerState = new ConcurrentHashMap<>();
     private static final long TICK_MS = 50L;
     // Silence longer than this between movement packets is a stalled connection, not play:
@@ -95,6 +98,10 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     // Below this many intervals the standard deviation is noise, not a signature.
     private static final int MIN_INTERVALS_FOR_SD = 7;
     // KillAura rotation GCD analysis
+    // The three rotation deques below are plain ArrayDeques on purpose: a connection is
+    // bound to one Netty event-loop thread for its lifetime, so every packet of a given
+    // player reaches them serially. Only the enclosing maps are shared across threads
+    // (cleanup removes entries from a region thread), and those are concurrent.
     private final Map<UUID, Float> lastYaw = new ConcurrentHashMap<>();
     private final Map<UUID, Deque<Long>> yawDeltas = new ConcurrentHashMap<>();
     private static final double ROT_EXPANDER = 131072.0;
@@ -108,6 +115,12 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     // as mining (set on START_DIGGING with a safety cap, cleared on FINISH/CANCEL).
     private final Map<UUID, Long> miningUntil = new ConcurrentHashMap<>();
     private static final long MINING_SAFETY_MS = 5000L;
+    // Drop state: holding Q sends a DROP_ITEM every tick, each accompanied by an arm swing,
+    // which read as ~20-26 CPS and false-flagged AutoClicker. Deliberately a SHORT window,
+    // refreshed by every drop packet — a mining-sized 5s window would turn one dropped item
+    // into a five-second free pass for a real clicker.
+    private final Map<UUID, Long> droppingUntil = new ConcurrentHashMap<>();
+    private static final long DROP_SUPPRESSION_MS = 200L;
     // Grace after a teleport/join/respawn/world change. Loading the destination stalls
     // the CLIENT, which then flushes everything it queued in one burst — that burst is
     // what produced the Timer/PacketFlood alerts. MovementChecker has always had these
@@ -140,6 +153,10 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
 
     public void setTransactionManager(TransactionManager transactionManager) {
         this.transactionManager = transactionManager;
+    }
+
+    public void setMeleeTracker(MeleeTracker meleeTracker) {
+        this.meleeTracker = meleeTracker;
     }
 
     // ---- Bukkit events that make a client stall and then burst ----
@@ -212,6 +229,18 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
             handleDigging(event);
         }
 
+        // A real melee hit is announced by the client. Recorded unconditionally — even while
+        // lagging or in a grace window — because its absence is what the combat checks read,
+        // and a gap here would make an ordinary swing look like plugin-dealt damage.
+        if (type == PacketType.Play.Client.INTERACT_ENTITY && meleeTracker != null) {
+            User attacker = event.getUser();
+            if (attacker != null && attacker.getUUID() != null
+                    && new WrapperPlayClientInteractEntity(event).getAction()
+                            == WrapperPlayClientInteractEntity.InteractAction.ATTACK) {
+                meleeTracker.noteAttack(attacker.getUUID(), System.currentTimeMillis());
+            }
+        }
+
         if (grace || ServerLoad.isLagging(config)) return;
         if (type == PacketType.Play.Client.ANIMATION) {
             handleSwing(event);
@@ -229,18 +258,51 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         User user = event.getUser();
         if (user == null || user.getUUID() == null) return;
         DiggingAction action = new WrapperPlayClientPlayerDigging(event).getAction();
-        long now = System.currentTimeMillis();
+        noteDigging(user.getUUID(), action, System.currentTimeMillis());
+    }
+
+    /**
+     * The state transitions behind {@link #handleDigging}, split out so they can be driven
+     * without a packet: PLAYER_DIGGING carries both block breaking and item drops.
+     */
+    void noteDigging(UUID id, DiggingAction action, long now) {
         if (action == DiggingAction.START_DIGGING) {
-            miningUntil.put(user.getUUID(), now + MINING_SAFETY_MS); // mining until finish (safety-capped)
+            miningUntil.put(id, now + MINING_SAFETY_MS); // mining until finish (safety-capped)
         } else if (action == DiggingAction.FINISHED_DIGGING || action == DiggingAction.CANCELLED_DIGGING) {
-            miningUntil.put(user.getUUID(), now); // done
+            miningUntil.put(id, now); // done
+        } else if (action == DiggingAction.DROP_ITEM || action == DiggingAction.DROP_ITEM_STACK) {
+            droppingUntil.put(id, now + DROP_SUPPRESSION_MS); // dropping, not clicking
         }
     }
 
     /** True while the player is (very recently) breaking a block. */
-    private boolean isMining(UUID id) {
+    boolean isMining(UUID id) {
         Long until = miningUntil.get(id);
         return until != null && System.currentTimeMillis() < until;
+    }
+
+    /** True while the player is (very recently) dropping items via the drop key. */
+    boolean isDropping(UUID id) {
+        Long until = droppingUntil.get(id);
+        return until != null && System.currentTimeMillis() < until;
+    }
+
+    /**
+     * Packets seen from this connection in the current one-second window, or -1 if none has
+     * opened yet. Reported alongside every AutoClicker verdict because the two are easy to
+     * confuse: a burst of arrivals and a fast hand both raise the click count, and a
+     * connection that Paper itself is about to drop for flooding is not evidence of clicking.
+     * Live case 2026-08-25 on NewBeginnings: 12 AutoClicker alerts on a player who was mining
+     * continuously for 25 minutes, 10 of them in the exact seconds Paper disconnected him with
+     * "You are sending too many packets". Without this number the two readings cannot be told
+     * apart after the fact, which is why no threshold is drawn from it yet.
+     */
+    private long currentPacketRate(UUID id) {
+        long[] st = packetCounts.get(id);
+        if (st == null) return -1;
+        synchronized (st) {
+            return st[1];
+        }
     }
 
     /**
@@ -345,7 +407,7 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         UUID id = user.getUUID();
         long now = System.currentTimeMillis();
 
-        long[] st = timerState.computeIfAbsent(id, k -> new long[]{0L, now, 0L});
+        long[] st = timerState.computeIfAbsent(id, k -> new long[]{0L, now, 0L, 0L});
         long elapsed = now - st[1];
 
         // A gap in the packet stream means the connection stalled — a vanilla client sends a
@@ -371,8 +433,7 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
             }
             timerGraceUntil.remove(id);
         }
-        long balance = st[0] + TICK_MS * 100L - elapsed * 101L; // centi-ms, 1% drift leak
-        if (balance < -100000L) balance = -100000L; // floor (-1000ms): no unlimited idle credit
+        long balance = updateBalance(st[0], elapsed);
         st[1] = now;
 
         st[0] = balance;
@@ -384,17 +445,72 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         // Timer alerts. The gap that always follows such a bundle brings the balance back
         // down within a few hundred ms, while a real timer hack holds it up indefinitely.
         if (balance > config.timerMaxBalanceMs() * 100L) {
-            if (st[2] == 0L) st[2] = now;                       // excursion started
-            if (now - st[2] >= config.timerSustainedMs()) {
-                st[0] = 0L;
-                st[2] = 0L;
-                long balMs = balance / 100L;
-                String details = lang.format("alert.timer", balMs);
-                Scheduler.runForPlayer(plugin, id, () -> flagOnMain(id, "TIMER", details, balMs));
+            if (st[2] == 0L) {
+                st[2] = now;        // excursion started
+                st[3] = balance;    // ...and what it started from
+            }
+            double rtt = transactionManager != null ? transactionManager.roundTripMs(id) : -1;
+            long required = requiredExcursionMs(config.timerSustainedMs(), rtt,
+                    config.timerMaxRttCompensationMs());
+            long growth = balance - st[3];
+            long minGrowth = config.timerMinGrowthMs() * 100L;
+            if (now - st[2] >= required) {
+                if (growth >= minGrowth) {
+                    st[0] = 0L;
+                    st[2] = 0L;
+                    st[3] = 0L;
+                    long balMs = balance / 100L;
+                    String details = lang.format("alert.timer", balMs);
+                    Scheduler.runForPlayer(plugin, id, () -> flagOnMain(id, "TIMER", details, balMs));
+                } else if (config.debugMode()) {
+                    // The case the growth rule exists for. Logged rather than flagged, so a
+                    // link that keeps landing here can be told apart from one that never
+                    // reaches the limit at all — the check had no diagnostic output before,
+                    // which is why the 2026-08-23 alert could not be taken apart afterwards.
+                    plugin.getLogger().info(String.format(java.util.Locale.ROOT,
+                            "[TIMER-DEBUG] %s Ausschlag %dms lang, Balance %dms, Zuwachs %dms "
+                                    + "(<%dms) rtt=%.0fms -> kein Alarm, Leitung holt auf",
+                            user.getName(), now - st[2], balance / 100L, growth / 100L,
+                            minGrowth / 100L, Math.max(rtt, 0)));
+                }
             }
         } else {
             st[2] = 0L; // back under the limit — it was a bundle, not a hack
+            st[3] = 0L;
         }
+    }
+
+    /**
+     * One flying packet's effect on the timer balance, in hundredths of a millisecond.
+     *
+     * <p>Each packet claims one tick of game time and pays back the real time that passed,
+     * counted at 101% so benign client clock drift leaks away instead of accumulating. The
+     * floor stops an idle player from banking unlimited credit to spend later.
+     */
+    static long updateBalance(long balanceCenti, long elapsedMs) {
+        long balance = balanceCenti + TICK_MS * 100L - elapsedMs * 101L;
+        return Math.max(balance, -100000L); // -1000ms
+    }
+
+    /**
+     * How long a balance excursion must persist before it counts as a timer hack.
+     *
+     * <p>Extended by the player's measured round trip. A connection recovering from a stall
+     * delivers its backlog over roughly one round trip, and every packet in that burst credits
+     * a full tick against almost no real time — so the balance climbs for about that long
+     * through no fault of the player. Live case, 2026-08-23: a player at 1275-1444ms RTT
+     * reached a balance of 779ms and was flagged, with no single gap ever exceeding
+     * PACKET_GAP_MS, so the stall grace never engaged.
+     *
+     * <p>Deliberately extends the WINDOW and not the limit. A cheat can inflate its measured
+     * latency by answering transaction pings late, and against a raised limit that would buy
+     * immunity; against a longer window it buys nothing but a later flag, because a real hack
+     * holds the balance up indefinitely while a catch-up cannot. The compensation is capped
+     * anyway so the delay stays bounded.
+     */
+    static long requiredExcursionMs(long configuredMs, double rttMs, long capMs) {
+        if (!(rttMs > 0)) return configuredMs;
+        return configuredMs + (long) Math.min(rttMs, capMs);
     }
 
     /**
@@ -418,6 +534,9 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
 
         // Swings sent while breaking a block are mining, not clicking — don't count them.
         if (isMining(id)) return;
+        // Same for the swing that accompanies each item drop: holding the drop key emits one
+        // per tick and is a hand on a key, not a click rate.
+        if (isDropping(id)) return;
 
         long now = System.currentTimeMillis();
         ConcurrentLinkedDeque<Long> buf = clicks.computeIfAbsent(id, k -> new ConcurrentLinkedDeque<>());
@@ -475,16 +594,16 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         int cps = cpsFromInterval(medianInterval, arrivals);
 
         if (config.debugMode()) {
-            plugin.getLogger().info(String.format(
+            plugin.getLogger().info(String.format(java.util.Locale.ROOT, 
                     "[AC-DEBUG] %s cps=%d arrivals=%d median=%s mad=%s sd=%s cv=%s outliers=%s held=%b (max %d)",
                     user.getName(), cps, arrivals,
-                    medianInterval < 0 ? "n/a" : String.format("%.1fms", medianInterval),
+                    medianInterval < 0 ? "n/a" : String.format(java.util.Locale.ROOT, "%.1fms", medianInterval),
                     medianInterval < 0 ? "n/a"
-                            : String.format("%.1fms", medianAbsoluteDeviation(intervals, medianInterval)),
-                    sd < 0 ? "n/a" : String.format("%.1f", sd),
-                    sd < 0 || mean <= 0 ? "n/a" : String.format("%.2f", sd / mean),
-                    intervals.length == 0 ? "n/a" : String.format("%.2f", outlierRatio(intervals)),
-                    heldButton, maxCps));
+                            : String.format(java.util.Locale.ROOT, "%.1fms", medianAbsoluteDeviation(intervals, medianInterval)),
+                    sd < 0 ? "n/a" : String.format(java.util.Locale.ROOT, "%.1f", sd),
+                    sd < 0 || mean <= 0 ? "n/a" : String.format(java.util.Locale.ROOT, "%.2f", sd / mean),
+                    intervals.length == 0 ? "n/a" : String.format(java.util.Locale.ROOT, "%.2f", outlierRatio(intervals)),
+                    heldButton, maxCps) + " pakete/s=" + currentPacketRate(id));
         }
 
         // (a) Raw click rate
@@ -664,7 +783,7 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
                 double spikeOut = angleBetween(d[1], d[2]);
                 double net = angleBetween(d[0], d[2]);
                 if (config.debugMode()) {
-                    plugin.getLogger().info(String.format("[SNAP-DEBUG] %s in=%.0f out=%.0f net=%.0f",
+                    plugin.getLogger().info(String.format(java.util.Locale.ROOT, "[SNAP-DEBUG] %s in=%.0f out=%.0f net=%.0f",
                             user.getName(), spikeIn, spikeOut, net));
                 }
                 // The three samples must be consecutive in TIME, not merely in arrival order.
@@ -788,12 +907,14 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
 
 
     public void cleanup(UUID playerId) {
+        if (meleeTracker != null) meleeTracker.cleanup(playerId);
         clicks.remove(playerId);
         timerGraceUntil.remove(playerId);
         graceUntil.remove(playerId);
         timerState.remove(playerId);
         packetCounts.remove(playerId);
         miningUntil.remove(playerId);
+        droppingUntil.remove(playerId);
         lastYaw.remove(playerId);
         yawDeltas.remove(playerId);
         recentDirs.remove(playerId);

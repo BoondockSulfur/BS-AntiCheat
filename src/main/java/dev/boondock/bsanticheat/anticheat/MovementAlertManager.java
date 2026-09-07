@@ -118,9 +118,14 @@ public class MovementAlertManager {
      * Send a summary notification to admins.
      */
     private void notifyAdmins(Player suspect, String type, String details, double value, String location) {
-        String message = lang.get("alert.notify_movement", "%player%", suspect.getName());
-        String detail = lang.get("alert.notify_movement_detail",
-                "%type%", type, "%value%", String.format(java.util.Locale.ROOT, "%.2f", value), "%pos%", location);
+        // Placeholders resolve against the SUSPECT, not the admin reading the alert — the
+        // alert is about them, so %player_world% and friends should say where THEY are.
+        String message = dev.boondock.bsanticheat.util.Messages.placeholders(suspect,
+                lang.get("alert.notify_movement", "%player%", suspect.getName()));
+        String detail = dev.boondock.bsanticheat.util.Messages.placeholders(suspect,
+                lang.get("alert.notify_movement_detail",
+                        "%type%", type, "%value%", String.format(java.util.Locale.ROOT, "%.2f", value),
+                        "%pos%", location));
 
         LegacyComponentSerializer legacy = LegacyComponentSerializer.legacySection();
         Component clickable = legacy.deserialize(message)

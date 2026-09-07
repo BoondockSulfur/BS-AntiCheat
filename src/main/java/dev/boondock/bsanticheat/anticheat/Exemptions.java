@@ -15,7 +15,9 @@ public final class Exemptions {
 
     // Set once at enable. Static because it is read-only after startup and shared by every
     // check, so it needn't be threaded through each checker like the per-instance hooks.
-    private static ViaVersionHook via;
+    // Volatile because the packet checks read it from Netty threads, which share no
+    // happens-before edge with the enable that wrote it.
+    private static volatile ViaVersionHook via;
 
     private Exemptions() {}
 

@@ -129,6 +129,9 @@ public class MovementChecker implements Listener {
     // player was moving UP at 0.12-0.20 b/t, which no amount of grace tuning would have fixed
     // because a rise is not the thing the check is looking for.
     private static final double HOVER_STILL_BAND = 0.08;
+    // Vertical speed at the start of the current hover run, so a held speed can be told from
+    // one that is still decaying. See the flag site for the live case behind it.
+    private final Map<UUID, Double> hoverStartDy = new ConcurrentHashMap<>();
 
     // Sustained-ascent state (opt-in check): last vertical speed and how many samples in a row
     // rose without the decay gravity imposes.
@@ -235,7 +238,15 @@ public class MovementChecker implements Listener {
             return MovementType.CREATIVE_FLY;
         }
 
-        // PRIORITY 3: Check water movement
+        // PRIORITY 3: Check water movement.
+        //
+        // Only the swim POSE maps to SWIMMING. Being in water without it (wading upright,
+        // surfacing, riding Dolphin's Grace) deliberately stays WALKING/SPRINTING: the type
+        // gates far more than the speed cap — Step, Spider, GroundSpoof and the hover checks
+        // all require an on-foot type, and routing every in-water player to SWIMMING would
+        // switch those off for anyone standing in a puddle. The water speed bonuses are
+        // applied to the cap instead, in getMaxSpeed(), so a wading player is judged by water
+        // physics while every other check stays armed.
         if (player.isSwimming()) {
             return MovementType.SWIMMING;
         }
@@ -306,7 +317,7 @@ public class MovementChecker implements Listener {
         // LAG COMPENSATION: sqrt ping scaling shared with all other checks
         speedMultiplier *= CheckMath.pingSlack(effectivePing(player));
 
-        return switch (type) {
+        double cap = switch (type) {
             case WALKING -> baseWalkSpeed * speedMultiplier;
             case SPRINTING -> baseSprintSpeed * speedMultiplier;
             case SNEAKING -> {
@@ -323,27 +334,7 @@ public class MovementChecker implements Listener {
                 }
                 yield baseWalkSpeed * sneakMult * speedMultiplier;
             }
-            case SWIMMING -> {
-                double swim = baseWalkSpeed * Constants.SWIMMING_SPEED_MULTIPLIER * speedMultiplier;
-                // Depth Strider removes most of the water drag — without it a player with
-                // Depth Strider III swims at roughly walking speed and trips the cap.
-                // water_movement_efficiency is the attribute vanilla maps the enchantment
-                // onto, so it also covers items/plugins granting it without the enchant;
-                // the enchantment lookup stays as a floor.
-                double waterMult = CheckMath.waterEfficiencyMultiplier(player);
-                var boots = player.getInventory().getBoots();
-                if (boots != null) {
-                    int ds = boots.getEnchantmentLevel(org.bukkit.enchantments.Enchantment.DEPTH_STRIDER);
-                    if (ds > 0) waterMult = Math.max(waterMult,
-                            1.0 + Constants.DEPTH_STRIDER_MULTIPLIER_PER_LEVEL * ds);
-                }
-                swim *= waterMult;
-                // Dolphin's Grace drastically increases swim speed — avoid false positives
-                if (player.hasPotionEffect(PotionEffectType.DOLPHINS_GRACE)) {
-                    swim *= Constants.DOLPHINS_GRACE_MULTIPLIER;
-                }
-                yield swim;
-            }
+            case SWIMMING -> swimCap(player, baseWalkSpeed, speedMultiplier);
             case CLIMBING -> baseWalkSpeed * Constants.CLIMBING_SPEED_MULTIPLIER;
             case RIDING_HORSE -> Constants.HORSE_MAX_SPEED;
             case RIDING_DONKEY -> Constants.DONKEY_MAX_SPEED;
@@ -360,6 +351,52 @@ public class MovementChecker implements Listener {
             case CREATIVE_FLY -> baseFlySpeed * Constants.CREATIVE_FLY_MULTIPLIER;
             case OTHER_VEHICLE -> Constants.OTHER_VEHICLE_MAX_SPEED;
         };
+
+        // Water physics apply to anyone IN water, not only to the swim pose. A player wading
+        // upright, surfacing, or carried by Dolphin's Grace keeps their on-foot movement type
+        // (so Step/Spider/GroundSpoof/hover stay armed) but must be judged against the water
+        // cap — otherwise Depth Strider and Dolphin's Grace read as a SPEED violation against
+        // the 0.4 dry-land cap. Live case, 2026-08-21: twelve such alerts, all "walking".
+        //
+        // A floor, never a ceiling: the swim cap is 0.8x walking, so applying it as a
+        // replacement would flag someone strolling through a shallow pond.
+        if (type != MovementType.SWIMMING && isOnFoot(type) && player.isInWater()) {
+            cap = Math.max(cap, swimCap(player, baseWalkSpeed, speedMultiplier));
+        }
+        return cap;
+    }
+
+    /** True for the movement types a player performs on their own feet. */
+    private static boolean isOnFoot(MovementType type) {
+        return type == MovementType.WALKING || type == MovementType.SPRINTING
+                || type == MovementType.SNEAKING;
+    }
+
+    /**
+     * Speed cap for movement through water, including everything that legitimately lifts it.
+     *
+     * <p>Depth Strider removes most of the water drag — without it a player with Depth
+     * Strider III swims at roughly walking speed and trips the cap. water_movement_efficiency
+     * is the attribute vanilla maps the enchantment onto, so reading it also covers items and
+     * plugins granting the same effect without the enchantment; the enchantment lookup stays
+     * as a floor for servers where the attribute is unavailable.
+     */
+    private double swimCap(Player player, double baseWalkSpeed, double speedMultiplier) {
+        double swim = baseWalkSpeed * Constants.SWIMMING_SPEED_MULTIPLIER * speedMultiplier;
+        double waterMult = CheckMath.waterEfficiencyMultiplier(player);
+        var boots = player.getInventory().getBoots();
+        if (boots != null) {
+            int ds = boots.getEnchantmentLevel(org.bukkit.enchantments.Enchantment.DEPTH_STRIDER);
+            if (ds > 0) waterMult = Math.max(waterMult,
+                    1.0 + Constants.DEPTH_STRIDER_MULTIPLIER_PER_LEVEL * ds);
+        }
+        swim *= waterMult;
+        // Dolphin's Grace drastically increases swim speed — avoid false positives
+        if (player.hasPotionEffect(PotionEffectType.DOLPHINS_GRACE)) {
+            swim *= Constants.DOLPHINS_GRACE_MULTIPLIER;
+        }
+        // Never below the plain walking cap — see the floor note at the call site.
+        return Math.max(swim, baseWalkSpeed * speedMultiplier);
     }
 
     /**
@@ -416,9 +453,25 @@ public class MovementChecker implements Listener {
             lastMoveTime.put(playerId, System.currentTimeMillis());
         }
 
-        // Reset violation counters — teleport is legitimate, not a violation streak
+        // Reset violation counters — teleport is legitimate, not a violation streak.
+        // ALL movement-derived streaks, not just speed and fly: every one of them is built
+        // from deltas against a position the teleport just invalidated, so carrying a
+        // half-built count across it means flagging on evidence from a different place.
         consecutiveSpeedViolations.remove(playerId);
         consecutiveFlyViolations.remove(playerId);
+        consecutiveHoverTicks.remove(playerId);
+        consecutiveGroundSpoof.remove(playerId);
+        consecutiveNoSlow.remove(playerId);
+        consecutiveJesus.remove(playerId);
+        consecutiveSpider.remove(playerId);
+        consecutiveStep.remove(playerId);
+        consecutiveElytra.remove(playerId);
+        lastAscentDy.remove(playerId);
+        consecutiveAscent.remove(playerId);
+        // The elytra window measures distance between two sampled points; a teleport between
+        // them is pure phantom distance.
+        elytraSampleFrom.remove(playerId);
+        elytraSampleAt.remove(playerId);
 
         if (config.debugMode()) {
             plugin.getLogger().fine("[AC] " + player.getName() + " teleported (" +
@@ -790,8 +843,22 @@ public class MovementChecker implements Listener {
                             // with nothing underneath. Sustained climbing is judged separately,
                             // by whether it decays the way gravity requires.
                             consecutiveHoverTicks.remove(playerId);
+                            hoverStartDy.remove(playerId);
                         } else {
                             int hover = consecutiveHoverTicks.merge(playerId, 1, Integer::sum);
+                            // Vertical speed when this run began. A hover HOLDS a speed; a
+                            // ballistic arc passing through the band is still losing one, and
+                            // the band is wide enough (+-0.08) that the apex of a slow arc sits
+                            // inside it for many samples. Live alert 2026-08-26: dy ran
+                            // +0.067 -> -0.051 monotonically across all ten samples and flagged,
+                            // with no potion, no gravity modifier and no teleport behind it.
+                            // checkSustainedAscent already judges motion this way — it asks
+                            // whether the climb DECAYS rather than how fast it is. The hover
+                            // check only ever asked whether dy was small, never whether it was
+                            // changing, which is the one thing that separates the two.
+                            if (hover == 1) hoverStartDy.put(playerId, movement.getY());
+                            double startDy = hoverStartDy.getOrDefault(playerId, movement.getY());
+                            double drop = startDy - movement.getY();
                             // The hover check's only debug output was on fine(), which the
                             // default log level drops — so a live alert could not be taken
                             // apart afterwards. Logged on the counting path only, which is
@@ -800,22 +867,40 @@ public class MovementChecker implements Listener {
                             // far below the feet, -1 = nothing within reach.
                             if (config.debugMode()) {
                                 plugin.getLogger().info(String.format(java.util.Locale.ROOT,
-                                        "[HOVER-DEBUG] %s dy=%.3f support=%d onGround=%b pillarGrace=%b ticks=%.1f (%d/%d)",
-                                        player.getName(), movement.getY(), support,
+                                        "[HOVER-DEBUG] %s y=%.2f dy=%.3f abfall=%.3f (max %.3f) "
+                                                + "support=%d onGround=%b pillarGrace=%b ticks=%.1f (%d/%d)",
+                                        player.getName(), to.getY(), movement.getY(), drop,
+                                        config.flyHoverMaxDrop(), support,
                                         player.isOnGround(), pillarGrace, moveTicks,
                                         hover, config.flyViolationsThreshold()));
                             }
-                            if (hover >= config.flyViolationsThreshold()) {
+                            if (drop > config.flyHoverMaxDrop()) {
+                                // Still losing vertical speed, so this run is a fall through
+                                // the band and not a hover. RESTART it rather than merely
+                                // withholding the flag: the drop is measured against the run's
+                                // first sample and never recovers, so a run that once exceeded
+                                // the limit could not flag again for as long as it lasted —
+                                // and a hover entered from a rise (dy +0.06, then held at
+                                // -0.01) stays inside the +-0.08 band indefinitely with a
+                                // permanent drop of 0.07. Restarting costs the ballistic case
+                                // nothing, because it keeps falling out of the band anyway,
+                                // while a held altitude rebuilds the count within a few ticks
+                                // from a start sample that no longer carries the rise.
+                                consecutiveHoverTicks.put(playerId, 1);
+                                hoverStartDy.put(playerId, movement.getY());
+                            } else if (hover >= config.flyViolationsThreshold()) {
                                 if (!pistonShoved(to)) {
                                     setBack |= handleViolation(player, "FLY",
                                         lang.format("alert.hover", hover),
                                         verticalDist, to);
                                 }
                                 consecutiveHoverTicks.put(playerId, 0);
+                                hoverStartDy.remove(playerId);
                             }
                         }
                     } else {
                         consecutiveHoverTicks.remove(playerId);
+                        hoverStartDy.remove(playerId);
                     }
 
                     // (b2) Sustained ascent (opt-in, off by default). Narrowing the hover band
@@ -1069,7 +1154,7 @@ public class MovementChecker implements Listener {
         } else {
             // Fallback: direct notification (only in debug mode to console)
             if (config.debugMode()) {
-                String message = String.format("[AntiCheat] %s: %s - %s", player.getName(), type, details);
+                String message = String.format(java.util.Locale.ROOT, "[AntiCheat] %s: %s - %s", player.getName(), type, details);
                 plugin.getLogger().warning(message);
             }
         }
@@ -1092,21 +1177,6 @@ public class MovementChecker implements Listener {
         return false;
     }
 
-    /**
-     * Distance in blocks from the player's feet down to the nearest thing they could
-     * legitimately stand on or hang in, or -1 when nothing supportive lies within
-     * {@code maxDepth}. Zero means supported at foot level.
-     *
-     * <p>Checks all four footprint corners, not just the centre — a sneaking player
-     * overhangs an edge by up to half the hitbox width while still being supported. Also
-     * checks the block at foot level itself: standing on trapdoors, slabs, carpets or snow
-     * layers puts the supporting collision INSIDE that block, not below it.
-     *
-     * <p>Returning the depth rather than a boolean lets both vertical checks (hover =
-     * nothing within 2, GroundSpoof = nothing within 3) share a single scan. Note: a
-     * client that spoofs its on-ground flag can still evade the hover check — full
-     * prevention needs packet-level checks. Main-thread only.
-     */
     /**
      * True when every chunk a block-reading check might touch is already in memory — the
      * player's own chunk and those of the eight blocks around them.
@@ -1135,6 +1205,21 @@ public class MovementChecker implements Listener {
         return true;
     }
 
+    /**
+     * Distance in blocks from the player's feet down to the nearest thing they could
+     * legitimately stand on or hang in, or -1 when nothing supportive lies within
+     * {@code maxDepth}. Zero means supported at foot level.
+     *
+     * <p>Checks all four footprint corners, not just the centre — a sneaking player
+     * overhangs an edge by up to half the hitbox width while still being supported. Also
+     * checks the block at foot level itself: standing on trapdoors, slabs, carpets or snow
+     * layers puts the supporting collision INSIDE that block, not below it.
+     *
+     * <p>Returning the depth rather than a boolean lets both vertical checks (hover =
+     * nothing within 2, GroundSpoof = nothing within 3) share a single scan. Note: a
+     * client that spoofs its on-ground flag can still evade the hover check — full
+     * prevention needs packet-level checks. Main-thread only.
+     */
     private int supportDepth(Player player, int maxDepth) {
         if (player.isClimbing()) return 0;
         Location loc = player.getLocation();
@@ -1320,6 +1405,7 @@ public class MovementChecker implements Listener {
         consecutiveSpeedViolations.remove(playerId);
         consecutiveFlyViolations.remove(playerId);
         consecutiveHoverTicks.remove(playerId);
+        hoverStartDy.remove(playerId);
         consecutiveGroundSpoof.remove(playerId);
         consecutiveNoSlow.remove(playerId);
         consecutiveJesus.remove(playerId);

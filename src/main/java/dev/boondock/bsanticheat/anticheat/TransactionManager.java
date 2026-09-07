@@ -67,7 +67,20 @@ public class TransactionManager {
     }
 
     public void stop() {
-        if (pingTask != null) pingTask.cancel();
+        if (pingTask != null) {
+            pingTask.cancel();
+            pingTask = null;
+        }
+    }
+
+    /**
+     * Re-read the ping interval and reschedule. The period is fixed when the task is created,
+     * so without this {@code transaction_interval_ticks} kept ticking at whatever value was
+     * in the file at startup and a {@code /bsac reload} appeared to do nothing.
+     */
+    public void restart() {
+        stop();
+        start();
     }
 
     private void tick() {
@@ -109,7 +122,7 @@ public class TransactionManager {
 
         if (config.debugMode() && markerLogged.putIfAbsent(uuid, Boolean.TRUE) == null && database != null) {
             double ms = rtt / 1.0e6;
-            database.logAsync("transaction", ms, name + ": transaction confirmed rtt=" + String.format("%.1fms", ms));
+            database.logAsync("transaction", ms, name + ": transaction confirmed rtt=" + String.format(java.util.Locale.ROOT, "%.1fms", ms));
         }
     }
 

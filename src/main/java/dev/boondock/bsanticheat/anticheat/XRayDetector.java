@@ -56,9 +56,12 @@ public class XRayDetector implements Listener {
 
     // Track ore mining per player
     private final Map<UUID, List<OreMineEvent>> playerOreMines = new ConcurrentHashMap<>();
-    // Time-windowed stone mining timestamps per player (mirrors ore tracking so the
-    // ore/stone ratio compares like-for-like within the same time window)
-    private final Map<UUID, ConcurrentLinkedDeque<Long>> playerStoneMines = new ConcurrentHashMap<>();
+    // Time-windowed stone mining per player. Positions, not just timestamps: the SHAPE of the
+    // digging is what tells a strip miner from someone who walked to the ore (MiningProfile).
+    // Held for the longer of the two windows — the ratio still counts only what falls inside
+    // xray_stone_window_seconds, the profile wants the wider sample to say anything at all.
+    private final Map<UUID, ConcurrentLinkedDeque<MiningProfile.StoneBreak>> playerStoneMines =
+            new ConcurrentHashMap<>();
 
     // Track player-placed blocks to prevent false positives in restricted worlds
     // Key: Block location hash, Value: Timestamp when placed
@@ -138,6 +141,14 @@ public class XRayDetector implements Listener {
         Material.RED_SANDSTONE
     );
 
+    /**
+     * How long stone breaks are kept. The ratio and the shape profile read the same deque
+     * over different spans, so it has to survive the longer of the two.
+     */
+    private int retentionSeconds() {
+        return Math.max(config.xrayStoneWindowSeconds(), config.xrayProfileWindowSeconds());
+    }
+
     public XRayDetector(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
         this.config = config;
@@ -173,11 +184,14 @@ public class XRayDetector implements Listener {
                 }
             }
 
-            // Clean old stone mining timestamps (time-windowed, same cutoff as ores)
-            for (ConcurrentLinkedDeque<Long> stoneTimestamps : playerStoneMines.values()) {
-                Long head;
-                while ((head = stoneTimestamps.peekFirst()) != null && head < cutoff) {
-                    stoneTimestamps.pollFirst();
+            // Clean old stone mining timestamps. Its OWN, longer cutoff — trimming the spoil
+            // to the ore window here would throw away exactly the digging history that
+            // explains the ore (see Constants.XRAY_STONE_WINDOW_SECONDS).
+            long stoneCutoff = System.currentTimeMillis() - (retentionSeconds() * 1000L);
+            for (ConcurrentLinkedDeque<MiningProfile.StoneBreak> breaks : playerStoneMines.values()) {
+                MiningProfile.StoneBreak head;
+                while ((head = breaks.peekFirst()) != null && head.time() < stoneCutoff) {
+                    breaks.pollFirst();
                 }
             }
 
@@ -214,8 +228,8 @@ public class XRayDetector implements Listener {
                 plugin.getLogger().warning("[XRay] playerStoneMines exceeded size limit (" + playerStoneMines.size() + " > " + Constants.XRAY_MAX_PLAYER_ENTRIES + "), evicting " + toRemove + " oldest entries");
                 playerStoneMines.entrySet().stream()
                     .sorted(Comparator.comparingLong(e -> {
-                        Long last = e.getValue().peekLast();
-                        return last != null ? last : 0L;
+                        MiningProfile.StoneBreak last = e.getValue().peekLast();
+                        return last != null ? last.time() : 0L;
                     }))
                     .limit(toRemove)
                     .map(Map.Entry::getKey)
@@ -225,7 +239,7 @@ public class XRayDetector implements Listener {
             }
 
             if (config.debugMode() && (totalCleaned > 0 || placedBlocksCleaned > 0 || hitLimit)) {
-                plugin.getLogger().info(String.format("[XRay Cleanup] Removed %d old mining events, %d placed blocks. Active players: %d, Maps size: ore=%d, stone=%d",
+                plugin.getLogger().info(String.format(java.util.Locale.ROOT, "[XRay Cleanup] Removed %d old mining events, %d placed blocks. Active players: %d, Maps size: ore=%d, stone=%d",
                     totalCleaned, placedBlocksCleaned, playersWithData, playerOreMines.size(), playerStoneMines.size()));
             }
         }, Constants.XRAY_CLEANUP_INTERVAL_TICKS / 20L, Constants.XRAY_CLEANUP_INTERVAL_TICKS / 20L,
@@ -413,14 +427,15 @@ public class XRayDetector implements Listener {
         // Track stone mining (time-windowed)
         if (STONE_TYPES.contains(type)) {
             long now = System.currentTimeMillis();
-            long stoneCutoff = now - (config.xrayTimewindowSeconds() * 1000L);
-            ConcurrentLinkedDeque<Long> stoneTimestamps =
+            long stoneCutoff = now - (retentionSeconds() * 1000L);
+            ConcurrentLinkedDeque<MiningProfile.StoneBreak> stoneBreaks =
                     playerStoneMines.computeIfAbsent(playerId, k -> new ConcurrentLinkedDeque<>());
-            stoneTimestamps.addLast(now);
-            // Trim timestamps that fell out of the window
-            Long head;
-            while ((head = stoneTimestamps.peekFirst()) != null && head < stoneCutoff) {
-                stoneTimestamps.pollFirst();
+            stoneBreaks.addLast(new MiningProfile.StoneBreak(
+                    now, block.getX(), block.getY(), block.getZ()));
+            // Trim what fell out of the window
+            MiningProfile.StoneBreak head;
+            while ((head = stoneBreaks.peekFirst()) != null && head.time() < stoneCutoff) {
+                stoneBreaks.pollFirst();
             }
             return;
         }
@@ -463,7 +478,7 @@ public class XRayDetector implements Listener {
 
             // INSTANT ALERT for restricted worlds
             if (shouldMonitorOreInRestrictedWorld) {
-                String locationInfo = String.format("%s @ [%d, %d, %d]",
+                String locationInfo = String.format(java.util.Locale.ROOT, "%s @ [%d, %d, %d]",
                     worldName,
                     block.getX(), block.getY(), block.getZ());
 
@@ -505,7 +520,7 @@ public class XRayDetector implements Listener {
                 plugin.getLogger().info("[XRay] " + player.getName() + " mined " + type.name() +
                     " | Count: " + currentOreCount + "/" + threshold +
                     " | Total ores in window: " + mines.size() +
-                    " | Cleaned: " + (beforeCleanup - mines.size() + 1) +
+                    " | Cleaned: " + (beforeCleanup - mines.size()) +
                     " | Restricted World: " + isInRestrictedWorld);
             }
 
@@ -534,21 +549,37 @@ public class XRayDetector implements Listener {
     private void checkSuspiciousPattern(Player player, UUID playerId, List<OreMineEvent> mines) {
         int timewindow = config.xrayTimewindowSeconds();
 
-        // Stone broken inside the window. Computed up front because it decides WHICH checks
-        // apply, not just how the ratio comes out.
+        // Spoil moved recently. Computed up front because it decides WHICH checks apply, not
+        // just how the ratio comes out.
+        //
+        // Counted over xray_stone_window_seconds, which ships EQUAL to the ore window. A
+        // longer one was built and dropped: it fixes the case where a player tunnels for
+        // minutes and then spends under a minute extracting, but it hands an X-Ray user the
+        // same exemption, because tunnelling from vein to vein digs just as much. The key
+        // exists so the trade-off is adjustable, not because the default differs — see
+        // Constants.XRAY_STONE_WINDOW_SECONDS. The deque itself is held longer than either,
+        // for the shape profile below.
         //
         // Trimming has to happen here: the deque is otherwise only trimmed when stone is
         // broken or by the 5-minute cleanup task, so a player who mines stone and then
-        // switches to pure ore mining keeps a stale, inflated count for minutes.
-        ConcurrentLinkedDeque<Long> stoneTimestamps = playerStoneMines.get(playerId);
+        // switches to pure ore mining keeps a stale, inflated count.
+        ConcurrentLinkedDeque<MiningProfile.StoneBreak> stoneBreaks = playerStoneMines.get(playerId);
         int stoneMined = 0;
-        if (stoneTimestamps != null) {
-            long stoneCutoff = System.currentTimeMillis() - (timewindow * 1000L);
-            Long oldest;
-            while ((oldest = stoneTimestamps.peekFirst()) != null && oldest < stoneCutoff) {
-                stoneTimestamps.pollFirst();
+        List<MiningProfile.StoneBreak> profile = List.of();
+        if (stoneBreaks != null) {
+            long now = System.currentTimeMillis();
+            long retention = now - (retentionSeconds() * 1000L);
+            MiningProfile.StoneBreak oldest;
+            while ((oldest = stoneBreaks.peekFirst()) != null && oldest.time() < retention) {
+                stoneBreaks.pollFirst();
             }
-            stoneMined = stoneTimestamps.size();
+            // The ratio's denominator is still only what falls inside its own, shorter window;
+            // the wider retention exists for the shape, not for the count.
+            long ratioCutoff = now - (config.xrayStoneWindowSeconds() * 1000L);
+            profile = new ArrayList<>(stoneBreaks);
+            for (MiningProfile.StoneBreak s : profile) {
+                if (s.time() >= ratioCutoff) stoneMined++;
+            }
         }
 
         // Someone moving this much stone is visibly SEARCHING, which is the opposite of what
@@ -562,7 +593,33 @@ public class XRayDetector implements Listener {
         // mining as camouflage does not buy much — with 10 hidden diamonds a player needs
         // ~67 stone before the ratio drops under its threshold, i.e. they have to genuinely
         // dig, which is the behaviour being asked for.
-        boolean searching = stoneMined > Constants.XRAY_MIN_STONE_FOR_RATIO_CHECK;
+        boolean searching = stoneMined > config.xrayMinStoneForRatio();
+
+        // VETOES. Shape evidence that the counting checks cannot see — see MiningProfile for
+        // the measurements behind the thresholds. They only ever suppress an alert, so they
+        // cannot create a false positive; that matters because this server has no confirmed
+        // X-Ray sample to calibrate an incriminating signal against.
+        //
+        // Applied to the two RAW-COUNT checks only (1 and 3). Check 2 is the ratio, which
+        // exists precisely to judge players who are visibly digging — vetoing it with "this
+        // player is visibly digging" would switch it off entirely.
+        List<Integer> judgedOreYs = new ArrayList<>();
+        for (OreMineEvent mine : mines) {
+            if (config.xrayRequireHidden() && mine.visible) continue;
+            judgedOreYs.add(mine.location.getBlockY());
+        }
+        boolean stripMining = MiningProfile.looksLikeStripMining(profile, judgedOreYs,
+                config.xrayProfileMinSample(), config.xrayProfileMaxYStdDev(),
+                config.xrayProfileMinCorridor(), config.xrayProfileOreBand());
+        boolean vetoed = stripMining;
+        if (vetoed && config.debugMode()) {
+            plugin.getLogger().info("[XRay] " + player.getName()
+                    + " Veto: stripMining"
+                    + " (profil=" + profile.size() + " Bloecke, yStdAbw="
+                    + String.format(java.util.Locale.ROOT, "%.2f", MiningProfile.yStdDev(profile))
+                    + ", korridor=" + String.format(java.util.Locale.ROOT, "%.2f",
+                            MiningProfile.corridorFraction(profile)) + ")");
+        }
 
         // Calculate ore breakdown and check per-ore thresholds.
         // The full breakdown is what gets reported; the thresholds are judged against ore
@@ -581,17 +638,44 @@ public class XRayDetector implements Listener {
         // diamond veins reaches ten, and any vein-miner style tool takes a whole vein in a
         // single action. None of that is knowledge about where the ore was — which is the
         // thing X-Ray actually gives someone. Walking to several SEPARATE deposits without
-        // searching is. So the ore must also come from at least xray_min_veins distinct
-        // veins; the vein count is computed only for ores that already crossed their
-        // threshold, so the common case pays nothing for it.
+        // searching is. So the ore must also come from at least xray_min_veins distinct veins.
+        //
+        // The vein GATE alone did not achieve that, because the count it guarded stayed
+        // block-based: three veins of five blocks are fifteen, which clears a threshold of ten
+        // while being three finds, not fifteen. And the hidden-ore test makes it worse rather
+        // than better — every block of a vein after the first is exposed by breaking its
+        // neighbour, so an entire deposit counts as hidden. Live case, 2026-08-22: two fat
+        // deepslate veins produced 13 of 14 "hidden" diamonds and flagged an OP.
+        //
+        // So the count itself is now per-vein: each deposit contributes at most
+        // xray_max_count_per_vein. Emptying one vein is one piece of knowledge however many
+        // blocks come out of it, while ten scattered single ores still count ten.
         int minVeins = config.xrayMinVeins();
-        if (!searching) {
+        int perVeinCap = Math.max(1, config.xrayMaxCountPerVein());
+        boolean hiddenOnly = config.xrayRequireHidden();
+        if (!searching && !vetoed) {
             for (Map.Entry<String, Integer> entry : hiddenBreakdown.entrySet()) {
                 String oreName = entry.getKey();
                 int count = entry.getValue();
                 int threshold = config.xrayThreshold(oreName);
+                // Cheap pre-filter: the capped count can never exceed the raw one, so an ore
+                // under its threshold cannot pass and needn't pay for the clustering.
+                if (count < threshold) continue;
 
-                if (count >= threshold && countVeins(mines, oreName) >= minVeins) {
+                // Clustered over the SAME ore the count came from — hidden-only when that is
+                // what is being judged, otherwise the vein figure describes a different set
+                // of blocks than the number it is gating.
+                List<Integer> veins = veinSizes(mines, oreName, hiddenOnly);
+                if (veins.size() < minVeins) continue;
+
+                int cappedCount = 0;
+                for (int size : veins) cappedCount += Math.min(size, perVeinCap);
+                if (config.debugMode()) {
+                    plugin.getLogger().info("[XRay] " + player.getName() + " " + oreName
+                            + ": hidden=" + count + " veins=" + veins.size()
+                            + " capped=" + cappedCount + "/" + threshold);
+                }
+                if (cappedCount >= threshold) {
                     exceededOres.put(oreName, count);
                 }
             }
@@ -677,12 +761,20 @@ public class XRayDetector implements Listener {
                 || exceededOres.containsKey("EMERALD_ORE")
                 || exceededOres.containsKey("ANCIENT_DEBRIS");
 
-        if (!rareAlreadyFlagged && !searching) {
+        if (!rareAlreadyFlagged && !searching && !vetoed) {
             List<OreMineEvent> rareMines = mines.stream()
                     .filter(m -> RARE_ORES.contains(m.oreType))
                     .filter(m -> !config.xrayRequireHidden() || !m.visible)
                     .toList();
-            if (rareMines.size() >= config.xrayRareCombinedThreshold()) {
+            // Capped per deposit for the same reason as Check 1 — this is a raw count too, so
+            // two fat veins would otherwise carry it on their own. Clustered across the rare
+            // ores together, which is what the check is about: several deposits, mixed types.
+            int rareCapped = 0;
+            int cap = Math.max(1, config.xrayMaxCountPerVein());
+            for (int size : veinSizes(rareMines.stream().map(m -> m.location).toList())) {
+                rareCapped += Math.min(size, cap);
+            }
+            if (rareCapped >= config.xrayRareCombinedThreshold()) {
                 Map<String, Integer> rareBreakdown = new HashMap<>();
                 rareMines.forEach(m -> rareBreakdown.merge(m.oreType.name().replace("DEEPSLATE_", ""), 1, Integer::sum));
 
@@ -710,7 +802,7 @@ public class XRayDetector implements Listener {
     private void resetEvidence(UUID playerId) {
         List<OreMineEvent> mines = playerOreMines.get(playerId);
         if (mines != null) mines.clear();
-        ConcurrentLinkedDeque<Long> stone = playerStoneMines.get(playerId);
+        ConcurrentLinkedDeque<MiningProfile.StoneBreak> stone = playerStoneMines.get(playerId);
         if (stone != null) stone.clear();
     }
 
@@ -754,17 +846,13 @@ public class XRayDetector implements Listener {
         for (int i = start; i < mines.size(); i++) {
             OreMineEvent mine = mines.get(i);
             String worldName = mine.location.getWorld() != null ? mine.location.getWorld().getName() : "unknown";
-            locations.add(String.format("%s @ %s [%d, %d, %d]",
+            locations.add(String.format(java.util.Locale.ROOT, "%s @ %s [%d, %d, %d]",
                 mine.oreType.name(), worldName,
                 mine.location.getBlockX(), mine.location.getBlockY(), mine.location.getBlockZ()));
         }
         return locations;
     }
 
-    /**
-     * Calculate breakdown of ores mined.
-     * Normalizes ore names (e.g., DEEPSLATE_DIAMOND_ORE -> DIAMOND_ORE for consistent counting).
-     */
     /**
      * Whether this ore was already exposed to open space when it was broken — i.e. whether
      * the player could simply see it.
@@ -804,22 +892,28 @@ public class XRayDetector implements Listener {
     }
 
     /**
-     * How many separate deposits the given ore was taken from within the window. Two blocks
-     * belong to the same vein when they sit within {@link #VEIN_LINK_DISTANCE} of each other
-     * on every axis, joined transitively — so a winding vein counts once however it is shaped,
-     * and two veins a couple of blocks apart (visible together from one spot) also count once.
+     * Block count of each separate deposit the given ore was taken from. Two blocks belong to
+     * the same vein when they sit within {@link #VEIN_LINK_DISTANCE} of each other on every
+     * axis, joined transitively — so a winding vein counts once however it is shaped, and two
+     * veins a couple of blocks apart (visible together from one spot) also count once. The
+     * sizes, not just how many there are, because a threshold has to be able to cap what one
+     * deposit contributes to it.
      *
      * <p>O(n²) over the ore blocks of one type in a 60s window, and only reached once a
      * threshold has already been crossed.
+     *
+     * @param hiddenOnly restrict to ore that was still hidden in rock when it was broken, so
+     *                   the clustering describes the same blocks as the count being gated
      */
-    private int countVeins(List<OreMineEvent> mines, String oreName) {
+    private List<Integer> veinSizes(List<OreMineEvent> mines, String oreName, boolean hiddenOnly) {
         List<Location> pts = new ArrayList<>();
         for (OreMineEvent mine : mines) {
+            if (hiddenOnly && mine.visible) continue;
             if (mine.oreType.name().replace("DEEPSLATE_", "").equals(oreName)) {
                 pts.add(mine.location);
             }
         }
-        return countVeins(pts);
+        return veinSizes(pts);
     }
 
     /**
@@ -828,8 +922,14 @@ public class XRayDetector implements Listener {
      * mining coordinates.
      */
     static int countVeins(List<Location> pts) {
+        return veinSizes(pts).size();
+    }
+
+    /** The same clustering, reporting how many blocks fell into each deposit. */
+    static List<Integer> veinSizes(List<Location> pts) {
         int n = pts.size();
-        if (n <= 1) return n;
+        if (n == 0) return List.of();
+        if (n == 1) return List.of(1);
 
         int[] parent = new int[n];
         for (int i = 0; i < n; i++) parent[i] = i;
@@ -842,9 +942,9 @@ public class XRayDetector implements Listener {
                 }
             }
         }
-        Set<Integer> roots = new HashSet<>();
-        for (int i = 0; i < n; i++) roots.add(findRoot(parent, i));
-        return roots.size();
+        Map<Integer, Integer> sizes = new HashMap<>();
+        for (int i = 0; i < n; i++) sizes.merge(findRoot(parent, i), 1, Integer::sum);
+        return new ArrayList<>(sizes.values());
     }
 
     static boolean sameVein(Location a, Location b) {

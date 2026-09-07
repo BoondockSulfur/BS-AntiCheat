@@ -144,7 +144,7 @@ public class DiscordWebhook {
         int color = getColorForType(type);
         String timestamp = Instant.now().toString();
         String valueLabel = lang.get("alert.discord_value");
-        return String.format("""
+        return String.format(java.util.Locale.ROOT, """
             {
               "embeds": [{
                 "title": "%s",

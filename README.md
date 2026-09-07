@@ -106,7 +106,7 @@ asserted: until 1.0.3 a missing PacketEvents actually prevented the plugin from 
 
 ## Installation
 
-1. Drop `BSAntiCheat-1.0.5.jar` into `plugins/`.
+1. Drop `BSAntiCheat-1.0.6.jar` into `plugins/`.
 2. (Recommended) Install **PacketEvents** for the packet-level checks.
 3. Start the server, then edit `plugins/BSAntiCheat/config.yml` and run `/bsac reload`.
 
@@ -143,6 +143,7 @@ then turn punishments on when you're happy.
 | Command | Alias | Permission | Description |
 |---|---|---|---|
 | `/bsac <reload\|info\|version> [player]` | `/bsanticheat` | `bsanticheat.admin` | Reload config, show a player's VL, or version |
+| `/bsac test <player> <CHECK> [count]` | | `bsanticheat.admin` | Raise a violation level by hand to try a punishment tier. Runs the real path, so it really punishes. |
 | `/movealerts [player\|clear\|clearall]` | `/mva` | `bsanticheat.admin` | Movement/speed/fly alerts |
 | `/xrayalerts [player\|clear\|clearall]` | `/xra` | `bsanticheat.admin` | XRay alerts |
 | `/acsilent [all\|xray\|movement\|list]` | `/acs` | `bsanticheat.admin` | Toggle alert notifications (silent mode) |
@@ -186,8 +187,8 @@ back to what the player was actually doing. If you find one, the alert text and
 ## Building
 
 ```bash
-mvn clean package    # → target/BSAntiCheat-1.0.5.jar
-mvn test             # 96 tests
+mvn clean package    # → target/BSAntiCheat-1.0.6.jar
+mvn test             # 182 tests
 ```
 
 Builds on JDK 21 or later; the bytecode target is 21 regardless of the JDK used.

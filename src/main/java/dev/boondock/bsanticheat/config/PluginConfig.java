@@ -85,6 +85,24 @@ public class PluginConfig {
     }
 
     /**
+     * Sections whose KEYS are the admin's data rather than the plugin's settings.
+     *
+     * <p>Merging cannot help here, because it cannot tell "missing because the plugin added
+     * it" from "missing because I deleted it". The shipped punishment tier is keyed by its VL
+     * threshold, so an admin who changes 40 to 10 — which everyone does, 40 is far out of
+     * reach — has deleted key "40" as far as the merge can see, and it puts the tier back
+     * with the default kick message next to their own. That is the "the plugin resets my kick
+     * message" report: the edited line survives, the original returns beside it and keeps
+     * firing. Same for an ore removed from xray_thresholds.
+     *
+     * <p>Below these paths a key is only filled in while the section itself is absent, i.e.
+     * on a config that predates it entirely.
+     */
+    private static final List<String> ADMIN_DEFINED_SECTIONS = List.of(
+            "anticheat.punishments.tiers",
+            "anticheat.xray_thresholds");
+
+    /**
      * Add any config keys present in the bundled default config.yml but missing from the
      * user's file (e.g. after a plugin update), keeping existing values. Mirrors how the
      * LanguageManager merges new language keys.
@@ -99,8 +117,16 @@ public class PluginConfig {
                 if (defaults.isConfigurationSection(key)) continue; // only leaf values
                 // contains(key, true) ignores Bukkit's auto-loaded jar defaults, so this
                 // checks the user's actual file (otherwise every key looks "present").
+                if (isAdminDefined(cfg, key)) continue;
                 if (!cfg.contains(key, true)) {
                     cfg.set(key, defaults.get(key));
+                    // ...along with the reasoning that ships above it. A merged key arrives
+                    // as a bare value otherwise, so an admin updating the plugin gets every
+                    // new switch without a word about what it is for, while a fresh install
+                    // gets the full explanation. The keys that need it most are the ones
+                    // that were calibrated against live data.
+                    List<String> comments = defaults.getComments(key);
+                    if (!comments.isEmpty()) cfg.setComments(key, comments);
                     changed = true;
                 }
             }
@@ -111,6 +137,18 @@ public class PluginConfig {
         } catch (Exception e) {
             plugin.getLogger().warning("[Config] Could not merge default config keys: " + e.getMessage());
         }
+    }
+
+    /**
+     * True when this key lives inside a section the admin owns and that section already
+     * exists in their file — so its contents are theirs, complete, and none of the shipped
+     * entries may be added back.
+     */
+    private static boolean isAdminDefined(FileConfiguration cfg, String key) {
+        for (String section : ADMIN_DEFINED_SECTIONS) {
+            if (key.startsWith(section + ".") && cfg.contains(section, true)) return true;
+        }
+        return false;
     }
 
     private void validateConfig(FileConfiguration cfg) {
@@ -135,6 +173,18 @@ public class PluginConfig {
             plugin.getLogger().warning("[Config] Invalid speed_thresholds.sprint: " + sprintSpeed + ". Using 0.6");
             cfg.set("anticheat.speed_thresholds.sprint", 0.6);
             hasErrors = true;
+        }
+
+        // Not repaired, only reported: an existing value is the admin's decision and the
+        // merge above only ever ADDS keys, so a default that changes after release never
+        // reaches a server that already has the key. This one changed for a measured reason
+        // (97 alerts, 0 real findings — see config.yml), and silently flipping it would be
+        // the plugin overruling a choice somebody may have made deliberately.
+        if (cfg.getBoolean("anticheat.cheststealer_detection", false)) {
+            plugin.getLogger().warning("[Config] cheststealer_detection is ON. It ships OFF"
+                    + " since 1.0.6: the check reads vanilla shift-drag as inhuman clicking"
+                    + " and has produced 97 alerts and 0 real findings. Set it to false in"
+                    + " config.yml unless you know why you want it.");
         }
 
         if (hasErrors) {
@@ -216,7 +266,8 @@ public class PluginConfig {
     public boolean fastBreakDetectionEnabled() { return cfg.getBoolean("anticheat.fastbreak_detection", true); }
     public boolean inventoryChecksEnabled() { return cfg.getBoolean("anticheat.inventory_checks", true); }
     public boolean inventoryMoveDetectionEnabled() { return cfg.getBoolean("anticheat.inventorymove_detection", true); }
-    public boolean chestStealerDetectionEnabled() { return cfg.getBoolean("anticheat.cheststealer_detection", true); }
+    /** Off by default — the interval model cannot tell a bot from a vanilla shift-drag; see config.yml. */
+    public boolean chestStealerDetectionEnabled() { return cfg.getBoolean("anticheat.cheststealer_detection", false); }
     public boolean fastUseDetectionEnabled() { return cfg.getBoolean("anticheat.fastuse_detection", true); }
     public boolean bowSpamDetectionEnabled() { return cfg.getBoolean("anticheat.bowspam_detection", true); }
     public boolean autoTotemDetectionEnabled() { return cfg.getBoolean("anticheat.autototem_detection", true); }
@@ -243,6 +294,35 @@ public class PluginConfig {
     // X-Ray: how many separate deposits the ore must come from before a count over the
     // threshold is treated as evidence. One vein is never proof, however big it is.
     public int xrayMinVeins() { return cfg.getInt("anticheat.xray_min_veins", 3); }
+    /** How much one deposit may contribute to a per-ore threshold (see Constants). */
+    public int xrayMaxCountPerVein() {
+        return cfg.getInt("anticheat.xray_max_count_per_vein", Constants.XRAY_MAX_COUNT_PER_VEIN);
+    }
+    /** Stone breaks needed before the shape veto may fire. */
+    public int xrayProfileMinSample() {
+        return cfg.getInt("anticheat.xray_profile_min_sample", Constants.XRAY_PROFILE_MIN_SAMPLE);
+    }
+    /** How far back the shape profile looks. */
+    public int xrayProfileWindowSeconds() {
+        return cfg.getInt("anticheat.xray_profile_window_seconds", Constants.XRAY_PROFILE_WINDOW_SECONDS);
+    }
+    public double xrayProfileMaxYStdDev() {
+        return cfg.getDouble("anticheat.xray_profile_max_y_stddev", Constants.XRAY_PROFILE_MAX_Y_STDDEV);
+    }
+    public double xrayProfileMinCorridor() {
+        return cfg.getDouble("anticheat.xray_profile_min_corridor", Constants.XRAY_PROFILE_MIN_CORRIDOR);
+    }
+    public int xrayProfileOreBand() {
+        return cfg.getInt("anticheat.xray_profile_ore_band", Constants.XRAY_PROFILE_ORE_BAND);
+    }
+    /** How far back the spoil is counted when deciding whether a player is searching. */
+    public int xrayStoneWindowSeconds() {
+        return cfg.getInt("anticheat.xray_stone_window_seconds", Constants.XRAY_STONE_WINDOW_SECONDS);
+    }
+    /** How much spoil in that window marks the player as searching. */
+    public int xrayMinStoneForRatio() {
+        return cfg.getInt("anticheat.xray_min_stone_for_ratio", Constants.XRAY_MIN_STONE_FOR_RATIO_CHECK);
+    }
     // Count only ore that was hidden in rock when broken. Ore taken off an open cave wall
     // was seen, not located — and clearing a cave produces the same statistics as X-Ray.
     public boolean xrayRequireHidden() { return cfg.getBoolean("anticheat.xray_require_hidden", true); }
@@ -294,6 +374,26 @@ public class PluginConfig {
     public boolean badPacketsDetectionEnabled() { return cfg.getBoolean("anticheat.badpackets_detection", true); }
     public boolean timerDetectionEnabled() { return cfg.getBoolean("anticheat.timer_detection", true); }
     public long timerMaxBalanceMs() { return cfg.getLong("anticheat.timer_max_balance_ms", 200L); }
+    /** Ceiling on the reach check's latency allowance, in blocks. */
+    public double reachMaxLatencyBlocks() {
+        return cfg.getDouble("anticheat.thresholds.reach_max_latency_blocks", Constants.REACH_MAX_LATENCY_BLOCKS);
+    }
+    /** Above this measured round trip the reach check stands down. */
+    public int reachMaxPingMs() {
+        return cfg.getInt("anticheat.thresholds.reach_max_ping_ms", Constants.REACH_MAX_PING_MS);
+    }
+    /** How much vertical speed a hover run may lose before it reads as falling. */
+    public double flyHoverMaxDrop() {
+        return cfg.getDouble("anticheat.thresholds.fly_hover_max_drop", Constants.FLY_HOVER_MAX_DROP);
+    }
+    /** How much the balance must still gain across the excursion (see Constants). */
+    public long timerMinGrowthMs() {
+        return cfg.getLong("anticheat.timer_min_growth_ms", Constants.TIMER_MIN_GROWTH_MS);
+    }
+    /** Ceiling on the round-trip extension of the excursion window. */
+    public long timerMaxRttCompensationMs() {
+        return cfg.getLong("anticheat.timer_max_rtt_compensation_ms", Constants.TIMER_MAX_RTT_COMPENSATION_MS);
+    }
     public long timerSustainedMs() { return cfg.getLong("anticheat.timer_sustained_ms", Constants.TIMER_SUSTAINED_MS); }
     // KillAura rotation GCD (experimental, off by default — calibrate with debug_mode)
     public boolean killAuraRotationDetectionEnabled() { return cfg.getBoolean("anticheat.killaura_rotation_detection", false); }

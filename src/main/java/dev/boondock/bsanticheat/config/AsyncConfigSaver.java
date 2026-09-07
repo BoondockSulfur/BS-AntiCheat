@@ -50,20 +50,20 @@ public class AsyncConfigSaver {
                 pendingSave.set(false);
                 plugin.saveConfig();
                 plugin.getLogger().fine("[Config] Configuration saved successfully");
-
-                // Check if another save was requested during this save
-                if (pendingSave.compareAndSet(true, false)) {
-                    // Schedule follow-up save
-                    dev.boondock.bsanticheat.util.Scheduler.runGlobalLater(plugin, () -> plugin.saveConfig(), 20L);
-                }
-
                 future.complete(null);
             } catch (Exception e) {
-                plugin.getLogger().severe("[Config] Failed to save config: " + e.getMessage());
-                e.printStackTrace();
+                plugin.getLogger().log(java.util.logging.Level.SEVERE, "[Config] Failed to save config", e);
                 future.completeExceptionally(e);
             } finally {
                 isSaving.set(false);
+                // The follow-up check has to come AFTER the flag is released, and this is the
+                // only place it may happen. Checking it while isSaving was still true lost
+                // saves: a request arriving in the gap between that check and this line set
+                // pendingSave, found isSaving still true, returned without scheduling — and
+                // nobody ever picked the request up again.
+                if (pendingSave.get()) {
+                    dev.boondock.bsanticheat.util.Scheduler.runGlobalLater(plugin, this::saveAsync, 20L);
+                }
             }
         });
 
@@ -79,8 +79,8 @@ public class AsyncConfigSaver {
             plugin.saveConfig();
             plugin.getLogger().info("[Config] Configuration saved synchronously on shutdown");
         } catch (Exception e) {
-            plugin.getLogger().severe("[Config] Failed to save config on shutdown: " + e.getMessage());
-            e.printStackTrace();
+            plugin.getLogger().log(java.util.logging.Level.SEVERE,
+                    "[Config] Failed to save config on shutdown", e);
         }
     }
 }

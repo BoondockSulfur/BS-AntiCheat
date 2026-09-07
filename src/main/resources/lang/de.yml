@@ -1,4 +1,16 @@
 # BSAntiCheat - Deutsche Sprachdatei
+#
+# FARBEN: alle gaengigen Formate funktionieren und lassen sich in einer Zeile mischen.
+#   &a &c &l &r              klassische Codes
+#   &#9863E7                 Hex
+#   &x&9&8&6&3&E&7           Hex in Spigots langer Schreibweise
+#   <#9863E7> <red> <bold>   MiniMessage, auch <gradient:#ff0000:#0000ff>
+# Ein Farbcode hebt Fett/Kursiv auf wie bisher. Alles, was kein Farb-Tag ist, bleibt
+# unveraendert stehen - deshalb steht "/bsac <reload|info|version>" unten weiterhin richtig.
+#
+# PLATZHALTER: %player% und Co. setzt das Plugin ein. Mit installiertem PlaceholderAPI
+# werden zusaetzlich alle anderen Platzhalter aufgeloest - in Alarmen und in
+# Bestrafungsbefehlen, bezogen auf den Spieler, um den es geht.
 
 general:
   no_permission: "&cDu hast keine Berechtigung dafuer."
@@ -7,8 +19,11 @@ general:
   only_players: "&cDieser Befehl kann nur von Spielern verwendet werden."
 
 bsac:
-  usage: "&eVerwendung: &f/bsac <reload|info|version> [spieler]"
+  usage: "&eVerwendung: &f/bsac <reload|info|version|test> [spieler]"
   version: "&7BSAntiCheat &fv%version%"
+  test_usage: "&eVerwendung: &f/bsac test <Spieler> <CHECK> [Anzahl] &7- erhoeht die Stufe von Hand; Bestrafungen laufen echt."
+  test_unavailable: "&cDer Violation-Manager ist nicht verfuegbar."
+  test_done: "&a%player%&7: &f%check% &7steht jetzt auf VL &f%vl%&7."
   info_header: "&6=== AntiCheat Info: &f%player% &6==="
   info_none: "&7Keine aktiven Verstoesse."
   info_entry: "&7- &e%check%&7: &f%vl% VL"
@@ -181,3 +196,7 @@ alert:
   discord_position: "Position"
   discord_ores: "Erze"
   discord_positions: "Letzte Positionen"
+
+punishment:
+  kick_default: "&c&lAntiCheat\n&7Du wurdest wegen auffaelligem Verhalten entfernt.\n&7Wenn das ein Irrtum ist, melde dich bei einem Moderator."
+  notify_default: "&e[AC] &f%player% &7hat Bestrafungsstufe &f%vl% &7fuer &f%check% &7erreicht."

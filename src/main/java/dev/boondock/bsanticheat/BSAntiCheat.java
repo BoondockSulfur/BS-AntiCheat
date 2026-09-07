@@ -109,6 +109,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
 
         // Violation level / punishment handling
         violationManager = new ViolationManager(this, configAdapter);
+        violationManager.setLanguage(lang);
         movementChecker.setViolationManager(violationManager);
         xrayDetector.setViolationManager(violationManager);
         combatChecker.setViolationManager(violationManager);
@@ -190,7 +191,12 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             try {
                 new BSACPlaceholders(this).register();
-                getLogger().info("PlaceholderAPI hooked - placeholders available (%bsanticheat_total%, %bsanticheat_vl_<check>%).");
+                // Both directions: the expansion PUBLISHES our violation levels, and this
+                // flag lets our own messages and punishment commands RESOLVE other plugins'
+                // placeholders. Only the first half existed.
+                dev.boondock.bsanticheat.util.Messages.setPlaceholderApiPresent(true);
+                getLogger().info("PlaceholderAPI hooked - placeholders available (%bsanticheat_total%, %bsanticheat_vl_<check>%),"
+                        + " and placeholders in alerts and punishment commands are resolved.");
             } catch (Throwable t) {
                 getLogger().warning("PlaceholderAPI hook failed: " + t.getMessage());
             }
@@ -240,6 +246,9 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         // Reload the language in place so components holding a reference stay valid
         lang.setLanguage(configAdapter.language());
         if (xrayDetector != null) xrayDetector.reloadConfigCaches();
+        // Reschedules the transaction ping task: its period is baked in when the task is
+        // created, so reloading the config alone left the old interval running.
+        if (packets != null) packets.reload();
         getLogger().info("BSAntiCheat reloaded.");
     }
 

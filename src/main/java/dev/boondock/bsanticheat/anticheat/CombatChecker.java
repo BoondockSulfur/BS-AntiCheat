@@ -17,13 +17,13 @@ import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.util.Vector;
 
-import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 
 /**
  * Combat checks (event-based):
@@ -46,6 +46,7 @@ public class CombatChecker implements Listener {
     private MovementAlertManager alertManager;
     private ViolationManager violationManager;
     private TransactionManager transactionManager;
+    private MeleeTracker meleeTracker;
 
     // Slack for latency/hitbox interpolation on top of the surface distance.
     private static final double HITBOX_ALLOWANCE = 0.3;
@@ -65,6 +66,35 @@ public class CombatChecker implements Listener {
     private final Map<UUID, long[]> reachStreak = new ConcurrentHashMap<>();
     private final Map<UUID, long[]> killAuraAngleStreak = new ConcurrentHashMap<>();
     private final Map<UUID, long[]> killAuraMultiStreak = new ConcurrentHashMap<>();
+
+    /**
+     * Teleport / join / respawn / world-change grace, per player.
+     *
+     * <p>Every check family had one of these except this one: MovementChecker keeps
+     * recentTeleport and recentJoin, PacketChecker keeps graceUntil. Combat had none, and it
+     * needs one for the same reason they do — a teleport moves an entity server-side while
+     * the attacking client still has the old position, so the distance measured at event time
+     * is one nobody involved could see. It applies to BOTH sides: being teleported yourself
+     * desyncs your view of everyone, and a target arriving next to you desyncs theirs.
+     */
+    private final Map<UUID, Long> graceUntil = new ConcurrentHashMap<>();
+
+    /**
+     * Last damage event per attacker: [0]=victim UUID high bits, [1]=low bits, [2]=time(ms).
+     *
+     * <p>One swing does not always produce one event. Item plugins that add their own damage
+     * (MMOItems/MythicLib here) fire EntityDamageByEntityEvent several times for the same hit,
+     * with identical geometry. Measured on this server 2026-08-27: of 327 hit groups, 83 came
+     * twice, 76 three times and 4 four times — the same attacker, the same victim, the same
+     * aim angle to the degree. Every streak requirement in this class is defeated by that: a
+     * reach_violations of 3 is reached by ONE over-reach hit, which is exactly what the
+     * counters exist to prevent. Weapon cooldowns make genuine hits on the same victim
+     * hundreds of milliseconds apart, so anything inside one tick is the same swing.
+     */
+    private final Map<UUID, long[]> lastHit = new ConcurrentHashMap<>();
+    private static final long SAME_SWING_MS = 60L;
+    private static final long TELEPORT_GRACE_MS = 2000L;
+    private static final long JOIN_GRACE_MS = 3000L;
     private static final long STREAK_WINDOW_MS = 10000L;
 
     public CombatChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
@@ -92,6 +122,10 @@ public class CombatChecker implements Listener {
 
     public void setTransactionManager(TransactionManager transactionManager) {
         this.transactionManager = transactionManager;
+    }
+
+    public void setMeleeTracker(MeleeTracker meleeTracker) {
+        this.meleeTracker = meleeTracker;
     }
 
     /** Suspicious-hit streak: increment within the window, restart when it lapsed. */
@@ -122,9 +156,35 @@ public class CombatChecker implements Listener {
         if (Exemptions.isExempt(attacker, config, luckPerms, geyser)) return;
         if (attacker.getWorld() != victim.getWorld()) return;
 
+        // A position desync on EITHER side makes the measured distance meaningless, so both
+        // are checked: the attacker may have just been teleported, and so may the target.
+        long now = System.currentTimeMillis();
+        if (inGrace(attacker.getUniqueId(), now) || inGrace(victim.getUniqueId(), now)) {
+            resetStreaks(attacker.getUniqueId());
+            return;
+        }
+
         // Don't run combat checks against NPCs (Citizens tags them with "NPC" metadata) —
         // legitimate to hit and their hitboxes/positions are often unusual.
         if (victim.hasMetadata("NPC")) return;
+
+        // The same swing, delivered again by an item plugin, is not a second piece of
+        // evidence. Dropped before any streak is touched.
+        if (isRepeatOfSameSwing(attacker.getUniqueId(), victim.getUniqueId(), now)) return;
+
+        // Damage the client never asked for is not a swing, and every check below reads the
+        // GEOMETRY of a swing. An item plugin's ranged ability arrives here shaped exactly
+        // like a melee hit — same cause, same damager — but from wherever the ability reaches,
+        // hitting whatever it covers. Judging that as reach, aim angle or multi-target says
+        // nothing about the player; see MeleeTracker for the live case behind this.
+        if (meleeTracker != null && !meleeTracker.isMeleeHit(attacker.getUniqueId(), now)) {
+            if (config.debugMode()) {
+                plugin.getLogger().info("[COMBAT-DEBUG] " + attacker.getName()
+                        + ": Schaden ohne Angriffspaket (Plugin-Ability) -> nicht bewertet");
+            }
+            resetStreaks(attacker.getUniqueId());
+            return;
+        }
 
         boolean victimIsPlayer = victim instanceof Player;
         UUID attackerId = attacker.getUniqueId();
@@ -162,37 +222,8 @@ public class CombatChecker implements Listener {
             consecutiveAutoBlock.remove(attackerId);
         }
 
-        // --- Reach ---
-        if (config.reachDetectionEnabled()) {
-            // Measure to the hitbox surface, not the center — center-based distance
-            // false-positives on large mobs (Ghast, Ravager) whose hitbox extends
-            // multiple blocks from the center.
-            double distance = Math.max(0.0, distanceToHitbox(attacker, victim) - HITBOX_ALLOWANCE);
-            // Latency stretches the measured distance: both hitboxes moved between the
-            // client's aim and the server's judgement. Same sqrt scaling as the movement
-            // checks (200ms → +10%, 500ms → +20%).
-            // Honour a raised interaction-range attribute. Item plugins (MMOItems and
-            // friends) grant long-reach weapons by modifying it — judging those hits
-            // against the flat config value flags the player for using their own gear.
-            double configured = config.reachDistance();
-            var range = attacker.getAttribute(org.bukkit.attribute.Attribute.ENTITY_INTERACTION_RANGE);
-            if (range != null) {
-                configured = Math.max(configured, range.getValue() + Constants.REACH_ATTRIBUTE_SLACK);
-            }
-            // A resized player reaches proportionally further — their arms are longer.
-            double maxReach = configured * CheckMath.scale(attacker)
-                    * CheckMath.pingSlack(
-                            CheckMath.effectivePing(transactionManager, attacker));
-            if (distance > maxReach) {
-                int c = bumpStreak(reachStreak, attackerId);
-                if (c >= config.reachViolations()) {
-                    handleViolation(attacker, "REACH", lang.format("alert.reach", distance, maxReach), distance);
-                    reachStreak.remove(attackerId);
-                }
-            } else {
-                reachStreak.remove(attackerId);
-            }
-        }
+        // --- Reach --- (own method: its early exits must not skip the checks below)
+        if (config.reachDetectionEnabled()) checkReach(attacker, victim, attackerId);
 
         // --- KillAura --- (optionally only against player targets to avoid mob-grinding FPs)
         if (config.killAuraDetectionEnabled() && (!config.killAuraPlayersOnly() || victimIsPlayer)) {
@@ -203,7 +234,7 @@ public class CombatChecker implements Listener {
             if (toTarget.lengthSquared() > 1.0e-6) {
                 double angle = Math.toDegrees(look.angle(toTarget));
                 if (config.debugMode()) {
-                    plugin.getLogger().info(String.format("[KA-DEBUG] %s angle=%.0f (max %.0f) targetPlayer=%b",
+                    plugin.getLogger().info(String.format(java.util.Locale.ROOT, "[KA-DEBUG] %s angle=%.0f (max %.0f) targetPlayer=%b",
                             attacker.getName(), angle, config.killAuraMaxAngle(), victimIsPlayer));
                 }
                 if (angle > config.killAuraMaxAngle()) {
@@ -236,6 +267,143 @@ public class CombatChecker implements Listener {
         }
     }
 
+    /**
+     * Reach, in its own method so that standing the check down cannot stand down the rest of
+     * combat. It has two exits — an unusable ping and a normal verdict — and both used to be
+     * a {@code return} out of the event handler, which took KillAura's aim angle and
+     * multi-target count with them. Neither has anything to do with reach: the multi-target
+     * count is a question about time, not about distance, and a cheat that inflates its own
+     * measured latency (by answering transaction pings late, the very trick the timer check
+     * guards against) would have switched all three off at once.
+     */
+    private void checkReach(Player attacker, LivingEntity victim, UUID attackerId) {
+        // Measure to the hitbox surface, not the center — center-based distance
+        // false-positives on large mobs (Ghast, Ravager) whose hitbox extends
+        // multiple blocks from the center.
+        double distance = Math.max(0.0, distanceToHitbox(attacker, victim) - HITBOX_ALLOWANCE);
+        // Honour a raised interaction-range attribute: a datapack or plugin that grants
+        // longer reach through it is granting it legitimately, and judging those hits
+        // against the flat config value would flag a player for using their own gear.
+        //
+        // Do NOT expect item plugins to show up here. This was written assuming MMOItems
+        // and friends work that way; measured on this server 2026-08-27, they do not —
+        // the attribute read 3.0 (vanilla) for every player while their weapons were
+        // reaching much further. Long-reach ITEM behaviour arrives as an ability that
+        // deals damage directly, which does not touch this attribute at all and is
+        // handled where it actually shows up, by MeleeTracker. This lookup is kept
+        // because it is correct for anything that does use the attribute, not because it
+        // covers item plugins.
+        double configured = config.reachDistance();
+        var range = attacker.getAttribute(org.bukkit.attribute.Attribute.ENTITY_INTERACTION_RANGE);
+        if (range != null) {
+            configured = Math.max(configured, range.getValue() + Constants.REACH_ATTRIBUTE_SLACK);
+        }
+        // Latency is an ADDITIVE error here, not a multiplicative one. pingSlack scales a
+        // limit, which is right for a speed (blocks per tick x slack) and wrong for a
+        // distance: what latency costs is however far the target travelled while the hit
+        // was in flight, and that is speed x time. Measured on this server 2026-08-27 in a
+        // four-way PvP session at 373-1519ms round trips: the old model allowed 4.7-5.5
+        // blocks while a sprinting pair separates by 4.2-17.0 in one round trip, and the
+        // alerts ran to 14.61 — a figure the multiplicative model cannot produce and
+        // ordinary play can.
+        int ping = CheckMath.effectivePing(transactionManager, attacker);
+        // Above this there is nothing left to compensate — the server simply cannot tell
+        // where either player was. Standing down is the honest answer; compensating ever
+        // more generously would just turn the check into a hole that scales with latency,
+        // and a cheat can inflate its own measured latency.
+        if (ping > config.reachMaxPingMs()) {
+            reachStreak.remove(attackerId);
+            if (config.debugMode()) {
+                plugin.getLogger().info(String.format(java.util.Locale.ROOT,
+                        "[REACH-DEBUG] %s uebersprungen: ping=%dms > %dms",
+                        attacker.getName(), ping, config.reachMaxPingMs()));
+            }
+            return;
+        }
+        double latencyAllowance = Math.min(config.reachMaxLatencyBlocks(),
+                Constants.SPRINT_BLOCKS_PER_SECOND * ping / 1000.0);
+        // A resized player reaches proportionally further — their arms are longer.
+        double maxReach = configured * CheckMath.scale(attacker) + latencyAllowance;
+        if (config.debugMode() && distance > maxReach * 0.8) {
+            // Logged from 80% of the limit, not only on the flag: the 2026-08-26 alert
+            // (7.26 blocks against a 4.00 cap) could not be judged afterwards because
+            // this check, alone among them, recorded nothing at all.
+            plugin.getLogger().info(String.format(java.util.Locale.ROOT,
+                    "[REACH-DEBUG] %s -> %s dist=%.2f max=%.2f (konfig=%.2f scale=%.2f "
+                            + "latenz=+%.2f ping=%dms) streak=%d/%d",
+                    attacker.getName(), victim.getType().name(), distance, maxReach,
+                    configured, CheckMath.scale(attacker), latencyAllowance, ping,
+                    (int) reachStreak.getOrDefault(attackerId, new long[]{0, 0})[0],
+                    config.reachViolations()));
+        }
+        if (distance > maxReach) {
+            int c = bumpStreak(reachStreak, attackerId);
+            if (c >= config.reachViolations()) {
+                handleViolation(attacker, "REACH", lang.format("alert.reach", distance, maxReach), distance);
+                reachStreak.remove(attackerId);
+            }
+        } else {
+            reachStreak.remove(attackerId);
+        }
+    }
+
+    /**
+     * True when this is the same swing arriving again — same attacker, same victim, inside one
+     * tick. Package-private so the rule can be exercised without an event.
+     */
+    boolean isRepeatOfSameSwing(UUID attacker, UUID victim, long now) {
+        long hi = victim.getMostSignificantBits();
+        long lo = victim.getLeastSignificantBits();
+        long[] prev = lastHit.get(attacker);
+        boolean repeat = prev != null && prev[0] == hi && prev[1] == lo
+                && now - prev[2] < SAME_SWING_MS;
+        if (!repeat) lastHit.put(attacker, new long[]{hi, lo, now});
+        return repeat;
+    }
+
+    /** Lapse a grace window without waiting for it, so the expiry can be tested. */
+    void expireGraceForTest(UUID id) {
+        graceUntil.remove(id);
+    }
+
+    /** True while a teleport/join/respawn/world change still has this player's positions in flux. */
+    private boolean inGrace(UUID id, long now) {
+        Long until = graceUntil.get(id);
+        return until != null && now < until;
+    }
+
+    /**
+     * Drop the streaks as well as skipping the hit. A streak built partly from before a
+     * teleport and partly from after it is evidence from two different places.
+     */
+    private void resetStreaks(UUID id) {
+        reachStreak.remove(id);
+        killAuraAngleStreak.remove(id);
+        killAuraMultiStreak.remove(id);
+        recentTargets.remove(id);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onTeleport(org.bukkit.event.player.PlayerTeleportEvent event) {
+        graceUntil.put(event.getPlayer().getUniqueId(),
+                System.currentTimeMillis() + TELEPORT_GRACE_MS);
+    }
+
+    @EventHandler
+    public void onJoin(org.bukkit.event.player.PlayerJoinEvent event) {
+        graceUntil.put(event.getPlayer().getUniqueId(), System.currentTimeMillis() + JOIN_GRACE_MS);
+    }
+
+    @EventHandler
+    public void onRespawn(org.bukkit.event.player.PlayerRespawnEvent event) {
+        graceUntil.put(event.getPlayer().getUniqueId(), System.currentTimeMillis() + JOIN_GRACE_MS);
+    }
+
+    @EventHandler
+    public void onWorldChange(org.bukkit.event.player.PlayerChangedWorldEvent event) {
+        graceUntil.put(event.getPlayer().getUniqueId(), System.currentTimeMillis() + JOIN_GRACE_MS);
+    }
+
     /** Distance from the attacker's eyes to the nearest point of the victim's bounding box. */
     private double distanceToHitbox(Player attacker, LivingEntity victim) {
         org.bukkit.util.BoundingBox box = victim.getBoundingBox();
@@ -250,7 +418,10 @@ public class CombatChecker implements Listener {
     private int recordTarget(UUID attacker, UUID victim) {
         long now = System.currentTimeMillis();
         long cutoff = now - Constants.KILLAURA_MULTI_WINDOW_MS;
-        Deque<TargetHit> hits = recentTargets.computeIfAbsent(attacker, k -> new ArrayDeque<>());
+        // Concurrent, not ArrayDeque: on Folia an EntityDamageByEntityEvent runs on the
+        // VICTIM's region thread, so one attacker hitting entities that belong to two
+        // different regions reaches this deque from two threads at once.
+        Deque<TargetHit> hits = recentTargets.computeIfAbsent(attacker, k -> new ConcurrentLinkedDeque<>());
         hits.addLast(new TargetHit(victim, now));
         while (!hits.isEmpty() && hits.peekFirst().time < cutoff) hits.pollFirst();
         Set<UUID> distinct = new HashSet<>();
@@ -274,6 +445,8 @@ public class CombatChecker implements Listener {
     }
 
     public void cleanup(UUID playerId) {
+        graceUntil.remove(playerId);
+        lastHit.remove(playerId);
         recentTargets.remove(playerId);
         consecutiveCriticals.remove(playerId);
         consecutiveAutoBlock.remove(playerId);
