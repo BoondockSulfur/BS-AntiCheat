@@ -4,11 +4,12 @@ All notable changes to BSAntiCheat are documented in this file.
 
 ---
 
-## [1.0.6] - 2026-08-27
+## [1.0.6] - 2026-09-07
 
-Six days of live alerts from two production servers, worked case by case. Every entry below
-started as an alert somebody looked at and said "that is not what happened" — and in most of
-them the check was not merely mistuned but measuring the wrong quantity. Three of the fixes
+Live alerts from two production servers, worked case by case, and then a review pass over what
+that work left behind. Every false-positive entry below started as an alert somebody looked at
+and said "that is not what happened" — and in most of them the check was not merely mistuned
+but measuring the wrong quantity. Three of the fixes
 here replace a model rather than a threshold, and two proposals were built, measured against
 the servers' own history, and then thrown away because the data did not support them.
 
