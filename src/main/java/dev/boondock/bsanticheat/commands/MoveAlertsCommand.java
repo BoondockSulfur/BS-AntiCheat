@@ -37,6 +37,14 @@ public class MoveAlertsCommand implements CommandExecutor, TabCompleter {
         return plugin.lang();
     }
 
+    /**
+     * The name to match log rows that predate the UUID column. Rows with a UUID are
+     * deleted by UUID only, so a former holder of this name keeps theirs.
+     */
+    private static String legacyName(OfflinePlayer target, String typed) {
+        return target.getName() != null ? target.getName() : typed;
+    }
+
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!sender.hasPermission("bsanticheat.admin")) {
@@ -81,7 +89,7 @@ public class MoveAlertsCommand implements CommandExecutor, TabCompleter {
                 if (clearDb) {
                     DatabaseManager db = plugin.database();
                     if (db != null) {
-                        db.deleteAntiCheatLogsExceptAsync(playerName,
+                        db.deleteAntiCheatLogsExceptAsync(target.getUniqueId(), legacyName(target, playerName),
                                 Constants.XRAY_LOG_TYPE_PREFIXES,
                                 deleted -> sender.sendMessage(lang().get("movement.db_cleared",
                                         "%player%", playerName, "%count%", String.valueOf(deleted))));

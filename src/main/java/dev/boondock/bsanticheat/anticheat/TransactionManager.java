@@ -11,7 +11,9 @@ import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -75,8 +77,7 @@ public class TransactionManager {
 
     /**
      * Re-read the ping interval and reschedule. The period is fixed when the task is created,
-     * so without this {@code transaction_interval_ticks} kept ticking at whatever value was
-     * in the file at startup and a {@code /bsac reload} appeared to do nothing.
+     * so a changed {@code transaction_interval_ticks} only takes effect through this.
      */
     public void restart() {
         stop();
@@ -84,12 +85,30 @@ public class TransactionManager {
     }
 
     private void tick() {
+        Set<UUID> online = new HashSet<>();
         for (Player player : Bukkit.getOnlinePlayers()) {
+            online.add(player.getUniqueId());
             sendPing(player);
         }
+        retainOnline(online);
     }
 
-    private void sendPing(Player player) {
+    /**
+     * Drop state for players that are no longer online. On Folia this timer runs on the
+     * global region thread while the quit cleanup runs on the player's region thread, so a
+     * ping sent for a player who quit mid-loop can re-create their entry after
+     * {@link #cleanup} already removed it. Sweeping against the online snapshot on every run
+     * bounds such a leftover to a single interval instead of keeping it forever.
+     */
+    void retainOnline(Set<UUID> online) {
+        pending.keySet().retainAll(online);
+        lastRttNanos.keySet().retainAll(online);
+        markerLogged.keySet().retainAll(online);
+    }
+
+    void sendPing(Player player) {
+        // A player whose quit has already been processed must not get a fresh entry.
+        if (!player.isOnline()) return;
         UUID uuid = player.getUniqueId();
         int id = idGen.getAndIncrement() & 0x7FFFFFFF;
         Map<Integer, Long> map = pending.computeIfAbsent(uuid, k -> new ConcurrentHashMap<>());
@@ -122,7 +141,7 @@ public class TransactionManager {
 
         if (config.debugMode() && markerLogged.putIfAbsent(uuid, Boolean.TRUE) == null && database != null) {
             double ms = rtt / 1.0e6;
-            database.logAsync("transaction", ms, name + ": transaction confirmed rtt=" + String.format(java.util.Locale.ROOT, "%.1fms", ms));
+            database.logAsync(uuid, "transaction", ms, name + ": transaction confirmed rtt=" + String.format(java.util.Locale.ROOT, "%.1fms", ms));
         }
     }
 
@@ -134,6 +153,11 @@ public class TransactionManager {
     public double roundTripMs(UUID uuid) {
         Long rtt = lastRttNanos.get(uuid);
         return rtt == null ? -1 : rtt / 1.0e6;
+    }
+
+    /** Whether any per-player state is held for this player (for tests). */
+    boolean isTracked(UUID uuid) {
+        return pending.containsKey(uuid) || lastRttNanos.containsKey(uuid);
     }
 
     public void cleanup(UUID uuid) {

@@ -68,19 +68,21 @@ public class MovementAlertManager {
     public void addAlert(Player player, String type, String details, double value, Location location) {
         UUID playerId = player.getUniqueId();
 
-        // Check cooldown for this type
-        if (isOnCooldown(playerId, type)) {
+        // Check and start the cooldown for this type in one step
+        long now = System.currentTimeMillis();
+        if (!tryStartCooldown(playerId, type, now)) {
             return;
         }
 
-        List<MovementAlert> alerts = playerAlerts.computeIfAbsent(playerId, k -> new CopyOnWriteArrayList<>());
-
         String locationStr = formatLocation(location);
-        MovementAlert alert = new MovementAlert(type, details, value, System.currentTimeMillis(), locationStr);
-        alerts.add(alert);
-
-        // Set cooldown
-        setCooldown(playerId, type);
+        MovementAlert alert = new MovementAlert(type, details, value, now, locationStr);
+        // Added under the map's lock: the cleanup drops emptied lists with computeIfPresent,
+        // so a list fetched here can never be removed before the alert lands in it.
+        playerAlerts.compute(playerId, (k, list) -> {
+            if (list == null) list = new CopyOnWriteArrayList<>();
+            list.add(alert);
+            return list;
+        });
 
         // Only log to console in debug mode
         if (config.debugMode()) {
@@ -94,19 +96,29 @@ public class MovementAlertManager {
         sendDiscordAlert(player, type, details, value, locationStr);
     }
 
-    private boolean isOnCooldown(UUID playerId, String type) {
-        Map<String, Long> cooldowns = alertCooldowns.get(playerId);
-        if (cooldowns == null) return false;
-
-        Long lastAlert = cooldowns.get(type);
-        if (lastAlert == null) return false;
-
-        return System.currentTimeMillis() - lastAlert < Constants.ALERT_COOLDOWN_MS;
+    /**
+     * Atomically: true, and the cooldown started, if none is running for this player and
+     * type. Runs under the outer map's lock, which the cleanup also takes, so an emptied
+     * per-player map is never removed while a new cooldown is being put into it.
+     */
+    private boolean tryStartCooldown(UUID playerId, String type, long now) {
+        return tryStartCooldown(alertCooldowns, playerId, type, now, Constants.ALERT_COOLDOWN_MS);
     }
 
-    private void setCooldown(UUID playerId, String type) {
-        alertCooldowns.computeIfAbsent(playerId, k -> new ConcurrentHashMap<>())
-                .put(type, System.currentTimeMillis());
+    /** Static with its state passed in, so it can be tested without a scheduler behind it. */
+    static boolean tryStartCooldown(Map<UUID, Map<String, Long>> alertCooldowns, UUID playerId,
+                                    String type, long now, long cooldownMs) {
+        boolean[] started = {false};
+        alertCooldowns.compute(playerId, (k, cooldowns) -> {
+            if (cooldowns == null) cooldowns = new ConcurrentHashMap<>();
+            Long lastAlert = cooldowns.get(type);
+            if (lastAlert == null || now - lastAlert >= cooldownMs) {
+                cooldowns.put(type, now);
+                started[0] = true;
+            }
+            return cooldowns;
+        });
+        return started[0];
     }
 
     private String formatLocation(Location loc) {
@@ -205,29 +217,25 @@ public class MovementAlertManager {
     /**
      * Cleanup alerts older than 30 minutes and expired cooldowns.
      */
-    private void cleanupOldAlerts() {
+    void cleanupOldAlerts() {
         long now = System.currentTimeMillis();
         long alertCutoff = now - (30 * 60 * 1000L);
         long cooldownCutoff = now - Constants.ALERT_COOLDOWN_MS;
 
-        // Clean up old alerts
-        playerAlerts.entrySet().removeIf(entry -> {
-            List<MovementAlert> alerts = entry.getValue();
-            alerts.removeIf(alert -> alert.timestamp() < alertCutoff);
-
-            // Remove empty entries
-            if (alerts.isEmpty()) {
-                return true; // Remove this entry
-            }
-            return false;
-        });
-
-        // Clean up expired cooldowns (more efficient)
-        alertCooldowns.entrySet().removeIf(entry -> {
-            Map<String, Long> cooldowns = entry.getValue();
-            cooldowns.entrySet().removeIf(cd -> cd.getValue() < cooldownCutoff);
-            return cooldowns.isEmpty();
-        });
+        // Trim and remove-if-empty inside computeIfPresent: the same lock addAlert holds while
+        // appending, so a concurrent alert or cooldown is never dropped with its container.
+        for (UUID id : playerAlerts.keySet()) {
+            playerAlerts.computeIfPresent(id, (k, alerts) -> {
+                alerts.removeIf(alert -> alert.timestamp() < alertCutoff);
+                return alerts.isEmpty() ? null : alerts;
+            });
+        }
+        for (UUID id : alertCooldowns.keySet()) {
+            alertCooldowns.computeIfPresent(id, (k, cooldowns) -> {
+                cooldowns.entrySet().removeIf(cd -> cd.getValue() < cooldownCutoff);
+                return cooldowns.isEmpty() ? null : cooldowns;
+            });
+        }
     }
 
     /**

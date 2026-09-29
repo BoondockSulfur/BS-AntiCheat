@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * X-Ray detection driven through real block-break sequences.
  *
- * <p>The scenarios mirror the three live alerts and what caused them. The central pair is
+ * <p>The central pair of scenarios is
  * "cave" versus "tunnel": both produce lots of ore and little stone, but only one of them is
  * knowledge the player should not have had.
  */
@@ -75,7 +75,7 @@ class XRayScenarioTest extends ScenarioBase {
     void visibleDiamondsAreIgnored() {
         bedrock();
         PlayerMock player = player(0.5, 41.0, 0.5);
-        // The live case: a cave system. Every ore has an open face that nobody dug.
+        // A cave system. Every ore has an open face that nobody dug.
         for (int i = 0; i < 12; i++) {
             world.getBlockAt(i * 5, 41, 0).setType(Material.CAVE_AIR); // open above
             mine(player, i * 5, 40, 0, Material.DEEPSLATE_DIAMOND_ORE);
@@ -100,8 +100,8 @@ class XRayScenarioTest extends ScenarioBase {
     @Test
     @DisplayName("A handful of fat veins does not raise XRAY")
     void severalFatVeinsAreNotEnough() {
-        // The live false positive of 2026-08-22, replayed with the real shapes: an OP cleaned
-        // out three deepslate diamond deposits of 7, 5 and 2 blocks inside a minute. Every
+        // An OP cleans out three deepslate diamond deposits of 7, 5 and 2 blocks inside a
+        // minute. Every
         // block counted as hidden — each one is exposed by breaking its neighbour — so the
         // block count reached 14 against a threshold of 10, and the three-deposit gate was
         // satisfied by there being three of them. Three lucky veins is not knowledge of where
@@ -147,7 +147,7 @@ class XRayScenarioTest extends ScenarioBase {
      *
      * <p>Both cannot be exercised at once in a test: the profile needs 300 stone breaks
      * before it says anything, while 60 inside the ratio window already make the player
-     * "searching", and MockBukkit mines everything in the same millisecond. On a live server
+     * "searching", and MockBukkit mines everything in the same millisecond. On a real server
      * the two windows are 300s and 60s wide, and the gap between them is exactly the case
      * these vetoes exist for — a player who dug for minutes and then spent one minute pulling
      * ore out of what they had exposed.
@@ -156,7 +156,7 @@ class XRayScenarioTest extends ScenarioBase {
         plugin.getConfig().set("anticheat.xray_min_stone_for_ratio", 1_000_000);
     }
 
-    /** Dig a branch mine on one level: parallel corridors, the honest measured profile. */
+    /** Dig a branch mine on one level: parallel corridors, the honest strip-miner profile. */
     private void branchMine(PlayerMock player, int level, int branches, int length) {
         for (int b = 0; b < branches; b++) {
             for (int x = 0; x < length; x++) {
@@ -168,7 +168,7 @@ class XRayScenarioTest extends ScenarioBase {
     @Test
     @DisplayName("A strip miner is vetoed even with scattered hidden diamonds")
     void stripMiningProfileVetoes() {
-        // The exonerating half of the 2026-08-22 case. This player would be flagged by the
+        // The exonerating counterpart of the fat-veins case. This player would be flagged by the
         // raw count — twelve buried diamonds from twelve separate deposits — but the shape of
         // their digging is a branch mine on one level, and the ore comes out of that level.
         bedrock();
@@ -220,8 +220,8 @@ class XRayScenarioTest extends ScenarioBase {
     void netherrackCountsAsSpoil() {
         PlayerMock player = player(0.5, 41.0, 0.5);
         bedrock(Material.NETHERRACK);
-        // Digging netherrack for debris used to count as no spoil at all, leaving the
-        // threshold of 3 to fire on its own.
+        // Digging netherrack for debris must count as spoil, or the threshold of 3 fires
+        // on its own.
         for (int i = 0; i < 80; i++) {
             mine(player, i % 20, 42, i / 20, Material.NETHERRACK);
         }
@@ -230,6 +230,114 @@ class XRayScenarioTest extends ScenarioBase {
         }
         assertEquals(0, violations.count("XRAY_THRESHOLD"),
                 "netherrack is spoil, so debris hunting reads as searching");
+    }
+
+    @Test
+    @DisplayName("One fat vein does not tip the ore-to-stone ratio")
+    void ratioCountsDepositsNotBlocks() {
+        // 61 stone makes the player "searching"; one buried 10-block diamond vein is one find.
+        // Counted per block that was 10/61 = 16% > 15%.
+        bedrock();
+        PlayerMock player = player(0.5, 41.0, 0.5);
+        for (int i = 0; i < 61; i++) {
+            mine(player, i % 20, 44, i / 20, Material.DEEPSLATE);
+        }
+        for (int i = 0; i < 10; i++) {
+            mine(player, i, 38, 12, Material.DEEPSLATE_DIAMOND_ORE);
+        }
+        assertEquals(0, violations.count("XRAY_RATIO"), "one deposit is one payoff");
+    }
+
+    @Test
+    @DisplayName("Scattered finds while digging still trip the ratio")
+    void ratioStillFlagsScatteredFinds() {
+        bedrock();
+        PlayerMock player = player(0.5, 41.0, 0.5);
+        for (int i = 0; i < 61; i++) {
+            mine(player, i % 20, 44, i / 20, Material.DEEPSLATE);
+        }
+        for (int i = 0; i < 10; i++) {
+            mine(player, i * 5, 38, 12, Material.DEEPSLATE_DIAMOND_ORE);
+        }
+        assertTrue(violations.count("XRAY_RATIO") > 0, "ten separate deposits per 61 stone is not luck");
+    }
+
+    @Test
+    @DisplayName("A tunnel dug by an exempt account does not make the ore visible")
+    void exemptAccountTunnelStillCountsAsFresh() {
+        // Two-account collusion: a creative (or bypassed/Bedrock) account opens the rock, the
+        // survival account takes the ore. The exempt account's breaks must still be recorded.
+        bedrock();
+        PlayerMock digger = player(0.5, 41.0, 0.5);
+        digger.setGameMode(org.bukkit.GameMode.CREATIVE);
+        PlayerMock collector = player(0.5, 41.0, 0.5);
+        for (int i = 0; i < 12; i++) {
+            mine(digger, i * 5, 41, 0, Material.DEEPSLATE); // open the face above each ore
+            mine(collector, i * 5, 40, 0, Material.DEEPSLATE_DIAMOND_ORE);
+        }
+        assertTrue(violations.count("XRAY_THRESHOLD") > 0,
+                "a face opened moments ago by anyone is not an open cave wall");
+    }
+
+    @Test
+    @DisplayName("Remembered breaks are capped per player and never skip another player")
+    void breakMemoryIsBoundedPerPlayer() {
+        long now = System.currentTimeMillis();
+        java.util.UUID heavy = java.util.UUID.randomUUID();
+        int cap = config.xrayTimewindowSeconds() * 20;
+        for (int i = 0; i < cap + 500; i++) {
+            detector.recordBreak(heavy, "scenario:" + i + ":40:0", now);
+        }
+        assertEquals(cap, detector.recentlyBrokenSize(), "the heavy breaker only displaces their own oldest");
+        detector.recordBreak(java.util.UUID.randomUUID(), "scenario:0:0:0", now);
+        assertEquals(cap + 1, detector.recentlyBrokenSize(), "another player's break is still recorded");
+    }
+
+    @Test
+    @DisplayName("Expired breaks are evicted by time")
+    void breakMemoryExpires() {
+        java.util.UUID id = java.util.UUID.randomUUID();
+        long old = System.currentTimeMillis() - (config.xrayTimewindowSeconds() + 5) * 1000L;
+        detector.recordBreak(id, "scenario:1:40:0", old);
+        detector.recordBreak(id, "scenario:2:40:0", System.currentTimeMillis());
+        assertEquals(1, detector.recentlyBrokenSize(), "the stale entry leaves when the next one arrives");
+    }
+
+    /** Make the scenario world a restricted one, the way an admin would: edit, reload. */
+    private void restrictScenarioWorld() throws Exception {
+        java.io.File file = new java.io.File(plugin.getDataFolder(), "config.yml");
+        java.nio.file.Files.writeString(file.toPath(), java.nio.file.Files.readString(file.toPath())
+                .replace("restricted_worlds: []", "restricted_worlds: [scenario]"));
+        config.reload();
+        assertTrue(config.isRestrictedWorld("scenario"), "fixture check: the world is restricted");
+    }
+
+    @Test
+    @DisplayName("Restricted world: common ores are not watched by default")
+    void restrictedWorldIgnoresCommonOres() throws Exception {
+        restrictScenarioWorld();
+        bedrock();
+        PlayerMock player = player(0.5, 41.0, 0.5);
+        for (int i = 0; i < 20; i++) mine(player, i, 40, 0, Material.DEEPSLATE_COPPER_ORE);
+        for (int i = 0; i < 10; i++) mine(player, i, 40, 6, Material.COAL_ORE);
+        assertEquals(0, violations.count("RESTRICTED_ZONE"), "coal and copper veins are not evidence");
+    }
+
+    @Test
+    @DisplayName("Restricted world: one alert per deposit, none for visible ore")
+    void restrictedWorldCountsDeposits() throws Exception {
+        restrictScenarioWorld();
+        bedrock();
+        PlayerMock player = player(0.5, 41.0, 0.5);
+        for (int i = 0; i < 5; i++) mine(player, i, 40, 0, Material.DEEPSLATE_DIAMOND_ORE);
+        assertEquals(1, violations.count("RESTRICTED_ZONE"), "a five-block vein is one find");
+
+        mine(player, 30, 40, 0, Material.DEEPSLATE_DIAMOND_ORE);
+        assertEquals(2, violations.count("RESTRICTED_ZONE"), "a separate deposit is a new find");
+
+        world.getBlockAt(50, 41, 0).setType(Material.CAVE_AIR); // open cave wall
+        mine(player, 50, 40, 0, Material.DEEPSLATE_DIAMOND_ORE);
+        assertEquals(2, violations.count("RESTRICTED_ZONE"), "ore on view was seen, not located");
     }
 
     @Test

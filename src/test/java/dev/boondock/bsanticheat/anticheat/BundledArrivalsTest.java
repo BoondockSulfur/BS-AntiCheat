@@ -10,15 +10,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Click rate when the network bundles the packets.
  *
- * <p>AutoClicker used to read its rate off a sliding count of arrival times, which puts the
+ * <p>AutoClicker must not read its rate off a sliding count of arrival times, which puts the
  * network in charge of the answer: a connection that delivers a tick's swings in clumps makes
  * the count read whatever the clumping lines up with, while nothing about the clicking changed.
  *
- * <p>The live case this reconstructs: an alert at 26 CPS from a player who was placing blocks,
- * whose interval median sat at exactly 50.0 ms — one server tick, the held-button cadence —
+ * <p>The scenario reconstructed here: a player placing blocks at 26 CPS by arrival count,
+ * whose interval median sits at exactly 50.0 ms — one server tick, the held-button cadence —
  * with a MAD of 49 ms. Those two numbers together describe a bimodal arrival pattern, half the
  * intervals near 0 ms and half near 100 ms, which is what {@link #bundledPairs} builds. The
- * median was right throughout; only the count was wrong.
+ * median is correct throughout; only the count is wrong.
  */
 class BundledArrivalsTest {
 
@@ -52,21 +52,21 @@ class BundledArrivalsTest {
     }
 
     @Test
-    @DisplayName("The fixture reproduces the live numbers")
+    @DisplayName("The fixture has the expected median and MAD")
     void fixtureMatchesTheLiveAlert() {
         long[] intervals = intervalsOf(bundledPairs(10));
         double median = PacketChecker.median(intervals);
-        assertEquals(50.0, median, 0.001, "live alert reported median=50.0ms");
+        assertEquals(50.0, median, 0.001, "expected median=50.0ms");
         assertEquals(49.0, PacketChecker.medianAbsoluteDeviation(intervals, median), 0.001,
-                "live alert reported mad=49.0ms");
+                "expected mad=49.0ms");
     }
 
     @Test
     @DisplayName("Bundled arrivals do not inflate the rate")
     void bundlingDoesNotInflateTheRate() {
         long[] intervals = intervalsOf(bundledPairs(10));
-        // 20 packets inside one second, which is what the old sliding count would have read
-        // — and it climbed past 25 in the live case as the bundles lined up.
+        // 20 packets inside one second, which is what a sliding count would read
+        // — and it can climb past 25 as the bundles line up.
         int arrivals = 26;
         assertEquals(20, PacketChecker.cpsFromInterval(PacketChecker.median(intervals), arrivals),
                 "one swing per tick is 20 CPS however the packets are delivered");
@@ -85,7 +85,7 @@ class BundledArrivalsTest {
     @Test
     @DisplayName("A short fast burst is not a sustained rate")
     void shortBurstIsNotASustainedRate() {
-        // The live regression: eight clicks about 33 ms apart and then a pause. Every interval
+        // Eight clicks about 33 ms apart and then a pause. Every interval
         // in the window is a burst interval, so the median reports the speed inside the burst
         // — but only eight clicks arrived in the second it is supposed to describe.
         long[] intervals = intervalsOf(steady(8, 33));

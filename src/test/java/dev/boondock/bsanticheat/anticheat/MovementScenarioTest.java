@@ -19,8 +19,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Movement checks driven through real event sequences.
  *
- * <p>Every scenario here corresponds to something that actually happened on the live server,
- * or to the detection it must not give up in exchange. Pairs matter more than individual
+ * <p>Every scenario here is either a false positive that must stay quiet or the detection it
+ * must not give up in exchange. Pairs matter more than individual
  * cases: an exemption that silences a false positive is only worth having if the matching
  * "…but this is still caught" case passes alongside it.
  */
@@ -67,7 +67,7 @@ class MovementScenarioTest extends ScenarioBase {
     @Test
     @DisplayName("A cobweb at body height exempts the hover check")
     void cobwebExempts() throws InterruptedException {
-        // Live case: mineshaft web holding the player, open cave below. At foot level the
+        // Mineshaft web holding the player, open cave below. At foot level the
         // web would count as footing via isSupportive and prove nothing, so it sits above.
         setBlock(0, 81, 0, Material.COBWEB);
         PlayerMock player = player(0.5, 80.0, 0.5);
@@ -89,7 +89,7 @@ class MovementScenarioTest extends ScenarioBase {
     @Test
     @DisplayName("Towering up does not raise FLY")
     void pillaringIsExempt() throws InterruptedException {
-        // The live case: 31 hover alerts while the player built a clay tower. Each jump
+        // Building a tower: each jump
         // places a block underfoot which catches them before gravity shows, so the fall the
         // hover check waits for never arrives.
         PlayerMock player = player(0.5, 80.0, 0.5);
@@ -112,12 +112,13 @@ class MovementScenarioTest extends ScenarioBase {
     }
 
     @Test
-    @DisplayName("A piston push does not raise FLY")
+    @DisplayName("A piston elevator does not raise FLY")
     void pistonPushExempt() throws InterruptedException {
         PlayerMock player = player(0.5, 80.0, 0.5);
         clearGrace();
         for (int i = 0; i < 40; i++) {
-            firePistonAt(0, 80, 0);
+            // A piston under the player pushing upwards, as an elevator does.
+            firePistonAt(0, 78, 0, org.bukkit.block.BlockFace.UP);
             Location from = loc(0.5 + i * 0.01, 80.0, 0.5);
             player.teleport(from);
             checker.onPlayerMove(new PlayerMoveEvent(player, from, loc(0.5 + (i + 1) * 0.01, 80.0, 0.5)));
@@ -126,12 +127,27 @@ class MovementScenarioTest extends ScenarioBase {
         assertEquals(0, violations.count("FLY"), "a piston displaces without any velocity packet");
     }
 
-    private void firePistonAt(int x, int y, int z) {
+    @Test
+    @DisplayName("A sideways piston clock beside a hovering player does not excuse the hover")
+    void sidewaysClockDoesNotExemptHover() throws InterruptedException {
+        PlayerMock player = player(0.5, 80.0, 0.5);
+        clearGrace();
+        for (int i = 0; i < 40; i++) {
+            firePistonAt(2, 80, 0, org.bukkit.block.BlockFace.EAST);
+            Location from = loc(0.5 + i * 0.01, 80.0, 0.5);
+            player.teleport(from);
+            checker.onPlayerMove(new PlayerMoveEvent(player, from, loc(0.5 + (i + 1) * 0.01, 80.0, 0.5)));
+            tick();
+        }
+        assertTrue(violations.count("FLY") > 0, "a horizontal push cannot hold anyone in the air");
+    }
+
+    private void firePistonAt(int x, int y, int z, org.bukkit.block.BlockFace face) {
         var piston = world.getBlockAt(x, y, z);
         piston.setType(Material.PISTON);
-        var pushed = world.getBlockAt(x + 1, y, z);
+        var pushed = piston.getRelative(face);
         pistons.onPistonExtend(new org.bukkit.event.block.BlockPistonExtendEvent(
-                piston, java.util.List.of(pushed), org.bukkit.block.BlockFace.EAST));
+                piston, java.util.List.of(pushed), face));
         piston.setType(Material.AIR);
     }
 
@@ -162,23 +178,39 @@ class MovementScenarioTest extends ScenarioBase {
         assertEquals(0, violations.count("FLY"));
     }
 
+    /** Push the player along +X by {@code perTick} each tick, with a piston firing beside them. */
+    private void shove(PlayerMock player, double perTick, int ticks) throws InterruptedException {
+        for (int i = 0; i < ticks; i++) {
+            Location from = loc(0.5 + i * perTick, 80.0, 0.5);
+            // The piston travels with the player — a flying machine, or a bolt of pistons
+            // firing in sequence. A single stationary piston would (rightly) stop covering
+            // them after a few blocks, which is the exemption working as intended.
+            firePistonAt((int) from.getX(), 79, 0, org.bukkit.block.BlockFace.EAST);
+            player.teleport(from);
+            checker.onPlayerMove(new PlayerMoveEvent(player, from, loc(0.5 + (i + 1) * perTick, 80.0, 0.5)));
+            Thread.sleep(50); // real ticks: the speed budget is judged against the clock
+        }
+    }
+
     @Test
     @DisplayName("A piston push does not raise SPEED")
     void pistonPushIsNotSpeed() throws InterruptedException {
         floor(79, Material.STONE);
         PlayerMock player = player(0.5, 80.0, 0.5);
         clearGrace();
-        for (int i = 0; i < 20; i++) {
-            Location from = loc(0.5 + i * 1.5, 80.0, 0.5);
-            // The piston travels with the player — a flying machine, or a bolt of pistons
-            // firing in sequence. A single stationary piston would (rightly) stop covering
-            // them after a few blocks, which is the exemption working as intended.
-            firePistonAt((int) from.getX(), 79, 0);
-            player.teleport(from);
-            checker.onPlayerMove(new PlayerMoveEvent(player, from, loc(0.5 + (i + 1) * 1.5, 80.0, 0.5)));
-            tick();
-        }
+        // Walking plus one push's worth per tick.
+        shove(player, 1.2, 20);
         assertEquals(0, violations.count("SPEED"), "being shoved is not moving yourself");
+    }
+
+    @Test
+    @DisplayName("A piston clock does not excuse speed beyond what a push can add")
+    void pistonDoesNotExcuseAnySpeed() throws InterruptedException {
+        floor(79, Material.STONE);
+        PlayerMock player = player(0.5, 80.0, 0.5);
+        clearGrace();
+        shove(player, 3.0, 20);
+        assertTrue(violations.count("SPEED") > 0, "no piston moves anyone 3 blocks a tick");
     }
 
     // ==================== SPEED in water ====================
@@ -206,9 +238,8 @@ class MovementScenarioTest extends ScenarioBase {
     @Test
     @DisplayName("Depth Strider III plus Dolphin's Grace does not raise SPEED")
     void fastSwimmingIsQuiet() throws InterruptedException {
-        // Live case, 2026-08-21: twelve SPEED alerts between 0.42 and 2.12 b/t, all labelled
-        // "walking". The player was in water the whole time, but isSwimming() is only true in
-        // the horizontal swim POSE, so the water bonuses below were never reached.
+        // The player is in water the whole time, but isSwimming() is only true in the
+        // horizontal swim POSE, so the water bonuses must apply without it.
         waterChannel();
         PlayerMock player = player(0.5, 80.0, 0.5);
         player.setInWater(true);
@@ -216,7 +247,7 @@ class MovementScenarioTest extends ScenarioBase {
         player.addPotionEffect(new PotionEffect(PotionEffectType.DOLPHINS_GRACE, 600, 0));
         clearGrace();
         Location[] path = new Location[20];
-        for (int i = 0; i < 20; i++) path[i] = loc(0.5 + i * 0.77, 80.0, 0.5); // the live peak
+        for (int i = 0; i < 20; i++) path[i] = loc(0.5 + i * 0.77, 80.0, 0.5); // peak speed of the scenario
         walk(player, path);
         assertEquals(0, violations.count("SPEED"), "water physics were never applied");
     }
@@ -294,9 +325,8 @@ class MovementScenarioTest extends ScenarioBase {
     @Test
     @DisplayName("An arc through the still band is not hovering")
     void ballisticArcIsNotHover() {
-        // The live alert of 2026-08-26 on NewBeginnings, replayed with its measured dy values.
-        // Every sample sits inside the +-0.08 still band, so the old rule counted all ten and
-        // flagged — but the sequence decays monotonically from +0.067 to -0.051, which is what
+        // Every sample sits inside the +-0.08 still band, so a plain count would take all ten
+        // as hovering — but the sequence decays monotonically from +0.067 to -0.051, which is what
         // gravity does to a thrown player and not what holding an altitude looks like.
         PlayerMock player = player(0.5, 80.0, 0.5);
         try {

@@ -9,25 +9,18 @@ import java.util.Set;
 /**
  * Shape of a player's recent digging, used as EXONERATING evidence by the X-Ray checks.
  *
- * <p>The counting checks cannot tell a lucky miner from someone who knew where to walk — that
- * was the 2026-08-22 false positive, where an OP who had moved 3400 blocks of stone was
- * flagged for cleaning out three fat veins. What separates them is not how much they dug but
- * the SHAPE of it. Measured over 4.5 months of this server's block log (four players, 32
- * half-hour windows of 300+ stone):
- *
- * <pre>
- *   player              Y within +-1 of modal    Y std-dev    ore Y-span   corridor
- *   Nuk3i                       91%                 1.2          3.0         89%
- *   darkghost2345555            86%                 1.1          3.6         75%
- *   SilverNoicers111            84%                 1.2          3.5         77%
- * </pre>
+ * <p>The counting checks cannot tell a lucky miner from someone who knew where to walk; a
+ * player who strip-mines a lot of stone and clears a few thick veins can reach the ore
+ * thresholds honestly. What separates the two is not how much they dug but the SHAPE of it:
+ * how tightly the digging holds one Y level, how much of it is corridor, and whether the ore
+ * came out of the band the corridors run through.
  *
  * <p>Strip mining is unmistakable: a single Y level, straight corridors, and ore that comes
  * out of the same narrow band the corridors run through. Nothing about a count can see that.
  *
  * <p>These are vetoes and only vetoes. They can remove alerts, never raise one, so they
- * cannot introduce a false positive — which matters because the incriminating side of this
- * problem has no confirmed X-Ray sample on this server to calibrate against.
+ * cannot introduce a false positive; there is no confirmed X-Ray sample to calibrate an
+ * incriminating signal against.
  *
  * <p>The ore-in-band requirement is what keeps the veto from becoming a hiding place: a
  * player who strip-mines honestly for ten minutes and then takes ore from five levels above
@@ -75,8 +68,6 @@ final class MiningProfile {
     /**
      * Fraction of the sample that sits inside a corridor — a block with dug neighbours on
      * BOTH sides along the same axis, which is what a tunnel is and a cave is not.
-     *
-     * <p>Measured at 75-89% for the three strip miners above.
      */
     static double corridorFraction(Collection<StoneBreak> stone) {
         int n = stone.size();

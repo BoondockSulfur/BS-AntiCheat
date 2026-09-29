@@ -47,8 +47,78 @@ public class MovementChecker implements Listener {
     private TransactionManager transactionManager;
     private PistonTracker pistons;
 
+    // Last position seen, and when. Every move event updates these.
     private final Map<UUID, Location> lastLocations = new ConcurrentHashMap<>();
     private final Map<UUID, Long> lastMoveTime = new ConcurrentHashMap<>();
+    // Setback target: the last position reached by a sample that passed every check without
+    // starting a streak, or one recorded while checks were legitimately off (exemptions,
+    // grace windows). Kept apart from lastLocations, which follows every event: setting back
+    // to that would only undo the last packet of whatever the violation was built from.
+    private final Map<UUID, Location> lastLegitLocations = new ConcurrentHashMap<>();
+    // Setbacks issued by this checker whose teleport event has not arrived yet. The teleport
+    // handler recognises them by destination, so a setback does not grant itself teleport
+    // immunity or wipe the streaks that caused it.
+    private record PendingSetback(Location target, long at) {}
+    private final Map<UUID, PendingSetback> pendingSetbacks = new ConcurrentHashMap<>();
+    private static final long SETBACK_MATCH_MS = 5000;
+
+    // The sample currently being built: where and when it started, and how many move events
+    // have been folded into it (see onPlayerMove).
+    private final Map<UUID, Location> sampleFrom = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> sampleAt = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> sampleEvents = new ConcurrentHashMap<>();
+    private static final long MIN_SAMPLE_MS = Math.round(Constants.MOVEMENT_MIN_TIME_DELTA * 1000.0);
+    // Start and length of the current burst of back-to-back events (for TELEPORT).
+    private final Map<UUID, Location> burstFrom = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> burstEvents = new ConcurrentHashMap<>();
+
+    // Horizontal speed budget: [0] = remaining allowance in blocks, [1]/[2] = distance and
+    // ticks since the budget was last full (for the alert text). See checkSpeedBudget.
+    private final Map<UUID, double[]> speedBudget = new ConcurrentHashMap<>();
+    // Capacity in ticks of allowed travel. Longer than MOVEMENT_MAX_GAP_MS, so the backlog of
+    // any stall that is still judged at all fits into what accrued during it.
+    private static final double SPEED_BUDGET_TICKS = 10.0;
+    // How far into debt (in ticks of allowed travel) the budget may go before it flags.
+    private static final double SPEED_DEBT_TICKS = 3.0;
+    private static final int BUDGET_OK = 0;
+    private static final int BUDGET_DEBT = 1;
+    private static final int BUDGET_SETBACK = 2;
+
+    // Free-fall window (see checkFreeFall).
+    private static final class AirWindow {
+        final double startY;
+        final long startAt;
+        final double v0;
+        int events;
+
+        AirWindow(double startY, long startAt, double v0) {
+            this.startY = startY;
+            this.startAt = startAt;
+            this.v0 = v0;
+        }
+    }
+    private final Map<UUID, AirWindow> airWindows = new ConcurrentHashMap<>();
+    private static final double PLAYER_GRAVITY = 0.08;
+    private static final double PLAYER_DRAG = 0.98;
+    private static final double VANILLA_JUMP_VELOCITY = 0.42;
+    // Terminal falling speed of a player (0.08 gravity, 0.98 drag), rounded up.
+    private static final double TERMINAL_FALL_SPEED = 4.0;
+    // Added to the jump velocity as the assumed launch speed, for sampling noise.
+    private static final double LAUNCH_MARGIN = 0.1;
+    // Airborne time before a stretch is judged, and the leeway on the expected fall.
+    private static final double FREE_FALL_MIN_TICKS = 20.0;
+    private static final double FREE_FALL_TOLERANCE = 1.0;
+    private static final int GRAVITY_OK = 0;
+    private static final int GRAVITY_SUSPECT = 1;
+    private static final int GRAVITY_SETBACK = 2;
+
+    // Whether the player was flying at their previous move, to notice flight ending without
+    // an event (allowFlight revoked by /fly or a region flag).
+    private final Map<UUID, Boolean> wasFlying = new ConcurrentHashMap<>();
+    // Flight momentum after flying stops: a sprint-flying player carries ~1 b/t that drag
+    // takes around half a second to bleed below the walking cap, and falls from wherever
+    // they were.
+    private static final long FLIGHT_END_GRACE_MS = 2000;
     private final Map<UUID, Integer> consecutiveSpeedViolations = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> consecutiveFlyViolations = new ConcurrentHashMap<>();
     // Sustained-hover detection: consecutive airborne samples without falling
@@ -87,9 +157,7 @@ public class MovementChecker implements Listener {
     // Stores the instant the grace EXPIRES, because riptide needs a longer one than elytra:
     // a trident launch is a single impulse that then bleeds off against drag, and vanilla
     // clears isRiptiding() after the ~0.5s animation while the player is still travelling at
-    // several blocks per tick. Live data caught exactly that tail — three SPEED alerts of
-    // 1.52 / 1.03 / 0.72 b/t against a 0.4 walk cap, decaying, at the same coordinates and
-    // second as RIPTIDE alerts.
+    // several blocks per tick; that decaying tail would otherwise read as SPEED.
     // Also used for dismounts: leaving a horse or boat at speed hands the player its
     // momentum, with no key input of their own behind it.
     private final Map<UUID, Long> momentumGraceUntil = new ConcurrentHashMap<>();
@@ -102,8 +170,6 @@ public class MovementChecker implements Listener {
     // before gravity shows, so the fall the hover check waits for never happens, and at the
     // apex of each jump the previous solid block has already dropped out of the support scan.
     // The result reads as "airborne and not falling", which is precisely the hover signature.
-    // Live data: 31 hover alerts climbing Y 91→302 while CoreProtect recorded 752 clay blocks
-    // placed and removed over the same Y range, in the same minutes.
     private final Map<UUID, Long> recentPillar = new ConcurrentHashMap<>();
     private static final long PILLAR_GRACE_MS = 1500;
     // How far below the feet a placed block still counts as the player's own new footing.
@@ -124,13 +190,10 @@ public class MovementChecker implements Listener {
 
     // What counts as "hanging in the air". One tick of vanilla gravity is 0.08 blocks, so a
     // player whose vertical movement stays inside this band is neither falling nor climbing —
-    // which is what hovering means. The check used to treat everything that was not FALLING as
-    // hovering, so every ascent counted: live data showed four hover alerts fired while the
-    // player was moving UP at 0.12-0.20 b/t, which no amount of grace tuning would have fixed
-    // because a rise is not the thing the check is looking for.
+    // which is what hovering means. A rise is not hovering and is left to the ascent check.
     private static final double HOVER_STILL_BAND = 0.08;
     // Vertical speed at the start of the current hover run, so a held speed can be told from
-    // one that is still decaying. See the flag site for the live case behind it.
+    // one that is still decaying (see the flag site).
     private final Map<UUID, Double> hoverStartDy = new ConcurrentHashMap<>();
 
     // Sustained-ascent state (opt-in check): last vertical speed and how many samples in a row
@@ -179,9 +242,28 @@ public class MovementChecker implements Listener {
         this.pistons = pistons;
     }
 
-    /** True when a piston recently moved next to this spot — it displaced the player. */
-    private boolean pistonShoved(Location loc) {
-        return pistons != null && pistons.wasPushedRecently(loc);
+    /**
+     * True when a recent sideways piston push nearby can account for this horizontal speed:
+     * a push adds at most {@link PistonTracker#MAX_PUSH_PER_TICK} on top of what the player
+     * may move by themselves.
+     */
+    private boolean pistonExplainsHorizontal(Location loc, double perTick, double maxSpeed) {
+        return pistons != null && perTick <= maxSpeed + PistonTracker.MAX_PUSH_PER_TICK
+                && pistons.horizontalPushNear(loc);
+    }
+
+    /** Vertical counterpart of {@link #pistonExplainsHorizontal}. */
+    private boolean pistonExplainsVertical(Location loc, double perTick, double maxVertical) {
+        return pistons != null && perTick <= maxVertical + PistonTracker.MAX_PUSH_PER_TICK
+                && pistons.verticalPushNear(loc);
+    }
+
+    /**
+     * True when a piston nearby could be holding or lifting the player: a vertical push, or
+     * a push moving the block under their feet. A sideways clock beside them does neither.
+     */
+    private boolean pistonHoldsUp(Location loc) {
+        return pistons != null && pistons.verticalPushNear(loc);
     }
 
     /** Round-trip latency (ms) for lag compensation (see {@link dev.boondock.bsanticheat.util.CheckMath}). */
@@ -356,7 +438,7 @@ public class MovementChecker implements Listener {
         // upright, surfacing, or carried by Dolphin's Grace keeps their on-foot movement type
         // (so Step/Spider/GroundSpoof/hover stay armed) but must be judged against the water
         // cap — otherwise Depth Strider and Dolphin's Grace read as a SPEED violation against
-        // the 0.4 dry-land cap. Live case, 2026-08-21: twelve such alerts, all "walking".
+        // the dry-land cap.
         //
         // A floor, never a ceiling: the swim cap is 0.8x walking, so applying it as a
         // replacement would flag someone strolling through a shallow pond.
@@ -441,16 +523,33 @@ public class MovementChecker implements Listener {
     public void onPlayerTeleport(PlayerTeleportEvent event) {
         Player player = event.getPlayer();
         UUID playerId = player.getUniqueId();
+        Location to = event.getTo();
+
+        // Our own setback. It moves the player, so the position bookkeeping follows it, but it
+        // is not a legitimate teleport: granting immunity and wiping the streaks here would
+        // hand the player a free second after every setback, which a cheat simply waits out.
+        PendingSetback pending = pendingSetbacks.get(playerId);
+        if (pending != null && to != null) {
+            if (System.currentTimeMillis() - pending.at() < SETBACK_MATCH_MS
+                    && sameSpot(pending.target(), to)) {
+                pendingSetbacks.remove(playerId);
+                rebaseline(playerId, to, true, false);
+                elytraSampleFrom.remove(playerId);
+                elytraSampleAt.remove(playerId);
+                return;
+            }
+            if (System.currentTimeMillis() - pending.at() >= SETBACK_MATCH_MS) {
+                pendingSetbacks.remove(playerId); // cancelled by another plugin; never arrived
+            }
+        }
 
         // Mark this player as recently teleported
         recentTeleport.put(playerId, System.currentTimeMillis());
 
         // Reset location tracking to the teleport destination so the next
         // movement check uses the correct baseline position
-        Location to = event.getTo();
         if (to != null) {
-            lastLocations.put(playerId, to.clone());
-            lastMoveTime.put(playerId, System.currentTimeMillis());
+            rebaseline(playerId, to);
         }
 
         // Reset violation counters — teleport is legitimate, not a violation streak.
@@ -514,7 +613,42 @@ public class MovementChecker implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onDismount(org.bukkit.event.entity.EntityDismountEvent event) {
         if (!(event.getEntity() instanceof Player player)) return;
-        momentumGraceUntil.put(player.getUniqueId(), System.currentTimeMillis() + DISMOUNT_GRACE_MS);
+        extendMomentumGrace(player.getUniqueId(), System.currentTimeMillis() + DISMOUNT_GRACE_MS);
+    }
+
+    /**
+     * Flight switched off by the player (double-tap) or taken away with the game mode. The
+     * momentum of flying outlasts the flight; see {@link #FLIGHT_END_GRACE_MS}.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onToggleFlight(org.bukkit.event.player.PlayerToggleFlightEvent event) {
+        if (!event.isFlying()) grantFlightGrace(event.getPlayer().getUniqueId());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onGameModeChange(org.bukkit.event.player.PlayerGameModeChangeEvent event) {
+        grantFlightGrace(event.getPlayer().getUniqueId());
+    }
+
+    /** Notice flight ending when no event announced it (allowFlight revoked mid-flight). */
+    private void trackFlightState(Player player, UUID playerId) {
+        boolean flying = player.isFlying();
+        Boolean was = wasFlying.put(playerId, flying);
+        if (Boolean.TRUE.equals(was) && !flying) grantFlightGrace(playerId);
+    }
+
+    private void grantFlightGrace(UUID playerId) {
+        extendMomentumGrace(playerId, System.currentTimeMillis() + FLIGHT_END_GRACE_MS);
+    }
+
+    /** Extend the momentum grace to {@code until}, never shortening one already running. */
+    private void extendMomentumGrace(UUID playerId, long until) {
+        momentumGraceUntil.merge(playerId, until, Math::max);
+    }
+
+    private static boolean sameSpot(Location a, Location b) {
+        return a.getWorld() != null && a.getWorld().equals(b.getWorld())
+                && a.distanceSquared(b) < 1.0e-4;
     }
 
     @EventHandler
@@ -553,9 +687,14 @@ public class MovementChecker implements Listener {
         if (to == null) return;
         if (from.getX() == to.getX() && from.getY() == to.getY() && from.getZ() == to.getZ()) return;
 
+        // Flight can end without any event — /fly off or a WorldGuard flag revoking
+        // allowFlight drops the player out of the air — so the flying state is followed here,
+        // ahead of every exemption, to catch the transition wherever it happens.
+        trackFlightState(player, playerId);
+
         // PHASE 1: no sampling — every position change is checked. PlayerMoveEvent already
-        // fires per movement packet the server accepts, so this gives per-tick coverage; a
-        // cheat can no longer hide in the moves an every-Nth sampler would have skipped.
+        // fires per movement packet the server accepts, so this gives per-tick coverage and
+        // no move goes unjudged.
         // The per-move work is bounded (arithmetic + a few block lookups), so full coverage
         // is cheap even with many players.
 
@@ -593,18 +732,25 @@ public class MovementChecker implements Listener {
 
         // Determine movement type
         MovementType moveType = getMovementType(player);
+        long now = System.currentTimeMillis();
 
         // Elytra/Riptide get their own speed-ceiling check — vanilla physics allow far
         // higher speeds than ground movement, so the ground checks below don't apply.
         if (moveType == MovementType.ELYTRA || moveType == MovementType.RIPTIDE) {
-            if (config.elytraDetectionEnabled() && !ServerLoad.isLagging(config)) {
-                checkElytraSpeed(player, playerId, moveType, from, to);
+            boolean setBack = false;
+            if (config.elytraDetectionEnabled() && !ServerLoad.isLagging(config, player)) {
+                setBack = checkElytraSpeed(player, playerId, moveType, from, to);
             }
             // Landing grace, measured from now — riptide's impulse outlives its animation.
             long graceMs = moveType == MovementType.RIPTIDE ? RIPTIDE_GRACE_MS : GLIDE_GRACE_MS;
-            momentumGraceUntil.put(playerId, System.currentTimeMillis() + graceMs);
-            lastLocations.put(playerId, to.clone());
-            lastMoveTime.put(playerId, System.currentTimeMillis());
+            extendMomentumGrace(playerId, now + graceMs);
+            // After a setback the teleport handler owns the baseline; the illegal position
+            // must not overwrite it. A glide with an over-speed streak running is not a
+            // setback target either.
+            if (!setBack) {
+                boolean clean = consecutiveElytra.getOrDefault(playerId, 0) == 0;
+                rebaseline(playerId, to, clean, true);
+            }
             return;
         }
 
@@ -615,62 +761,119 @@ public class MovementChecker implements Listener {
         if (moveType == MovementType.CREATIVE_FLY || moveType == MovementType.MINECART ||
             moveType == MovementType.BOAT || moveType.name().startsWith("RIDING_") ||
             moveType == MovementType.OTHER_VEHICLE) {
-            // Reset tracking for these modes
-            lastLocations.put(playerId, to.clone());
-            lastMoveTime.put(playerId, System.currentTimeMillis());
+            rebaseline(playerId, to);
+            return;
+        }
+
+        // Skip during server lag — reset the baseline so the catch-up move afterwards
+        // isn't misread as a speed/teleport violation.
+        if (ServerLoad.isLagging(config, player)) {
+            rebaseline(playerId, to);
             return;
         }
 
         Location lastLoc = lastLocations.get(playerId);
-        long now = System.currentTimeMillis();
         Long lastTime = lastMoveTime.get(playerId);
-        boolean setBack = false;
+        Location sampleStart = sampleFrom.get(playerId);
+        Long sampleStartAt = sampleAt.get(playerId);
 
-        // Skip during server lag — reset the baseline so the catch-up move afterwards
-        // isn't misread as a speed/teleport violation.
-        if (ServerLoad.isLagging(config)) {
+        // A move is only judged when there is a usable baseline, no packet gap sits in
+        // between, and no grace window is active. Otherwise the position is recorded as the
+        // new baseline and nothing is judged.
+        //
+        // The gap condition is the movement-side counterpart of the Timer check's: silence
+        // this long is a stalled connection, and what follows is the client flushing its
+        // backlog. Judging that catch-up means judging several ticks of travel as if they
+        // were one. The per-tick scaling below handles the ordinary case; this rules out the
+        // pathological one, where the delta is large enough for the TELEPORT threshold that
+        // no scaling protects.
+        boolean armed = lastLoc != null && lastTime != null
+                && sampleStart != null && sampleStartAt != null
+                && from.getWorld().equals(to.getWorld())
+                && to.getWorld().equals(sampleStart.getWorld())
+                && (now - lastTime) <= Constants.MOVEMENT_MAX_GAP_MS
+                && !hasMovementImmunity(player, playerId, now);
+        if (!armed) {
+            rebaseline(playerId, to);
+            return;
+        }
+
+        // Moves are judged as SAMPLES: the displacement from the start of the sample to this
+        // event. Events arriving within MOVEMENT_MIN_TIME_DELTA of the sample start are too
+        // close together to derive a rate from, so they are folded into the sample instead
+        // of being dropped: dropping them while advancing the baseline would let a second
+        // position packet sent right behind the first pass unjudged.
+        int events = sampleEvents.getOrDefault(playerId, 0) + 1;
+        long elapsedMs = now - sampleStartAt;
+        boolean setBack = false;
+        boolean suspect = false;
+
+        // Bursts: runs of events each arriving within MOVEMENT_MIN_TIME_DELTA of the one
+        // before. A burst can straddle a sample boundary, so it is tracked on its own.
+        if ((now - lastTime) >= MIN_SAMPLE_MS || !burstFrom.containsKey(playerId)) {
+            burstFrom.put(playerId, from.clone());
+            burstEvents.put(playerId, 1);
+        } else {
+            burstEvents.merge(playerId, 1, Integer::sum);
+        }
+
+        // TELEPORT runs on every event, including the ones folded into a sample. It asks how
+        // far the player jumped: this event's own step, and the distance covered since the
+        // current burst began, less one tick of legitimate travel for every other event in
+        // it — which is what a bunch of legitimate packets delivered together can span.
+        // Splitting one jump across packets sent back to back therefore gains nothing.
+        if (config.teleportDetectionEnabled()) {
+            double jumped = from.distance(to);
+            Location burstStart = burstFrom.get(playerId);
+            int inBurst = burstEvents.getOrDefault(playerId, 1);
+            if (inBurst > 1 && burstStart != null && to.getWorld().equals(burstStart.getWorld())) {
+                double sinceBurst = burstStart.distance(to);
+                if (sinceBurst > config.teleportThreshold()) {
+                    // One tick of travel per event: the horizontal cap, but never less than
+                    // terminal falling speed — a bunch of packets from a long fall is legit.
+                    double perEvent = Math.max(getMaxSpeed(moveType, player), TERMINAL_FALL_SPEED);
+                    jumped = Math.max(jumped, sinceBurst - perEvent * (inBurst - 1));
+                }
+            }
+            if (jumped > config.teleportThreshold()) {
+                setBack = handleViolation(player, "TELEPORT",
+                        lang.format("alert.teleport", jumped), jumped, to);
+                // The rate checks would only re-flag the same jump as speed or flight.
+                if (!setBack) rebaseline(playerId, to, false, false);
+                return;
+            }
+        }
+
+        if (elapsedMs < MIN_SAMPLE_MS) {
+            sampleEvents.put(playerId, events);
             lastLocations.put(playerId, to.clone());
             lastMoveTime.put(playerId, now);
             return;
         }
 
-        // A move is only judged when there is a usable baseline, the samples aren't
-        // microscopically close together, no packet gap sits in between, and no grace window
-        // is active. Note this is a condition, not an early return: the position bookkeeping
-        // at the end of the method must run either way, otherwise the last known position
-        // goes stale and a later setback would teleport the player seconds back in time.
-        //
-        // The gap condition is the movement-side counterpart of the Timer check's: silence
-        // this long is a stalled connection, and what follows is the client flushing its
-        // backlog. Judging that catch-up means judging several ticks of travel as if they
-        // were one — which is how a routine flight over loading chunks produced a 110 b/s
-        // "over-speed" curve before 1.0.4. The per-tick scaling below handles the ordinary
-        // case; this rules out the pathological one, where the delta is large enough for the
-        // TELEPORT threshold that no scaling protects.
-        boolean judge = lastLoc != null && lastTime != null && from.getWorld().equals(to.getWorld())
-                && (now - lastTime) / 1000.0 >= Constants.MOVEMENT_MIN_TIME_DELTA
-                && (now - lastTime) <= Constants.MOVEMENT_MAX_GAP_MS
-                && !hasMovementImmunity(player, playerId, now);
-
-        if (judge) {
-            // Calculate movement. The raw distance answers the teleport check — that one asks
-            // how far the player jumped, not how fast they were going.
-            Vector movement = to.toVector().subtract(from.toVector());
-            double totalDist = from.distance(to);
-
-            // Everything else below is a per-TICK rate compared against a per-tick threshold
-            // (0.4 blocks walking, 3.5 vertical, …), so the delta has to be divided by the
-            // ticks it actually spans. A move event is not reliably one tick: the client may
-            // send several position packets within a tick, and a slow connection delivers one
-            // event carrying several ticks of travel. Treating the latter as a single tick is
-            // the mistake the elytra check was built on until 1.0.4; the ground and vertical
-            // checks carried it unchanged.
+        {
+            // The sample's displacement. The rate checks compare a per-TICK rate against
+            // per-tick thresholds (0.4 blocks walking, 3.5 vertical, …), so it is divided by
+            // the ticks the sample spans: the real time since it began, but never fewer than
+            // the move events folded into it. A client sends one position packet per tick, so
+            // a bunch of packets delivered together after a stall carries one tick of travel
+            // each; dividing that bunch by the few milliseconds it took to arrive would read
+            // a lagging player as a speed hacker. Packets sent faster than real time are the
+            // Timer check's business, and the time-based speed budget below still judges the
+            // distance against the real clock.
             //
-            // Clamped at one tick, so sub-tick events are never scaled UP: that direction
-            // would invent speed rather than remove it, and the whole point is to be
-            // conservative about deltas whose duration is uncertain.
-            double moveTicks = Math.max(1.0, (now - lastTime) / 50.0);
+            // Clamped at one tick, so sub-tick samples are never scaled UP: that direction
+            // would invent speed rather than remove it.
+            Vector movement = to.toVector().subtract(sampleStart.toVector());
+            double rawHorizontal = Math.sqrt(movement.getX() * movement.getX() + movement.getZ() * movement.getZ());
+            double elapsedTicks = elapsedMs / 50.0;
+            double moveTicks = Math.max(1.0, Math.max(elapsedTicks, events));
             if (moveTicks > 1.0) movement.multiply(1.0 / moveTicks);
+
+            // The next sample starts here.
+            sampleFrom.put(playerId, to.clone());
+            sampleAt.put(playerId, now);
+            sampleEvents.remove(playerId);
 
             double horizontalDist = Math.sqrt(movement.getX() * movement.getX() + movement.getZ() * movement.getZ());
             double verticalDist = Math.abs(movement.getY());
@@ -692,8 +895,7 @@ public class MovementChecker implements Listener {
             }
 
             // Slime launchers throw a player sideways as readily as upwards, and the bounce
-            // itself needs no key input. The grace was previously computed inside the
-            // vertical block below, so the horizontal checks never saw it.
+            // itself needs no key input. Computed here so the horizontal checks see it too.
             if (nearSlime) recentSlime.put(playerId, now);
             Long slimeTs = recentSlime.get(playerId);
             boolean slimeGrace = slimeTs != null && (now - slimeTs) < SLIME_GRACE_MS;
@@ -703,16 +905,11 @@ public class MovementChecker implements Listener {
                     || moveType == MovementType.SPRINTING
                     || moveType == MovementType.SNEAKING;
 
-            // Check for impossible teleportation-like movement (if enabled)
-            if (config.teleportDetectionEnabled() && totalDist > config.teleportThreshold()) {
-                setBack |= handleViolation(player, "TELEPORT",
-                    lang.format("alert.teleport", totalDist),
-                    totalDist, to);
-            }
-
             // Check horizontal speed (if enabled)
             // This ensures we catch both walking and sprinting violations
+            boolean speedFlagged = false;
             if (config.speedDetectionEnabled() && horizontalDist > maxSpeed) {
+                suspect = true;
                 int consecutive = consecutiveSpeedViolations.merge(playerId, 1, Integer::sum);
 
                 // Only alert after multiple consecutive violations
@@ -720,10 +917,11 @@ public class MovementChecker implements Listener {
                     // Checked here rather than at the top: both are displacement the player
                     // never asked for, and the piston lookup should only be paid for on the
                     // would-flag path.
-                    if (!slimeGrace && !pistonShoved(to)) {
+                    if (!slimeGrace && !pistonExplainsHorizontal(to, horizontalDist, maxSpeed)) {
                         setBack |= handleViolation(player, "SPEED",
                             lang.format("alert.speed", typeName(moveType), horizontalDist, maxSpeed),
                             horizontalDist, to);
+                        speedFlagged = true;
                     }
                     consecutiveSpeedViolations.put(playerId, 0);
                 }
@@ -736,12 +934,23 @@ public class MovementChecker implements Listener {
                 });
             }
 
+            // Averaged speed: the per-sample check above needs several over-speed samples in
+            // a row, so alternating fast and slow samples (0.8 / 0.2 against a 0.4 cap) never
+            // builds a streak while averaging well over the cap. See checkSpeedBudget.
+            if (config.speedDetectionEnabled()) {
+                int budget = checkSpeedBudget(player, playerId, moveType, rawHorizontal, elapsedTicks,
+                        maxSpeed, slimeGrace, speedFlagged, to);
+                if (budget != BUDGET_OK) suspect = true;
+                if (budget == BUDGET_SETBACK) setBack = true;
+            }
+
             // NoSlow: moving too fast while using an item (eating, drawing a bow,
             // blocking with a shield, charging a trident…) which vanilla slows down.
             // isHandRaised() reflects the (client-influenced) item-use state.
             if (config.noSlowDetectionEnabled() && groundType && player.isHandRaised()) {
                 double noSlowCap = getMaxSpeed(MovementType.WALKING, player) * config.noSlowSpeedMultiplier();
                 if (horizontalDist > noSlowCap) {
+                    suspect = true;
                     int c = consecutiveNoSlow.merge(playerId, 1, Integer::sum);
                     if (c >= config.noSlowViolations()) {
                         setBack |= handleViolation(player, "NOSLOW",
@@ -764,8 +973,7 @@ public class MovementChecker implements Listener {
             // Two things go wrong without it. An unloaded chunk has no blocks to find, so
             // the scan reports "nothing below the player" for someone standing on perfectly
             // solid ground the server has not got in memory yet. And reading it forces a
-            // synchronous chunk load from inside a movement handler — which is exactly what
-            // Folia forbids, and it was only ever avoided for the centre column.
+            // synchronous chunk load from inside a movement handler, which Folia forbids.
             boolean chunkKnown = neighbourhoodLoaded(to);
 
             // Vertical/fly checks only apply to on-foot movement. Swimming and
@@ -794,7 +1002,7 @@ public class MovementChecker implements Listener {
 
                 // One ground scan answers both vertical checks: "clearly airborne" (hover)
                 // and "high above ground" (GroundSpoof) differ only in the depth they
-                // accept. Scanning twice cost 35 block lookups per movement packet.
+                // accept, so the scan runs once.
                 // (The chunk neighbourhood is already known to be loaded — see above.)
                 boolean wantsFlyScan = config.flyDetectionEnabled() && !flyExempt;
                 boolean wantsSpoofScan = config.groundSpoofDetectionEnabled() && !flyExempt
@@ -812,12 +1020,13 @@ public class MovementChecker implements Listener {
                 if (config.flyDetectionEnabled()) {
                     // (a) Vertical burst: too much upward movement in a single step
                     if (!flyExempt && verticalDist > maxVerticalSpeed && movement.getY() > 0) {
+                        suspect = true;
                         int consecutive = consecutiveFlyViolations.merge(playerId, 1, Integer::sum);
                         if (consecutive >= config.flyViolationsThreshold()) {
                             // A piston lifts a player a full block per push with no velocity
                             // packet to excuse it — elevators and flying machines do this all
-                            // day. Tested only here, on the would-flag path.
-                            if (!pistonShoved(to)) {
+                            // day. Only a vertical push, and only by what one push can add.
+                            if (!pistonExplainsVertical(to, verticalDist, maxVerticalSpeed)) {
                                 setBack |= handleViolation(player, "FLY",
                                     lang.format("alert.fly", verticalDist, maxVerticalSpeed),
                                     verticalDist, to);
@@ -845,24 +1054,19 @@ public class MovementChecker implements Listener {
                             consecutiveHoverTicks.remove(playerId);
                             hoverStartDy.remove(playerId);
                         } else {
+                            suspect = true;
                             int hover = consecutiveHoverTicks.merge(playerId, 1, Integer::sum);
                             // Vertical speed when this run began. A hover HOLDS a speed; a
                             // ballistic arc passing through the band is still losing one, and
                             // the band is wide enough (+-0.08) that the apex of a slow arc sits
-                            // inside it for many samples. Live alert 2026-08-26: dy ran
-                            // +0.067 -> -0.051 monotonically across all ten samples and flagged,
-                            // with no potion, no gravity modifier and no teleport behind it.
-                            // checkSustainedAscent already judges motion this way — it asks
-                            // whether the climb DECAYS rather than how fast it is. The hover
-                            // check only ever asked whether dy was small, never whether it was
-                            // changing, which is the one thing that separates the two.
+                            // inside it for many samples. Whether dy is CHANGING, not whether it
+                            // is small, separates the two (as in checkSustainedAscent).
                             if (hover == 1) hoverStartDy.put(playerId, movement.getY());
                             double startDy = hoverStartDy.getOrDefault(playerId, movement.getY());
                             double drop = startDy - movement.getY();
-                            // The hover check's only debug output was on fine(), which the
-                            // default log level drops — so a live alert could not be taken
-                            // apart afterwards. Logged on the counting path only, which is
-                            // bounded by how often a player is genuinely airborne and still.
+                            // Logged at info so it survives the default log level. Only on the
+                            // counting path, which is bounded by how often a player is
+                            // genuinely airborne and still.
                             // `support` is the ground scan's answer: 0-3 = blocks found that
                             // far below the feet, -1 = nothing within reach.
                             if (config.debugMode()) {
@@ -879,8 +1083,7 @@ public class MovementChecker implements Listener {
                                 // the band and not a hover. RESTART it rather than merely
                                 // withholding the flag: the drop is measured against the run's
                                 // first sample and never recovers, so a run that once exceeded
-                                // the limit could not flag again for as long as it lasted —
-                                // and a hover entered from a rise (dy +0.06, then held at
+                                // the limit could never flag again, and a hover entered from a rise (dy +0.06, then held at
                                 // -0.01) stays inside the +-0.08 band indefinitely with a
                                 // permanent drop of 0.07. Restarting costs the ballistic case
                                 // nothing, because it keeps falling out of the band anyway,
@@ -889,13 +1092,15 @@ public class MovementChecker implements Listener {
                                 consecutiveHoverTicks.put(playerId, 1);
                                 hoverStartDy.put(playerId, movement.getY());
                             } else if (hover >= config.flyViolationsThreshold()) {
-                                if (!pistonShoved(to)) {
+                                if (!pistonHoldsUp(to)) {
                                     setBack |= handleViolation(player, "FLY",
                                         lang.format("alert.hover", hover),
                                         verticalDist, to);
                                 }
                                 consecutiveHoverTicks.put(playerId, 0);
                                 hoverStartDy.remove(playerId);
+                                // The same stretch must not be flagged twice.
+                                airWindows.remove(playerId);
                             }
                         }
                     } else {
@@ -903,17 +1108,31 @@ public class MovementChecker implements Listener {
                         hoverStartDy.remove(playerId);
                     }
 
-                    // (b2) Sustained ascent (opt-in, off by default). Narrowing the hover band
-                    // above means a climb is no longer counted as hovering — correct, but it
-                    // leaves a slow steady rise unwatched. Gravity is what separates the two:
+                    // (b2) Sustained ascent (opt-in, off by default). The hover band above does
+                    // not count a climb, so a slow steady rise is judged here. Gravity is what
+                    // separates the two:
                     // a player thrown upwards loses ~0.08 b/t of vertical speed every tick and
                     // is back down within a second or two, while a flight cheat holds the climb.
                     if (!flyExempt && !pillarGrace && clearlyAirborne) {
                         setBack |= checkSustainedAscent(player, playerId, movement.getY(), moveTicks, to);
+                        if (consecutiveAscent.getOrDefault(playerId, 0) > 0) suspect = true;
                     } else {
                         lastAscentDy.remove(playerId);
                         consecutiveAscent.remove(playerId);
                     }
+
+                    // (b3) Free fall: over a whole airborne stretch, the player must have come
+                    // down at least as far as gravity pulls them. Always on with fly detection.
+                    if (!flyExempt && !pillarGrace && clearlyAirborne && !player.getAllowFlight()) {
+                        int gravity = checkFreeFall(player, playerId, sampleStart, sampleStartAt,
+                                events, movement.getY(), to, now);
+                        if (gravity != GRAVITY_OK) suspect = true;
+                        if (gravity == GRAVITY_SETBACK) setBack = true;
+                    } else {
+                        airWindows.remove(playerId);
+                    }
+                } else {
+                    airWindows.remove(playerId);
                 }
 
                 // (c) GroundSpoof: the client claims it is on the ground while it is
@@ -921,9 +1140,10 @@ public class MovementChecker implements Listener {
                 // flag (which player.isOnGround() reflects) to dodge the hover check.
                 if (config.groundSpoofDetectionEnabled() && !flyExempt
                         && player.isOnGround() && highAboveGround) {
+                    suspect = true;
                     int gs = consecutiveGroundSpoof.merge(playerId, 1, Integer::sum);
                     if (gs >= config.groundSpoofViolations()) {
-                        if (!pistonShoved(to)) {
+                        if (!pistonHoldsUp(to)) {
                             setBack |= handleViolation(player, "GROUNDSPOOF",
                                 lang.get("alert.groundspoof"), 0, to);
                         }
@@ -936,6 +1156,7 @@ public class MovementChecker implements Listener {
                 // Jesus: moving across the top of water without sinking
                 if (config.jesusDetectionEnabled() && !player.isInWater() && !player.isGliding()
                         && horizontalDist > 0.08 && Math.abs(movement.getY()) < 0.05 && isOnWaterSurface(player)) {
+                    suspect = true;
                     int c = consecutiveJesus.merge(playerId, 1, Integer::sum);
                     if (c >= config.jesusViolations()) {
                         setBack |= handleViolation(player, "JESUS", lang.get("alert.jesus"), horizontalDist, to);
@@ -950,6 +1171,7 @@ public class MovementChecker implements Listener {
                 // normal jump next to a wall doesn't count as climbing.
                 if (config.spiderDetectionEnabled() && movement.getY() > 0.1 && !player.isOnGround()
                         && !isNearLiquid(player) && !isOnClimbable(player) && isAgainstWall(player)) {
+                    suspect = true;
                     int c = consecutiveSpider.merge(playerId, 1, Integer::sum);
                     if (c >= config.spiderViolations()) {
                         setBack |= handleViolation(player, "SPIDER", lang.get("alert.spider"), movement.getY(), to);
@@ -964,6 +1186,7 @@ public class MovementChecker implements Listener {
                         && movement.getY() > Math.max(config.stepMaxHeight(), CheckMath.stepHeight(player))
                         && horizontalDist > 0.05
                         && !nearSlime && !player.hasPotionEffect(PotionEffectType.JUMP_BOOST)) {
+                    suspect = true;
                     int c = consecutiveStep.merge(playerId, 1, Integer::sum);
                     if (c >= config.stepViolations()) {
                         setBack |= handleViolation(player, "STEP", lang.format("alert.step", movement.getY()), movement.getY(), to);
@@ -984,13 +1207,21 @@ public class MovementChecker implements Listener {
                 consecutiveJesus.remove(playerId);
                 consecutiveSpider.remove(playerId);
                 consecutiveStep.remove(playerId);
+                airWindows.remove(playerId);
+            } else {
+                // Swimming or climbing: the free-fall model does not apply, and an airborne
+                // stretch cannot continue across it.
+                airWindows.remove(playerId);
             }
         }
 
-        // After a setback the teleport handler already restored the baseline position,
-        // so don't overwrite it with the illegal location.
+        // After a setback the teleport handler restores the baseline position, so don't
+        // overwrite it with the illegal location. Only a sample that passed every check
+        // without so much as starting a streak becomes the setback target: a position
+        // reached while a violation was building is exactly what a setback must undo.
         if (!setBack) {
             lastLocations.put(playerId, to.clone());
+            if (!suspect) lastLegitLocations.put(playerId, to.clone());
         }
         lastMoveTime.put(playerId, now);
     }
@@ -1004,9 +1235,8 @@ public class MovementChecker implements Listener {
      * the climb itself — being thrown upwards is ordinary, and a Trial Chamber full of Breezes
      * does it all day.
      *
-     * <p>Off by default. It is a heuristic on a check whose false positives have been the
-     * expensive part of this plugin's history, and it wants {@code debug_mode} data from the
-     * server it will run on before it is trusted.
+     * <p>Off by default: it is a heuristic that should be calibrated with {@code debug_mode}
+     * data from the server it runs on before it is trusted.
      *
      * @return true when the player was set back
      */
@@ -1039,15 +1269,136 @@ public class MovementChecker implements Listener {
         if (c < config.sustainedAscentViolations()) return false;
 
         consecutiveAscent.remove(playerId);
-        if (pistonShoved(to)) return false; // a column of pistons lifts at a constant rate
+        if (pistonHoldsUp(to)) return false; // a column of pistons lifts at a constant rate
         return handleViolation(player, "FLY",
                 lang.format("alert.sustained_ascent", dy), dy, to);
     }
 
+    /**
+     * Horizontal speed judged against the real clock.
+     *
+     * <p>A budget of allowed travel accrues at the speed cap for every tick of real time and
+     * is spent by the distance actually covered; it holds at most
+     * {@link #SPEED_BUDGET_TICKS} ticks' worth. The per-sample check needs several
+     * over-speed samples in a row, so a cheat alternating fast and slow samples never builds
+     * a streak — but its average still drains the budget, and the budget running
+     * {@link #SPEED_DEBT_TICKS} ticks into debt is a SPEED violation.
+     *
+     * <p>Lag does not trip it: a stall accrues budget while no packets arrive, and the backlog
+     * delivered afterwards spends exactly that. Packets sent faster than real time gain
+     * nothing either, since accrual is by the clock and not per packet.
+     *
+     * @return {@link #BUDGET_OK}, {@link #BUDGET_DEBT} (in debt, not flagged) or
+     *         {@link #BUDGET_SETBACK} (flagged and set back)
+     */
+    private int checkSpeedBudget(Player player, UUID playerId, MovementType moveType, double distance,
+                                 double elapsedTicks, double maxSpeed, boolean slimeGrace,
+                                 boolean alreadyFlagged, Location to) {
+        double capacity = maxSpeed * SPEED_BUDGET_TICKS;
+        double[] b = speedBudget.computeIfAbsent(playerId, k -> new double[]{capacity, 0.0, 0.0});
+        double available = Math.min(b[0] + maxSpeed * elapsedTicks, capacity);
+        if (available >= capacity) {
+            b[1] = 0.0;
+            b[2] = 0.0;
+        }
+        b[0] = available - distance;
+        b[1] += distance;
+        b[2] += elapsedTicks;
+        if (b[0] >= 0) return BUDGET_OK;
+        if (alreadyFlagged) {
+            // The per-sample check has just reported this stretch; don't report it twice.
+            b[0] = 0.0;
+            return BUDGET_DEBT;
+        }
+        if (b[0] >= -maxSpeed * SPEED_DEBT_TICKS) return BUDGET_DEBT;
+
+        double average = b[1] / Math.max(1.0, b[2]);
+        b[0] = 0.0;
+        b[1] = 0.0;
+        b[2] = 0.0;
+        if (slimeGrace || pistonExplainsHorizontal(to, average, maxSpeed)) return BUDGET_DEBT;
+        boolean setBack = handleViolation(player, "SPEED",
+                lang.format("alert.speed", typeName(moveType), average, maxSpeed), average, to);
+        return setBack ? BUDGET_SETBACK : BUDGET_DEBT;
+    }
+
+    /**
+     * Airborne stretches that gravity cannot explain.
+     *
+     * <p>From the first sample with nothing underneath, the stretch is compared against free
+     * fall: after {@link #FREE_FALL_MIN_TICKS} ticks in the air a player must have come down
+     * at least as far as vanilla gravity and drag take them, starting from the fastest upward
+     * speed they can have had — a jump (with the jump-strength attribute), or the speed
+     * actually observed in the first sample if that was higher. This covers what the hover
+     * band cannot see: bobbing up and down around one height, sinking at a constant slow
+     * rate, and a steady climb. Everything that legitimately defies gravity is exempt at the
+     * call site or ends the stretch (knockback and flight grace, water, climbables,
+     * scaffolding, cobwebs, powder snow, honey, bubble columns, slime, potions, pistons).
+     *
+     * <p>Time is the smaller of real elapsed ticks and the number of move events: a stall
+     * stretches the arrival times without adding flight time, and judging a stretched window
+     * against a longer fall would flag a lagging player.
+     *
+     * @return {@link #GRAVITY_OK}, {@link #GRAVITY_SUSPECT} (above the free-fall curve) or
+     *         {@link #GRAVITY_SETBACK} (flagged and set back)
+     */
+    private int checkFreeFall(Player player, UUID playerId, Location sampleStart, long sampleStartAt,
+                              int events, double dyPerTick, Location to, long now) {
+        AirWindow w = airWindows.get(playerId);
+        if (w == null) {
+            double launch = VANILLA_JUMP_VELOCITY * CheckMath.jumpStrengthRatio(player) + LAUNCH_MARGIN;
+            w = new AirWindow(sampleStart.getY(), sampleStartAt, Math.max(launch, dyPerTick));
+            airWindows.put(playerId, w);
+        }
+        w.events += events;
+        double ticks = Math.min((now - w.startAt) / 50.0, w.events);
+        double rise = to.getY() - w.startY;
+        double freeFall = CheckMath.ballisticRise(w.v0, PLAYER_GRAVITY, PLAYER_DRAG, ticks);
+        if (rise <= freeFall) return GRAVITY_OK;
+        if (ticks < FREE_FALL_MIN_TICKS || rise <= freeFall + FREE_FALL_TOLERANCE) return GRAVITY_SUSPECT;
+
+        airWindows.remove(playerId);
+        // The hover streak covers part of the same stretch; it must not flag it again.
+        consecutiveHoverTicks.remove(playerId);
+        hoverStartDy.remove(playerId);
+        if (pistonHoldsUp(to)) return GRAVITY_SUSPECT;
+
+        if (config.debugMode()) {
+            plugin.getLogger().info(String.format(java.util.Locale.ROOT,
+                    "[FREEFALL-DEBUG] %s rise=%.2f expected<=%.2f ticks=%.1f events=%d v0=%.2f",
+                    player.getName(), rise, freeFall, ticks, w.events, w.v0));
+        }
+        double perTick = rise / ticks;
+        String details = perTick > HOVER_STILL_BAND
+                ? lang.format("alert.sustained_ascent", perTick)
+                : lang.format("alert.hover", (int) Math.round(ticks));
+        return handleViolation(player, "FLY", details, rise, to) ? GRAVITY_SETBACK : GRAVITY_SUSPECT;
+    }
+
     /** Record a position as the new baseline without judging the move that led to it. */
     private void rebaseline(UUID playerId, Location to) {
+        rebaseline(playerId, to, true, true);
+    }
+
+    /**
+     * Restart position tracking at {@code to}.
+     *
+     * @param legit       also make it the setback target
+     * @param resetBudget refill the speed budget (not after a setback: the debt that caused
+     *                    it must still count)
+     */
+    private void rebaseline(UUID playerId, Location to, boolean legit, boolean resetBudget) {
+        long now = System.currentTimeMillis();
         lastLocations.put(playerId, to.clone());
-        lastMoveTime.put(playerId, System.currentTimeMillis());
+        lastMoveTime.put(playerId, now);
+        sampleFrom.put(playerId, to.clone());
+        sampleAt.put(playerId, now);
+        sampleEvents.remove(playerId);
+        burstFrom.remove(playerId);
+        burstEvents.remove(playerId);
+        airWindows.remove(playerId);
+        if (resetBudget) speedBudget.remove(playerId);
+        if (legit) lastLegitLocations.put(playerId, to.clone());
     }
 
     /**
@@ -1088,19 +1439,28 @@ public class MovementChecker implements Listener {
      * rather than derived from a single move event. A move event is not reliably one tick:
      * the client may send several position packets per tick, and — the damaging direction —
      * a packet gap while flying over loading chunks delivers one event carrying several ticks
-     * of travel. Multiplying such an event by 20 invents speed that was never flown, which is
-     * how a routine rocket flight produced a tidy 110→100 b/s "over-speed" curve. Dividing by
-     * the time that actually passed makes a gap harmless: distance and elapsed time grow
-     * together. The window also means the {@code elytra_violations} threshold now spans
-     * ~0.75s of sustained over-speed, which noise cannot fake.
+     * of travel. Multiplying such an event by 20 invents speed that was never flown. Dividing
+     * by the time that actually passed makes a gap harmless: distance and elapsed time grow
+     * together. The window also means the {@code elytra_violations} threshold spans ~0.75s
+     * of sustained over-speed, which noise cannot fake.
      */
-    private void checkElytraSpeed(Player player, UUID playerId, MovementType moveType, Location from, Location to) {
+    private boolean checkElytraSpeed(Player player, UUID playerId, MovementType moveType, Location from, Location to) {
         long now = System.currentTimeMillis();
         Long lastTeleportTime = recentTeleport.get(playerId);
-        if (lastTeleportTime != null && (now - lastTeleportTime) < TELEPORT_IMMUNITY_MS) return;
+        if (lastTeleportTime != null && (now - lastTeleportTime) < TELEPORT_IMMUNITY_MS) return false;
         Long lastJoin = recentJoin.get(playerId);
-        if (lastJoin != null && (now - lastJoin) < JOIN_GRACE_MS) return;
-        if (!from.getWorld().equals(to.getWorld())) return;
+        if (lastJoin != null && (now - lastJoin) < JOIN_GRACE_MS) return false;
+        if (!from.getWorld().equals(to.getWorld())) return false;
+        // Wind charges, TNT boosts and explosions throw a glider far past the gliding ceiling,
+        // and every one of them arrives as a velocity (or explosion damage) the knockback grace
+        // already records. The window is dropped as well, so the boost never ends up inside a
+        // sample measured afterwards.
+        Long lastKnockback = recentKnockback.get(playerId);
+        if (lastKnockback != null && (now - lastKnockback) < KNOCKBACK_IMMUNITY_MS) {
+            elytraSampleFrom.remove(playerId);
+            elytraSampleAt.remove(playerId);
+            return false;
+        }
 
         Location sampleFrom = elytraSampleFrom.get(playerId);
         Long sampleAt = elytraSampleAt.get(playerId);
@@ -1110,10 +1470,10 @@ public class MovementChecker implements Listener {
                 || now - sampleAt > ELYTRA_SAMPLE_WINDOW_MS * 4) {
             elytraSampleFrom.put(playerId, to.clone());
             elytraSampleAt.put(playerId, now);
-            return;
+            return false;
         }
         long elapsed = now - sampleAt;
-        if (elapsed < ELYTRA_SAMPLE_WINDOW_MS) return; // keep accumulating
+        if (elapsed < ELYTRA_SAMPLE_WINDOW_MS) return false; // keep accumulating
 
         double bps = sampleFrom.distance(to) / (elapsed / 1000.0);
         elytraSampleFrom.put(playerId, to.clone());
@@ -1126,13 +1486,16 @@ public class MovementChecker implements Listener {
             int c = consecutiveElytra.merge(playerId, 1, Integer::sum);
             if (c >= config.elytraViolations()) {
                 boolean elytra = moveType == MovementType.ELYTRA;
-                handleViolation(player, elytra ? "ELYTRA" : "RIPTIDE",
-                        lang.format(elytra ? "alert.elytra" : "alert.riptide", bps, max), bps, to);
                 consecutiveElytra.put(playerId, 0);
+                return handleViolation(player, elytra ? "ELYTRA" : "RIPTIDE",
+                        lang.format(elytra ? "alert.elytra" : "alert.riptide", bps, max), bps, to);
             }
         } else {
-            consecutiveElytra.remove(playerId);
+            // Decay by one window instead of forgetting the streak: with a full reset, a flight
+            // that slows down for one window in every few would never add up to a violation.
+            consecutiveElytra.computeIfPresent(playerId, (k, v) -> v > 1 ? v - 1 : null);
         }
+        return false;
     }
 
     /**
@@ -1144,7 +1507,7 @@ public class MovementChecker implements Listener {
     private boolean handleViolation(Player player, String type, String details, double value, Location location) {
         // Log to database
         if (database != null) {
-            database.logAsync("anticheat_" + type.toLowerCase(), value,
+            database.logAsync(player.getUniqueId(), "anticheat_" + type.toLowerCase(), value,
                     player.getName() + ": " + details + " @ " + CheckMath.formatLocation(location));
         }
 
@@ -1164,13 +1527,18 @@ public class MovementChecker implements Listener {
             violationManager.flag(player, type);
         }
 
-        // Optional setback: teleport the player back to their last valid position.
+        // Optional setback: teleport the player back to their last clean position.
         // teleportAsync (not teleport): a synchronous teleport is unsupported on Folia's
-        // region threads, and this runs inside a PlayerMoveEvent handler.
+        // region threads, and this runs inside a PlayerMoveEvent handler. The pending mark is
+        // set first because the teleport event may fire before teleportAsync returns.
         if (config.punishmentsSetback()) {
-            Location back = lastLocations.get(player.getUniqueId());
+            UUID id = player.getUniqueId();
+            Location back = lastLegitLocations.get(id);
+            if (back == null) back = lastLocations.get(id);
             if (back != null && back.getWorld() != null) {
-                player.teleportAsync(back);
+                Location target = back.clone();
+                pendingSetbacks.put(id, new PendingSetback(target, System.currentTimeMillis()));
+                player.teleportAsync(target, PlayerTeleportEvent.TeleportCause.PLUGIN);
                 return true;
             }
         }
@@ -1183,10 +1551,9 @@ public class MovementChecker implements Listener {
      *
      * <p>One block of margin is enough for all of them: the ground scan offsets the footprint
      * corners by 0.3 (more for a scaled player, but still well under a block), and the
-     * sideways tests look exactly one block out. Checking only the centre column left the
-     * corner of a scan free to reach into an unloaded chunk, which both forces a synchronous
-     * load — forbidden on a Folia region thread — and answers "no block here" for ground that
-     * simply has not been read yet.
+     * sideways tests look exactly one block out. A scan corner reaching into an unloaded chunk
+     * would force a synchronous load (forbidden on a Folia region thread) and answer "no
+     * block here" for ground that simply has not been read yet.
      */
     private static boolean neighbourhoodLoaded(Location loc) {
         org.bukkit.World world = loc.getWorld();
@@ -1222,6 +1589,14 @@ public class MovementChecker implements Listener {
      */
     private int supportDepth(Player player, int maxDepth) {
         if (player.isClimbing()) return 0;
+        return footprintDepth(player, maxDepth, this::isSupportive);
+    }
+
+    /**
+     * The footprint scan behind {@link #supportDepth}: depth of the first block under any
+     * hitbox corner (or the centre) matching {@code match}, or -1 within {@code maxDepth}.
+     */
+    private int footprintDepth(Player player, int maxDepth, java.util.function.Predicate<org.bukkit.block.Block> match) {
         Location loc = player.getLocation();
         // Hitbox half-width, scaled: the scale attribute resizes the player, and a wider
         // footprint stands on blocks the vanilla-width scan would miss.
@@ -1235,7 +1610,7 @@ public class MovementChecker implements Listener {
             for (int i = 0; i < dx.length; i++) {
                 int bx = (int) Math.floor(loc.getX() + dx[i]);
                 int bz = (int) Math.floor(loc.getZ() + dz[i]);
-                if (isSupportive(loc.getWorld().getBlockAt(bx, feetY - k, bz))) return k;
+                if (match.test(loc.getWorld().getBlockAt(bx, feetY - k, bz))) return k;
             }
         }
         return -1;
@@ -1281,7 +1656,19 @@ public class MovementChecker implements Listener {
         Location loc = player.getLocation();
         Material at = loc.getBlock().getType();
         Material below = loc.getBlock().getRelative(0, -1, 0).getType();
-        return at == Material.AIR && below == Material.WATER && !hasEntitySupport(player);
+        if (at != Material.AIR || below != Material.WATER) return false;
+        // The centre column alone misreads every edge: a player on a pier, a shoreline block
+        // or a one-wide bridge has water under their centre while a hitbox corner rests on
+        // the block beside it. Any real footing under the footprint holds them up.
+        if (footprintDepth(player, 1, this::isDryFooting) >= 0) return false;
+        return !hasEntitySupport(player);
+    }
+
+    /** Footing that is not itself liquid — what a player crossing water may stand on. */
+    private boolean isDryFooting(org.bukkit.block.Block block) {
+        Material m = block.getType();
+        if (m == Material.WATER || m == Material.LAVA || m == Material.BUBBLE_COLUMN) return false;
+        return isSupportive(block);
     }
 
     /**
@@ -1402,6 +1789,16 @@ public class MovementChecker implements Listener {
     public void cleanup(UUID playerId) {
         lastLocations.remove(playerId);
         lastMoveTime.remove(playerId);
+        lastLegitLocations.remove(playerId);
+        pendingSetbacks.remove(playerId);
+        sampleFrom.remove(playerId);
+        sampleAt.remove(playerId);
+        sampleEvents.remove(playerId);
+        burstFrom.remove(playerId);
+        burstEvents.remove(playerId);
+        speedBudget.remove(playerId);
+        airWindows.remove(playerId);
+        wasFlying.remove(playerId);
         consecutiveSpeedViolations.remove(playerId);
         consecutiveFlyViolations.remove(playerId);
         consecutiveHoverTicks.remove(playerId);

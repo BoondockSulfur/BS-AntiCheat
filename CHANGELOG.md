@@ -4,6 +4,24 @@ All notable changes to BSAntiCheat are documented in this file.
 
 ---
 
+## [1.0.7] - 2026-09-29
+
+### Fixed
+- Closed detection bypasses: ender pearl/chorus teleport grace, Timer pauses, packet bundling, oscillating or slowly sinking Fly/BoatFly, speed pulsing, dig-packet AutoClicker suppression, spoofed ground flag for InventoryMove, uncapped ping allowance.
+- Fewer false positives: Jesus at shores and piers, flight/gamemode changes, fast-moving reach targets, vein-miner bursts (Nuker/FastPlace), team-fight KillAura, X-Ray in overgrown caves and dense veins, knockback in cobwebs/powder snow.
+- Violation levels now survive a relog; punishment commands run in order on the correct Folia thread.
+- PerformanceAnalyzer migration no longer imports Discord or silent-player settings into fresh installs; foreign keys from earlier imports are removed.
+- Discord alerts share one rate limit per webhook and retry on HTTP 429; fallback log is flushed periodically.
+
+### Changed
+- Timer check uses the client tick-end packet; lag detection uses a short window (per region on Folia).
+- Update notice shows clickable Modrinth and CurseForge links to operators on join.
+- Validation for all numeric config values; `clear --db` deletes by player UUID.
+- Various smaller thread-safety, memory and performance fixes.
+
+### API
+- `ViolationEvent` now fires on the thread owning the player (region thread on Folia), one tick later than before.
+
 ## [1.0.6] - 2026-09-07
 
 Live alerts from two production servers, worked case by case, and then a review pass over what

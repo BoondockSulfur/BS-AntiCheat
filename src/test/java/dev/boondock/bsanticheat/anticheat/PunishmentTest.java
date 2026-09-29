@@ -30,7 +30,11 @@ class PunishmentTest extends ScenarioBase {
     private static class RecordingViolations extends ViolationManager {
         final List<String> dispatched = new ArrayList<>();
         final List<String> kicks = new ArrayList<>();
-        Player lastRegion;
+        /** Every step in execution order, tagged with the thread kind it ran on. */
+        final List<String> trace = new ArrayList<>();
+        /** Simulates a player removed before their region task could run. */
+        boolean playerGone;
+        private String where = "?";
 
         RecordingViolations(org.bukkit.plugin.java.JavaPlugin plugin,
                             dev.boondock.bsanticheat.config.PluginConfig config) {
@@ -39,18 +43,33 @@ class PunishmentTest extends ScenarioBase {
 
         @Override
         void runOnGlobalRegion(Runnable r) {
+            String prev = where;
+            where = "global";
             r.run();
+            where = prev;
         }
 
         @Override
-        void runForPlayerRegion(Player player, Runnable r) {
-            lastRegion = player;
+        void runForPlayerRegion(Player player, Runnable r, Runnable retired) {
+            if (playerGone) {
+                retired.run();
+                return;
+            }
+            String prev = where;
+            where = "player";
             r.run();
+            where = prev;
+        }
+
+        @Override
+        void fireEvent(dev.boondock.bsanticheat.api.ViolationEvent event) {
+            trace.add("event@" + where);
         }
 
         @Override
         boolean runConsoleCommand(String command) {
             dispatched.add(command);
+            trace.add("cmd:" + command + "@" + where);
             return true;
         }
 
@@ -58,6 +77,7 @@ class PunishmentTest extends ScenarioBase {
         void doKick(Player player, net.kyori.adventure.text.Component message) {
             kicks.add(net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
                     .plainText().serialize(message));
+            trace.add("kick@" + where);
         }
 
         int dispatchedCount() {
@@ -149,31 +169,102 @@ class PunishmentTest extends ScenarioBase {
     }
 
     @Test
-    @DisplayName("A punishment command runs on the target's own region")
-    void punishmentRunsOnThePlayersRegion() {
-        // A kick reaches into that player's state, and on Folia an entity may only be touched
-        // from the region that owns it. The global region is not that region.
-        tier(1, "say %player%");
+    @DisplayName("Threads: event and @kick on the player's region, console commands on the global one")
+    void stepsRunOnTheirThreads() {
+        // Folia: the player may only be touched from their region; the console sender belongs
+        // to the global region.
+        tier(1, "say %player%", "@kick");
         PlayerMock player = player(0.5, 64.0, 0.5);
         vm.flag(player, "SPEED");
-        assertEquals(player, vm.lastRegion, "the command belongs on the player's region thread");
+        assertEquals(List.of("event@player", "cmd:say " + player.getName() + "@global", "kick@player"),
+                vm.trace, "each step on its own thread, in configured order");
+    }
+
+    @Test
+    @DisplayName("The event fires before the punishment of the same violation")
+    void eventPrecedesPunishment() {
+        tier(1, "ban %player%");
+        PlayerMock player = player(0.5, 64.0, 0.5);
+        vm.flag(player, "FLY");
+        assertEquals("event@player", vm.trace.get(0));
+        assertEquals("cmd:ban " + player.getName() + "@global", vm.trace.get(1));
+    }
+
+    @Test
+    @DisplayName("A command after @kick still runs once the player is gone")
+    void commandAfterKickStillRuns() {
+        // "@kick" then "ban": the kick removes the player, so the entity scheduler retires the
+        // follow-up. The ban must not be dropped with it.
+        tier(1, "@kick", "ban %player%");
+        PlayerMock player = player(0.5, 64.0, 0.5);
+        vm.playerGone = true;
+        vm.flag(player, "FLY");
+        assertEquals(List.of("event@global", "cmd:ban " + player.getName() + "@global"), vm.trace,
+                "the event falls back to the global region, the kick is skipped, the ban runs");
     }
 
     @Test
     @DisplayName("A failing ViolationEvent does not swallow the punishment")
     void eventFailureDoesNotBlockPunishment() {
-        // The event is information for other plugins; it used to sit on the punishment's
-        // critical path, so anything that made it throw took the tier below it with it.
+        // The event is information for other plugins; it must never take the tier with it.
         tier(1, "say still punished");
         RecordingViolations throwing = new RecordingViolations(plugin, config) {
             @Override
-            void runOnGlobalRegion(Runnable r) {
-                throw new IllegalStateException("no region scheduler");
+            void fireEvent(dev.boondock.bsanticheat.api.ViolationEvent event) {
+                throw new IllegalStateException("listener failure");
             }
         };
         PlayerMock player = player(0.5, 64.0, 0.5);
         throwing.flag(player, "SPEED");
         assertEquals(1, throwing.dispatchedCount(), "the punishment must still run");
+    }
+
+    @Test
+    @DisplayName("The level survives a quit")
+    void levelSurvivesQuit() {
+        tier(3, "say caught");
+        PlayerMock player = player(0.5, 64.0, 0.5);
+        vm.flag(player, "SPEED");
+        vm.flag(player, "SPEED");
+        vm.cleanup(player.getUniqueId());
+        assertEquals(2, vm.getViolations(player.getUniqueId(), "SPEED"), "relogging must not reset the VL");
+        vm.flag(player, "SPEED");
+        assertEquals(1, vm.dispatchedCount(), "the third violation after the relog reaches the tier");
+    }
+
+    @Test
+    @DisplayName("Fully decayed levels are purged")
+    void decayedLevelsArePurged() {
+        plugin.getConfig().set("anticheat.punishments.decay_seconds", 1);
+        PlayerMock player = player(0.5, 64.0, 0.5);
+        vm.flag(player, "SPEED");
+        sleep(1100);
+        vm.purgeDecayed(System.currentTimeMillis(), true);
+        assertFalse(vm.isTracked(player.getUniqueId()), "a level at zero holds no state");
+    }
+
+    @Test
+    @DisplayName("A tier re-arms once the level fell below half of it, not before")
+    void tierRearmsWithHysteresis() {
+        // Tier 4: fires at 4, re-arms only below 2. Decay is switched on only for the pauses.
+        plugin.getConfig().set("anticheat.punishments.decay_seconds", 0);
+        tier(4, "say four");
+        PlayerMock player = player(0.5, 64.0, 0.5);
+        for (int i = 0; i < 4; i++) vm.flag(player, "SPEED");
+        assertEquals(1, vm.dispatchedCount());
+
+        // Down to ~3 (still above half), back up to 4: no second run.
+        plugin.getConfig().set("anticheat.punishments.decay_seconds", 1);
+        sleep(1000);
+        vm.flag(player, "SPEED");
+        assertEquals(1, vm.dispatchedCount(), "a dip to just under the tier must not re-arm it");
+
+        // Down below 2, then back up to 4: the tier fires again, although the level never hit 0.
+        sleep(2600);
+        assertTrue(vm.getViolations(player.getUniqueId(), "SPEED") > 0, "not a full decay");
+        plugin.getConfig().set("anticheat.punishments.decay_seconds", 0);
+        for (int i = 0; i < 3; i++) vm.flag(player, "SPEED");
+        assertEquals(2, vm.dispatchedCount(), "below half the tier it is armed again");
     }
 
     @Test
@@ -243,16 +334,15 @@ class PunishmentTest extends ScenarioBase {
     @Test
     @DisplayName("With decay running, the Nth violation reaches level N")
     void decayDoesNotDelayTiers() {
-        // Live on mc-test 2026-09-07: tier 2 needed three flags and tier 3 needed four.
         // Decay runs on every flag and subtracts the elapsed time, so three violations total
-        // 2.9999 rather than 3.0 — and truncating turned that into a 2. Every configured
-        // threshold therefore fired one violation late, which for a kick tier of 25 means the
+        // 2.9999 rather than 3.0 — and truncating would turn that into a 2. Every configured
+        // threshold would then fire one violation late, which for a kick tier of 25 means the
         // 26th alert.
         plugin.getConfig().set("anticheat.punishments.decay_seconds", 300);
         tier(3, "say caught");
         PlayerMock player = player(0.5, 64.0, 0.5);
         // A real millisecond between them, or the decay never engages and the test passes
-        // whatever the arithmetic does — which is how it first passed against the bug.
+        // whatever the arithmetic does.
         flagSlowly(player, 2);
         assertEquals(0, vm.dispatchedCount(), "two violations are not the tier yet");
         flagSlowly(player, 1);

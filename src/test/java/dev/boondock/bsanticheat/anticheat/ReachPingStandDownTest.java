@@ -22,10 +22,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Above {@code reach_max_ping_ms} the server can no longer say where either player was, so
  * standing reach down is the honest answer. Standing down the REST of combat with it is not:
  * the aim angle and the multi-target count are questions about rotation and about time, and
- * neither gets less answerable as latency rises. The ceiling used to be a {@code return} out
- * of the event handler, which took both with it — on a link like the one that produced the
- * 2026-08-23 timer case (1275-1444 ms round trips) that is KillAura switched off permanently,
- * and a cheat can put itself there deliberately by answering transaction pings late.
+ * neither gets less answerable as latency rises. The ceiling must not be a {@code return} out
+ * of the event handler, which would take both with it — on a link with round trips above one
+ * second that is KillAura switched off permanently, and a cheat can put itself there
+ * deliberately by answering transaction pings late.
  */
 class ReachPingStandDownTest extends ScenarioBase {
 

@@ -9,11 +9,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The Timer check's two guards against punishing a bad connection.
  *
- * <p>Live case, 2026-08-23: a player whose measured round trip ran 1275-1444ms reached a
- * balance of 779ms and was flagged. No single gap in their packet stream ever exceeded
- * PACKET_GAP_MS, so the stall grace never engaged — the backlog arrived spread over hundreds
- * of milliseconds, faster than one packet per tick but never all at once. The balance climbed
- * the whole way, held over the limit for longer than {@code timer_sustained_ms}, and fired.
+ * <p>A connection with a round trip above one second can deliver a backlog spread over
+ * hundreds of milliseconds, faster than one packet per tick but never all at once. No single
+ * gap is long enough to count as a stall, so the balance climbs the whole way and can stay
+ * over the limit for longer than {@code timer_sustained_ms}.
  *
  * <p>What separates that from a hack is not how high the balance goes or how long it stays
  * up, but whether it is still GAINING: a catch-up drains its backlog and plateaus, while a
@@ -54,8 +53,8 @@ class TimerBalanceTest {
     @Test
     @DisplayName("A catch-up burst climbs and then plateaus")
     void catchUpPlateaus() {
-        // 300ms of backlog arriving at ~20ms spacing — the live signature. Not one packet
-        // exceeds PACKET_GAP_MS (400ms), so no stall grace applies.
+        // 300ms of backlog arriving at ~20ms spacing — a typical catch-up. Not one gap
+        // is long enough to count as a stall.
         long balance = 0;
         for (int i = 0; i < 15; i++) balance = PacketChecker.updateBalance(balance, 20);
         long peak = balance;
@@ -104,8 +103,8 @@ class TimerBalanceTest {
     @Test
     @DisplayName("A bad link has to hold the excursion for longer")
     void badLinkNeedsLongerExcursion() {
-        // The live measurement: 1444ms round trip. The catch-up that produced the false
-        // positive lasted about one round trip, so requiring more than that rules it out.
+        // With a 1444ms round trip, a catch-up lasts about one round trip, so requiring
+        // more than that rules it out.
         assertEquals(2444L, PacketChecker.requiredExcursionMs(1000L, 1444, 3000L));
     }
 
@@ -121,5 +120,141 @@ class TimerBalanceTest {
     @DisplayName("A good connection is unaffected")
     void goodConnectionUnaffected() {
         assertEquals(1040L, PacketChecker.requiredExcursionMs(1000L, 40, 3000L));
+    }
+
+    // ==================== the per-player accounting ====================
+
+    private static final long WINDOW_MS = 1000L;        // catch-up window without RTT
+    private static final long REQUIRED_MS = 1000L;      // timer_sustained_ms
+    private static final long MIN_GROWTH_CENTI = 150L * 100L;
+
+    /** Drives a TimerState with tick-end packets and counts the flags it raises. */
+    private static final class Client {
+        final PacketChecker.TimerState st = new PacketChecker.TimerState();
+        long now = 1_000_000L;
+        int flags;
+
+        void tickEnd(long afterMs) {
+            now += afterMs;
+            st.onTickEnd(now, WINDOW_MS);
+            judge();
+        }
+
+        void move(long afterMs) {
+            now += afterMs;
+            if (st.onMovement(now, WINDOW_MS)) judge();
+        }
+
+        void judge() {
+            if (st.judge(now, LIMIT_CENTI, REQUIRED_MS, MIN_GROWTH_CENTI) == PacketChecker.TimerState.FLAG) flags++;
+        }
+
+        void ticks(int count, long everyMs) {
+            for (int i = 0; i < count; i++) tickEnd(everyMs);
+        }
+    }
+
+    @Test
+    @DisplayName("Vanilla play with movement and tick-end packets never flags")
+    void vanillaInterleavedIsQuiet() {
+        Client c = new Client();
+        for (int i = 0; i < 2000; i++) {
+            c.move(0);
+            c.tickEnd(50);
+        }
+        assertEquals(0, c.flags);
+        assertTrue(c.st.balance <= 0, "movement packets must not claim a second tick");
+    }
+
+    @Test
+    @DisplayName("Short pauses no longer open a judgement-free window")
+    void pauseAndSprintIsCaught() {
+        // A 401ms silence must not reset the balance or suspend judgement for 3s, which
+        // would allow running at double speed indefinitely.
+        Client c = new Client();
+        c.ticks(100, 50);
+        for (int cycle = 0; cycle < 3 && c.flags == 0; cycle++) {
+            c.now += 401;
+            c.ticks(120, 25); // 3s at 2x
+        }
+        assertTrue(c.flags > 0, "2x speed between short pauses is a timer hack");
+    }
+
+    @Test
+    @DisplayName("A stalled connection's backlog does not flag")
+    void stallBacklogIsAbsorbed() {
+        // Eight seconds without a packet, then all 160 queued ticks in one bundle, then
+        // normal play. The backlog claims exactly the time the stall took.
+        Client c = new Client();
+        c.ticks(40, 50);
+        c.now += 8000;
+        c.tickEnd(0);
+        c.ticks(159, 2);
+        c.ticks(200, 50);
+        assertEquals(0, c.flags, "a catch-up is not a hack");
+        assertTrue(c.st.balance <= LIMIT_CENTI);
+    }
+
+    @Test
+    @DisplayName("A stall's credit expires with its catch-up window")
+    void stallCreditIsNotBanked() {
+        // Faking a stall must not bank its length: once the window has passed, only the
+        // ordinary credit is left.
+        Client c = new Client();
+        c.ticks(40, 50);
+        c.now += 10_000;
+        c.tickEnd(0);
+        c.ticks(40, 50);   // two seconds of normal play: the window has closed
+        assertTrue(c.st.balance >= -100_000L, "credit is back to the ordinary clamp");
+        c.ticks(200, 25);  // then 2x
+        assertTrue(c.flags > 0, "the stall's length was not kept for later");
+    }
+
+    @Test
+    @DisplayName("Idle credit is bounded in tick-end mode")
+    void idleCreditBounded() {
+        Client c = new Client();
+        c.ticks(20_000, 50); // ~17 minutes idle: the drift leak piles up credit
+        assertTrue(c.st.balance >= -100_000L, "credit must stay clamped at one second");
+        c.ticks(400, 25);
+        assertTrue(c.flags > 0, "idling must not pay for ten seconds at double speed");
+    }
+
+    @Test
+    @DisplayName("Dropping tick-end packets does not hide a timer")
+    void suppressedTickEndStillCounted() {
+        // Once a client has sent tick-end packets, movement packets without one in between
+        // are charged as ticks themselves.
+        Client c = new Client();
+        c.ticks(40, 50);
+        for (int i = 0; i < 400; i++) c.move(25);
+        assertTrue(c.flags > 0);
+    }
+
+    @Test
+    @DisplayName("Repeated setbacks do not add up to a timer flag")
+    void setbackConfirmationsAreNotTicks() {
+        // Short teleports do not reset the accounting, and the client answers each one
+        // with an extra movement packet outside its tick loop.
+        Client c = new Client();
+        for (int i = 0; i < 400; i++) {
+            if (i % 5 == 0) {
+                c.st.expectTeleportMove();
+                c.move(0);
+            }
+            c.move(0);
+            c.tickEnd(50);
+        }
+        assertEquals(0, c.flags);
+    }
+
+    @Test
+    @DisplayName("Clients without tick-end fall back to movement packets")
+    void movementFallback() {
+        Client c = new Client();
+        for (int i = 0; i < 400; i++) c.move(50);
+        assertEquals(0, c.flags);
+        for (int i = 0; i < 400; i++) c.move(25);
+        assertTrue(c.flags > 0);
     }
 }

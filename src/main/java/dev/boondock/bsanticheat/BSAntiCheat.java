@@ -18,9 +18,15 @@ import org.bstats.bukkit.Metrics;
 import org.bukkit.Bukkit;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.File;
 import java.util.UUID;
 
 /**
@@ -50,20 +56,25 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
     private PacketIntegration packets;
     private LuckPermsHook luckPerms;
     private GeyserHook geyser;
+    /** Newer version found by the update check, or null. Written async, read on join. */
+    private volatile String availableVersion;
 
     @Override
     public void onEnable() {
-        // Save default config
+        // Save default config. Whether it had to be created decides whether this is a
+        // first run, which is the only time a legacy PerformanceAnalyzer config is imported.
+        boolean freshInstall = !new File(getDataFolder(), "config.yml").exists();
         saveDefaultConfig();
+
+        // Migrate from the legacy PerformanceAnalyzer before the config is read, so the
+        // imported values are the ones every cache is built from.
+        new ConfigMigrator(this).migrateFromPerformanceAnalyzer(freshInstall);
 
         // Config
         configAdapter = new PluginConfig(this);
 
         // Track server TPS for lag-aware checks
         ServerLoad.start(this, configAdapter);
-
-        // Migrate from old PerformanceAnalyzer if applicable
-        new ConfigMigrator(this).migrateFromPerformanceAnalyzer();
 
         // Language
         lang = new LanguageManager(this, configAdapter.language());
@@ -203,16 +214,60 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         }
 
         // Update checker (async, 3s delay)
-        dev.boondock.bsanticheat.util.Scheduler.runAsyncLater(this, () -> {
-            new UpdateChecker(this).checkForUpdates().thenAccept(result -> {
-                if (result.isUpdateAvailable()) {
-                    getLogger().warning("A new version is available: " + result.getLatestVersion()
-                            + " (current: " + getDescription().getVersion() + "). " + result.getMessage());
-                }
-            });
-        }, Constants.UPDATE_CHECKER_DELAY_TICKS / 20L, java.util.concurrent.TimeUnit.SECONDS);
+        dev.boondock.bsanticheat.util.Scheduler.runAsyncLater(this, this::checkForUpdates,
+                Constants.UPDATE_CHECKER_DELAY_TICKS / 20L, java.util.concurrent.TimeUnit.SECONDS);
 
         getLogger().info("BSAntiCheat v" + getDescription().getVersion() + " enabled!");
+    }
+
+    private void checkForUpdates() {
+        new UpdateChecker(this).checkForUpdates().thenAccept(result -> {
+            if (!result.isUpdateAvailable()) return;
+            availableVersion = result.getLatestVersion();
+            StringBuilder line = new StringBuilder("Update available: ")
+                    .append(getDescription().getVersion()).append(" -> ").append(result.getLatestVersion())
+                    .append("  |  Modrinth: ").append(Constants.URL_MODRINTH);
+            if (hasCurseForgePage()) line.append("  |  CurseForge: ").append(Constants.URL_CURSEFORGE);
+            getLogger().warning(line.toString());
+        }).exceptionally(ex -> null);
+    }
+
+    private static boolean hasCurseForgePage() {
+        return Constants.URL_CURSEFORGE != null && !Constants.URL_CURSEFORGE.isEmpty();
+    }
+
+    /**
+     * Tells operators about an update once, when they join. The console line is easy to
+     * miss among the startup output, and the download pages are only clickable in chat.
+     * Operators only: nobody else can install it.
+     */
+    @EventHandler
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        UUID playerId = event.getPlayer().getUniqueId();
+        // A previous session's cached answers must not carry over.
+        if (luckPerms != null) luckPerms.invalidate(playerId);
+        if (geyser != null) geyser.invalidate(playerId);
+
+        String latest = availableVersion;
+        if (latest == null || !event.getPlayer().isOp()) return;
+
+        LegacyComponentSerializer legacy = LegacyComponentSerializer.legacySection();
+        Component message = legacy.deserialize(lang.get("update.available",
+                        "%current%", getDescription().getVersion(),
+                        "%latest%", latest))
+                .append(Component.space())
+                .append(downloadLink("update.link_modrinth", Constants.URL_MODRINTH, legacy));
+        if (hasCurseForgePage()) {
+            message = message.append(Component.space())
+                    .append(downloadLink("update.link_curseforge", Constants.URL_CURSEFORGE, legacy));
+        }
+        event.getPlayer().sendMessage(message);
+    }
+
+    private Component downloadLink(String labelKey, String url, LegacyComponentSerializer legacy) {
+        return legacy.deserialize(lang.get(labelKey))
+                .clickEvent(ClickEvent.openUrl(url))
+                .hoverEvent(HoverEvent.showText(legacy.deserialize(lang.get("update.link_hover", "%url%", url))));
     }
 
     @Override
@@ -238,6 +293,8 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         if (packets != null) packets.cleanup(playerId);
         if (alertPreferenceManager != null) alertPreferenceManager.cleanup(playerId);
         if (violationManager != null) violationManager.cleanup(playerId);
+        if (luckPerms != null) luckPerms.invalidate(playerId);
+        if (geyser != null) geyser.invalidate(playerId);
     }
 
     public void reloadPlugin() {
@@ -246,8 +303,8 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         // Reload the language in place so components holding a reference stay valid
         lang.setLanguage(configAdapter.language());
         if (xrayDetector != null) xrayDetector.reloadConfigCaches();
-        // Reschedules the transaction ping task: its period is baked in when the task is
-        // created, so reloading the config alone left the old interval running.
+        // Reschedules the transaction ping task: its period is fixed when the task is
+        // created, so reloading the config alone would keep the old interval.
         if (packets != null) packets.reload();
         getLogger().info("BSAntiCheat reloaded.");
     }

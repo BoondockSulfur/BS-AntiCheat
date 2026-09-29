@@ -17,8 +17,7 @@ import java.util.regex.Pattern;
  * <p>Every colour format an admin might reasonably type is accepted, mixed freely in one
  * string: the classic codes ({@code &a}, {@code &l}), hex in the Spigot spellings
  * ({@code &#9863E7} and {@code &x&9&8&6&3&E&7}), and MiniMessage ({@code <#9863E7>},
- * {@code <red>}, {@code <bold>}, {@code <gradient:...>}). Previously only {@code &0}-{@code &f}
- * worked and everything else reached the player verbatim, which is what the report was about.
+ * {@code <red>}, {@code <bold>}, {@code <gradient:...>}).
  *
  * <p>How: the legacy spellings are rewritten into their MiniMessage equivalents and the whole
  * string is then parsed by MiniMessage. That is what allows the formats to be mixed, and it

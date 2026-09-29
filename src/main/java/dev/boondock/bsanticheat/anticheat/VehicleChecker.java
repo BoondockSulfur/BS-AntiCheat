@@ -133,12 +133,19 @@ public class VehicleChecker implements Listener {
         UUID playerId = player.getUniqueId();
         Location from = event.getFrom();
         Location to = event.getTo();
-        if (!from.getWorld().equals(to.getWorld())) return;
+        if (!from.getWorld().equals(to.getWorld())) {
+            boatAir.remove(playerId);
+            return;
+        }
 
-        if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
-        if (ServerLoad.isLagging(config)) {
+        if (Exemptions.isExempt(player, config, luckPerms, geyser)) {
+            boatAir.remove(playerId);
+            return;
+        }
+        if (ServerLoad.isLagging(config, player)) {
             consecutiveBoatFly.remove(playerId);
             consecutiveVehicleSpeed.remove(playerId);
+            boatAir.remove(playerId);
             resetSpeedSample(playerId);
             return;
         }
@@ -148,6 +155,7 @@ public class VehicleChecker implements Listener {
         if (from.distance(to) > VEHICLE_TELEPORT_DISTANCE) {
             consecutiveBoatFly.remove(playerId);
             consecutiveVehicleSpeed.remove(playerId);
+            boatAir.remove(playerId);
             resetSpeedSample(playerId);
             return;
         }
@@ -172,15 +180,20 @@ public class VehicleChecker implements Listener {
         // --- Boat-Fly: boat stays airborne without falling ---
         if (vehicle instanceof Boat) {
             double dy = to.getY() - from.getY();
-            if (dy > -0.01 && !iceMomentum && isAirborne(to)) {
+            boolean airborne = !iceMomentum && isAirborne(to);
+            if (dy > -0.01 && airborne) {
                 int c = consecutiveBoatFly.merge(playerId, 1, Integer::sum);
                 if (c >= config.boatFlyViolations()) {
                     handleViolation(player, "BOATFLY", lang.format("alert.boatfly", c), dy, to);
                     consecutiveBoatFly.put(playerId, 0);
+                    boatAir.remove(playerId);
                 }
             } else {
                 consecutiveBoatFly.remove(playerId);
             }
+            checkBoatGravity(player, playerId, from, to, airborne);
+        } else {
+            boatAir.remove(playerId);
         }
 
         // --- Vehicle speed, averaged over a real elapsed window (see the field comment) ---
@@ -214,8 +227,85 @@ public class VehicleChecker implements Listener {
                 consecutiveVehicleSpeed.put(playerId, 0);
             }
         } else {
-            consecutiveVehicleSpeed.remove(playerId);
+            // Decay by one window instead of forgetting the streak, so an over-speed that
+            // pauses for a single window every few windows still adds up.
+            consecutiveVehicleSpeed.computeIfPresent(playerId, (k, v) -> v > 1 ? v - 1 : null);
         }
+    }
+
+    // ==================== Boat gravity ====================
+
+    // Boat physics in the air: 0.04 b/t of gravity per tick. The expected rise is taken as the
+    // larger of the undamped model and one with living-entity drag (0.98): undamped rises
+    // higher, damped falls slower, and the bound has to be lenient in both directions.
+    private static final double BOAT_GRAVITY = 0.04;
+    private static final double BOAT_DRAG = 0.98;
+    // Highest vertical speed a boat is assumed to leave the ground with when nothing more is
+    // known. A boat launched faster than this (bubble column, explosion) shows the launch in
+    // its first airborne sample, which then becomes the starting speed of the window instead.
+    private static final double BOAT_LAUNCH_SPEED = 0.2;
+    // Airborne time before the window is judged, and the leeway on the expected fall.
+    private static final double BOAT_MIN_AIR_TICKS = 20.0;
+    private static final double BOAT_FALL_TOLERANCE = 1.0;
+
+    /** One uninterrupted airborne stretch of a ridden boat. */
+    private static final class AirWindow {
+        final double startY;
+        final long startAt;
+        final double v0;
+        int events;
+        long lastAt;
+
+        AirWindow(double startY, long startAt, double v0) {
+            this.startY = startY;
+            this.startAt = startAt;
+            this.v0 = v0;
+        }
+    }
+
+    private final Map<UUID, AirWindow> boatAir = new ConcurrentHashMap<>();
+
+    /**
+     * Boat-Fly that keeps moving vertically. The per-sample streak above only counts samples
+     * that do not sink at all, so a boat sinking by a few hundredths per tick, or bobbing up
+     * and down around one height, glides forever. Here the whole airborne stretch is compared
+     * with free fall instead: after {@link #BOAT_MIN_AIR_TICKS} ticks without support a boat
+     * must have dropped at least as far as gravity drags it, starting from the fastest
+     * plausible upward speed.
+     *
+     * <p>Time is the smaller of real elapsed ticks and the number of move events: a
+     * connection stall stretches the arrival times without adding any flight time, and
+     * judging a stretched window against a longer fall would flag a laggy player.
+     */
+    void checkBoatGravity(Player player, UUID playerId, Location from, Location to, boolean airborne) {
+        if (!airborne) {
+            boatAir.remove(playerId);
+            return;
+        }
+        long now = System.currentTimeMillis();
+        AirWindow w = boatAir.get(playerId);
+        // A silence longer than a packet gap (dismounted, stalled connection) disconnects the
+        // stretch: the stored start height no longer belongs to this flight.
+        if (w != null && now - w.lastAt > Constants.MOVEMENT_MAX_GAP_MS) w = null;
+        if (w == null) {
+            double firstDy = to.getY() - from.getY();
+            w = new AirWindow(from.getY(), now - 50L, Math.max(BOAT_LAUNCH_SPEED, firstDy));
+            boatAir.put(playerId, w);
+        }
+        w.events++;
+        w.lastAt = now;
+        double ticks = Math.min((now - w.startAt) / 50.0, w.events);
+        if (ticks < BOAT_MIN_AIR_TICKS) return;
+
+        double rise = to.getY() - w.startY;
+        double allowed = Math.max(
+                CheckMath.ballisticRise(w.v0, BOAT_GRAVITY, 1.0, ticks),
+                CheckMath.ballisticRise(w.v0, BOAT_GRAVITY, BOAT_DRAG, ticks)) + BOAT_FALL_TOLERANCE;
+        if (rise <= allowed) return;
+
+        boatAir.remove(playerId);
+        consecutiveBoatFly.remove(playerId);
+        handleViolation(player, "BOATFLY", lang.format("alert.boatfly", w.events), rise, to);
     }
 
     /**
@@ -277,7 +367,7 @@ public class VehicleChecker implements Listener {
 
     private void handleViolation(Player player, String type, String details, double value, Location location) {
         if (database != null) {
-            database.logAsync("anticheat_" + type.toLowerCase(), value,
+            database.logAsync(player.getUniqueId(), "anticheat_" + type.toLowerCase(), value,
                     player.getName() + ": " + details + " @ " + CheckMath.formatLocation(location));
         }
         if (alertManager != null) {
@@ -294,6 +384,7 @@ public class VehicleChecker implements Listener {
         consecutiveBoatFly.remove(playerId);
         consecutiveVehicleSpeed.remove(playerId);
         recentIce.remove(playerId);
+        boatAir.remove(playerId);
         resetSpeedSample(playerId);
     }
 }

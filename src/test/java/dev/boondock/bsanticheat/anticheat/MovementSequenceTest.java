@@ -120,7 +120,7 @@ class MovementSequenceTest {
         PlayerMock player = server.addPlayer();
         player.setGameMode(org.bukkit.GameMode.SURVIVAL);
         player.setOp(false);
-        // The live false positive, modelled exactly: the web sits at BODY height with open
+        // The web sits at BODY height with open
         // cave below, so the downward support scan finds nothing and the player reads as
         // airborne — while the web slows their descent below the rate that counts as
         // falling. Putting the web at foot level instead would prove nothing: it would

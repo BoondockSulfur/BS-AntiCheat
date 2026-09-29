@@ -1,86 +1,149 @@
 package dev.boondock.bsanticheat.config;
 
+import dev.boondock.bsanticheat.util.Scheduler;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 /**
- * Asynchronous configuration saver to prevent main thread blocking.
- * Ensures config changes don't freeze the server.
+ * Writes config.yml off the server threads.
+ *
+ * <p>The YAML text comes from a snapshot supplier ({@link PluginConfig} serialises its
+ * current, never-mutated configuration under its own lock), so the file write never touches
+ * a configuration another thread may be reading or changing. Writes are serialised on
+ * {@link #fileLock} and go through a temp file, so a crash mid-write cannot leave a
+ * truncated config behind.
  *
  * @since 3.0.0
  */
 public class AsyncConfigSaver {
 
     private final JavaPlugin plugin;
+    private final Supplier<String> snapshot;
+    private final File configFile;
+    private final Object fileLock = new Object();
     private final AtomicBoolean isSaving = new AtomicBoolean(false);
     private final AtomicBoolean pendingSave = new AtomicBoolean(false);
 
-    public AsyncConfigSaver(JavaPlugin plugin) {
+    public AsyncConfigSaver(JavaPlugin plugin, Supplier<String> snapshot) {
         this.plugin = plugin;
+        this.snapshot = snapshot;
+        this.configFile = new File(plugin.getDataFolder(), "config.yml");
     }
 
     /**
-     * Save config asynchronously.
-     * Non-blocking - runs on Bukkit's async scheduler to ensure thread safety.
+     * Save the current snapshot on an async thread. Requests arriving while a save runs are
+     * coalesced into one follow-up save.
      *
-     * IMPORTANT: Bukkit's saveConfig() must run on the main thread to be thread-safe.
-     * This method schedules the save on the main thread via Bukkit scheduler.
-     *
-     * @return CompletableFuture that completes when save is done
+     * @return CompletableFuture that completes when this save is done
      */
     public CompletableFuture<Void> saveAsync() {
-        // Mark that a save is requested
         pendingSave.set(true);
 
         // If already saving, the running save will pick up the pending flag
         if (!isSaving.compareAndSet(false, true)) {
-            plugin.getLogger().fine("[Config] Save already in progress, will save again after completion");
             return CompletableFuture.completedFuture(null);
         }
 
         CompletableFuture<Void> future = new CompletableFuture<>();
-
-        // Schedule save on the global region (Bukkit's saveConfig is NOT thread-safe!)
-        dev.boondock.bsanticheat.util.Scheduler.runGlobal(plugin, () -> {
+        Runnable task = () -> {
             try {
-                // Reset pending flag before saving — any new request after this
-                // point will set it again and trigger a follow-up save
+                // Reset before taking the snapshot: a change after this point sets it again
+                // and triggers a follow-up save that includes it.
                 pendingSave.set(false);
-                plugin.saveConfig();
-                plugin.getLogger().fine("[Config] Configuration saved successfully");
+                writeLatest();
                 future.complete(null);
             } catch (Exception e) {
                 plugin.getLogger().log(java.util.logging.Level.SEVERE, "[Config] Failed to save config", e);
                 future.completeExceptionally(e);
             } finally {
                 isSaving.set(false);
-                // The follow-up check has to come AFTER the flag is released, and this is the
-                // only place it may happen. Checking it while isSaving was still true lost
-                // saves: a request arriving in the gap between that check and this line set
-                // pendingSave, found isSaving still true, returned without scheduling — and
-                // nobody ever picked the request up again.
-                if (pendingSave.get()) {
-                    dev.boondock.bsanticheat.util.Scheduler.runGlobalLater(plugin, this::saveAsync, 20L);
-                }
+                // Checked only after the flag is released: a request arriving between a
+                // check made earlier and the release would otherwise be lost.
+                if (pendingSave.get()) scheduleFollowUp();
             }
-        });
-
+        };
+        try {
+            Scheduler.runAsync(plugin, task);
+        } catch (RuntimeException e) {
+            // Scheduler refuses new tasks while the plugin is disabling; write in place.
+            task.run();
+        }
         return future;
     }
 
+    private void scheduleFollowUp() {
+        try {
+            // Only if still pending: flushPending() may have written it in the meantime.
+            Scheduler.runAsyncLater(plugin, () -> {
+                if (pendingSave.get()) saveAsync();
+            }, 1L, TimeUnit.SECONDS);
+        } catch (RuntimeException e) {
+            // Disabling: the shutdown save writes the latest snapshot.
+        }
+    }
+
     /**
-     * Save config synchronously (for shutdown).
-     * Should only be used during plugin disable.
+     * Write a requested but not yet written save on the calling thread, and wait for a
+     * running write to finish. Called before the file is re-read, so a reload cannot load a
+     * file that lacks changes still waiting in the queue.
+     */
+    public void flushPending() {
+        boolean pending = pendingSave.getAndSet(false);
+        if (!pending && !isSaving.get()) return;
+        try {
+            writeLatest();
+        } catch (Exception e) {
+            plugin.getLogger().log(java.util.logging.Level.SEVERE, "[Config] Failed to save config", e);
+        }
+    }
+
+    /**
+     * Snapshot and write under {@link #fileLock}, so of two concurrent writers the later one
+     * always writes the later snapshot.
+     */
+    private void writeLatest() throws IOException {
+        synchronized (fileLock) {
+            writeNow(snapshot.get());
+        }
+    }
+
+    /**
+     * Save synchronously (for shutdown). Waits for a running async write to finish first.
      */
     public void saveSyncOnShutdown() {
         try {
-            plugin.saveConfig();
+            writeLatest();
             plugin.getLogger().info("[Config] Configuration saved synchronously on shutdown");
         } catch (Exception e) {
             plugin.getLogger().log(java.util.logging.Level.SEVERE,
                     "[Config] Failed to save config on shutdown", e);
+        }
+    }
+
+    /** Write the given YAML to config.yml on the calling thread. */
+    void writeNow(String yaml) throws IOException {
+        synchronized (fileLock) {
+            Path target = configFile.toPath();
+            Path parent = target.getParent();
+            if (parent != null) Files.createDirectories(parent);
+            Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
+            Files.writeString(tmp, yaml, StandardCharsets.UTF_8);
+            try {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
         }
     }
 }

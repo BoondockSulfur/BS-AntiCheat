@@ -17,13 +17,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Rising is not hovering.
  *
- * <p>The hover check used to count every sample that was not FALLING, which made an ascent
- * indistinguishable from hanging in the air. Live data: four alerts fired while the player was
- * moving UP at 0.12-0.20 b/t, in a Trial Chamber — where a Breeze, a wind charge or a Wind
- * Burst mace throws players upwards for longer than the 2 s knockback grace lasts.
+ * <p>The hover check must not count every sample that is not FALLING, or an ascent becomes
+ * indistinguishable from hanging in the air. A player moving UP at 0.12-0.20 b/t can be thrown
+ * upwards by a Breeze, a wind charge or a Wind Burst mace for longer than the 2 s knockback
+ * grace lasts.
  *
  * <p>What separates the two is gravity: a thrown player sheds ~0.08 b/t of vertical speed every
- * tick and comes back down; a flight cheat holds the climb. The hover check now counts only
+ * tick and comes back down; a flight cheat holds the climb. The hover check counts only
  * genuine hanging, and the opt-in sustained-ascent check watches the climb that does not decay.
  */
 class AscentScenarioTest extends ScenarioBase {

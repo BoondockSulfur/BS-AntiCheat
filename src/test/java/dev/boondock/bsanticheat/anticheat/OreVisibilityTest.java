@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>X-Ray tells someone where ore is that they cannot see, and acting on that means digging
  * to it. Clearing an open cave means taking ore off walls that were visible all along — which
  * produces the same "lots of ore, hardly any stone" statistics, in fact more extreme ones,
- * because nothing has to be dug at all. Three live alerts came from exactly that.
+ * because nothing has to be dug at all.
  *
  * <p>The tunnel cases below are the other half: a face the player just broke open must NOT
  * count as visibility, or digging straight to concealed ore would excuse itself.
@@ -85,7 +85,7 @@ class OreVisibilityTest {
     @Test
     @DisplayName("Ore on an open cave wall is visible")
     void oreOnCaveWallIsVisible() {
-        // The live case: cave air on one side, nobody dug it.
+        // Cave air on one side, nobody dug it.
         world.getBlockAt(1, 40, 0).setType(Material.CAVE_AIR);
         assertTrue(visible(ore(0, 40, 0)));
     }
@@ -125,6 +125,25 @@ class OreVisibilityTest {
         brokenJustNow(1, 40, 0);                              // dug by the player
         world.getBlockAt(-1, 40, 0).setType(Material.CAVE_AIR); // open all along
         assertTrue(visible(ore(0, 40, 0)));
+    }
+
+    @Test
+    @DisplayName("Cave decoration in the open space does not hide the ore")
+    void nonOccludingNeighboursCountAsOpen() {
+        Material[] decorations = {Material.GLOW_LICHEN, Material.SCULK_VEIN, Material.POINTED_DRIPSTONE,
+                Material.MOSS_CARPET, Material.SMALL_AMETHYST_BUD, Material.TORCH, Material.GLASS};
+        for (Material m : decorations) {
+            sealRock();
+            world.getBlockAt(0, 41, 0).setType(m);
+            assertTrue(visible(ore(0, 40, 0)), m + " next to the ore leaves it on view");
+        }
+    }
+
+    @Test
+    @DisplayName("Ore next to other ore is still buried")
+    void oreNeighbourIsClosed() {
+        world.getBlockAt(1, 40, 0).setType(Material.DEEPSLATE_DIAMOND_ORE);
+        assertFalse(visible(ore(0, 40, 0)));
     }
 
     @Test

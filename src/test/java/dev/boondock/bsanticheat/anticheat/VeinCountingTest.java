@@ -13,13 +13,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * X-Ray deposit clustering.
  *
- * <p>The per-ore thresholds used to count ore BLOCKS, which cannot tell one thick vein from a
- * dozen scattered finds — copper and redstone veins run past 20 blocks and a vein-miner tool
- * takes a whole vein in one action, so both crossed thresholds without anyone knowing
- * anything they should not. Counting deposits is what makes the threshold mean something.
+ * <p>The per-ore thresholds count deposits, not ore BLOCKS: block counts cannot tell one thick
+ * vein from a dozen scattered finds — copper and redstone veins run past 20 blocks and a
+ * vein-miner tool takes a whole vein in one action. Counting deposits is what makes the
+ * threshold mean something.
  *
- * <p>The last case replays real coordinates from the alerts of 2026-08-15, to hold the line
- * that narrowing the evidence did not blunt the detection.
+ * <p>The last case uses a fixed set of coordinates to hold the line that clustering does not
+ * blunt detection of genuinely separate deposits.
  */
 class VeinCountingTest {
 
@@ -88,12 +88,11 @@ class VeinCountingTest {
     }
 
     @Test
-    @DisplayName("Live case 2026-08-15: the alerts still fire")
+    @DisplayName("Genuine multi-vein finds still fire")
     void realDiamondAlertStillCounts() {
-        // Diamond ore broken in the 60s window before the 10:35:27 alert, exactly as
-        // CoreProtect recorded it. Four separate deposits — over xray_min_veins (3), so this
-        // alert survives the change. A regression that let it fall to two would mean the
-        // clustering had started merging genuinely separate finds.
+        // Diamond ore broken within a 60s window. Four separate deposits — over
+        // xray_min_veins (3), so this still alerts. A regression that let it fall to two would
+        // mean the clustering had started merging genuinely separate finds.
         int veins = XRayDetector.countVeins(locations(new int[][]{
                 {111, -35, 2307}, {111, -36, 2307},
                 {117, -35, 2314}, {117, -35, 2315}, {117, -36, 2314},
@@ -102,7 +101,7 @@ class VeinCountingTest {
                 {66, -34, 2249}
         }));
         assertEquals(4, veins);
-        assertTrue(veins >= 3, "live alert must still cross the vein requirement");
+        assertTrue(veins >= 3, "the scenario must still cross the vein requirement");
     }
 
     @Test

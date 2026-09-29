@@ -12,21 +12,18 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Discord Webhook integration for sending anticheat alerts.
+ *
+ * <p>Queueing and rate limiting live in {@link WebhookChannel}, shared per webhook URL, so
+ * every instance of this class sending to the same URL stays within one limit.
  */
 public class DiscordWebhook {
 
     private final Plugin plugin;
     private final PluginConfig config;
     private final LanguageManager lang;
-
-    private final AtomicLong lastRequestTime = new AtomicLong(0);
-    private final ConcurrentLinkedQueue<WebhookRequest> requestQueue = new ConcurrentLinkedQueue<>();
-    private volatile boolean processorRunning = false;
 
     public DiscordWebhook(Plugin plugin, PluginConfig config, LanguageManager lang) {
         this.plugin = plugin;
@@ -82,62 +79,11 @@ public class DiscordWebhook {
 
         String json = buildEmbedJson(type, title, description, value);
 
-        if (requestQueue.size() >= Constants.DISCORD_MAX_QUEUE_SIZE) {
-            plugin.getLogger().warning("[Discord] Alert queue full, dropping: " + title);
-            return;
-        }
-
-        requestQueue.offer(new WebhookRequest(webhookUrl, json));
-        startQueueProcessor();
-    }
-
-    private synchronized void startQueueProcessor() {
-        if (processorRunning) return;
-        processorRunning = true;
-        dev.boondock.bsanticheat.util.Scheduler.runAsync(plugin, this::processQueue);
-    }
-
-    private void processQueue() {
-        try {
-            while (!requestQueue.isEmpty()) {
-                WebhookRequest request = requestQueue.poll();
-                if (request == null) break;
-
-                long now = System.currentTimeMillis();
-                long timeSince = now - lastRequestTime.get();
-                if (timeSince < Constants.DISCORD_MIN_REQUEST_DELAY_MS) {
-                    try {
-                        Thread.sleep(Constants.DISCORD_MIN_REQUEST_DELAY_MS - timeSince);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                }
-
-                try {
-                    sendWebhookSync(request.webhookUrl(), request.json());
-                    lastRequestTime.set(System.currentTimeMillis());
-                } catch (IOException e) {
-                    plugin.getLogger().warning("[Discord] Webhook failed: " + e.getMessage());
-                }
-            }
-        } finally {
-            // Clearing the flag and the re-check must both happen under the same lock that
-            // startQueueProcessor() takes, otherwise an alert queued in between is seen by
-            // neither the running processor nor a new one — and sits there until the next
-            // alert arrives. The finally also guarantees the flag is cleared on a throw,
-            // which would otherwise wedge the queue permanently.
-            finishQueueProcessor();
-        }
-    }
-
-    /** Release the processor slot and restart it if work arrived while we were finishing. */
-    private synchronized void finishQueueProcessor() {
-        processorRunning = false;
-        if (!requestQueue.isEmpty()) {
-            processorRunning = true;
-            dev.boondock.bsanticheat.util.Scheduler.runAsync(plugin, this::processQueue);
-        }
+        WebhookChannel channel = WebhookChannel.forUrl(webhookUrl, Constants.DISCORD_MAX_QUEUE_SIZE,
+                this::sendWebhookSync, plugin.getLogger());
+        // The drain sleeps between requests, so it runs on an async thread, never on a
+        // region or Netty thread.
+        channel.enqueue(json, task -> dev.boondock.bsanticheat.util.Scheduler.runAsync(plugin, task));
     }
 
     private String buildEmbedJson(AlertType type, String title, String description, double value) {
@@ -164,7 +110,7 @@ public class DiscordWebhook {
         };
     }
 
-    private void sendWebhookSync(String webhookUrl, String json) throws IOException {
+    private WebhookChannel.Response sendWebhookSync(String webhookUrl, String json) throws IOException {
         URL url = new URL(webhookUrl);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         try {
@@ -180,11 +126,41 @@ public class DiscordWebhook {
                 os.write(json.getBytes(StandardCharsets.UTF_8));
             }
             int responseCode = connection.getResponseCode();
-            if (responseCode < 200 || responseCode >= 300) {
-                throw new IOException("Discord API returned status " + responseCode);
-            }
+            return new WebhookChannel.Response(responseCode, retryAfterMs(
+                    responseCode,
+                    connection.getHeaderField("Retry-After"),
+                    connection.getHeaderField("X-RateLimit-Remaining"),
+                    connection.getHeaderField("X-RateLimit-Reset-After")));
         } finally {
             connection.disconnect();
+        }
+    }
+
+    /**
+     * How long Discord asks us to wait, in ms, or -1. A 429 carries {@code Retry-After}
+     * (seconds, possibly fractional); a success that used up the bucket carries
+     * {@code X-RateLimit-Remaining: 0} and {@code X-RateLimit-Reset-After}.
+     */
+    static long retryAfterMs(int status, String retryAfter, String remaining, String resetAfter) {
+        if (status == 429) {
+            long ms = secondsToMs(retryAfter);
+            if (ms < 0) ms = secondsToMs(resetAfter);
+            // A 429 without a usable header still has to back off.
+            return ms >= 0 ? ms : 5000L;
+        }
+        if ("0".equals(remaining == null ? null : remaining.trim())) {
+            return secondsToMs(resetAfter);
+        }
+        return -1;
+    }
+
+    private static long secondsToMs(String seconds) {
+        if (seconds == null || seconds.isBlank()) return -1;
+        try {
+            double s = Double.parseDouble(seconds.trim());
+            return s >= 0 && !Double.isNaN(s) ? (long) Math.ceil(s * 1000.0) : -1;
+        } catch (NumberFormatException e) {
+            return -1;
         }
     }
 
@@ -195,5 +171,4 @@ public class DiscordWebhook {
             .replaceAll("[\u0000-\u001F]", "");
     }
 
-    private record WebhookRequest(String webhookUrl, String json) {}
 }

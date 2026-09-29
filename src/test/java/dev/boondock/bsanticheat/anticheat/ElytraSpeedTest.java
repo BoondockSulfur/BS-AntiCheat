@@ -14,10 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The elytra speed ceiling, which had no end-to-end coverage at all.
  *
- * <p>Added while investigating seven live alerts of 204-311 b/s against a 140 ceiling. Whether
- * those were real could not be settled from the data — see the 1.0.5 notes — but the check
- * itself should at least be known to fire on sustained over-speed, which nothing verified
- * before.
+ * <p>The check must fire on sustained over-speed against the configured ceiling (140 b/s).
  */
 class ElytraSpeedTest extends ScenarioBase {
 
@@ -60,6 +57,19 @@ class ElytraSpeedTest extends ScenarioBase {
         // 2 blocks every 12 ms is about 165 b/s — over the 140 ceiling, and sustained.
         fly(player, loc(0.5, 120.0, 0.5), 2.0, 80, 12);
         assertTrue(violations.count("ELYTRA") > 0, "sustained over-speed must survive the fix");
+    }
+
+    @Test
+    @DisplayName("A wind charge or TNT boost while gliding is covered by the knockback grace")
+    void boostedGlideIsExempt() throws Exception {
+        PlayerMock player = glidingPlayer();
+        clearGrace();
+        // The boost arrives as a server-applied velocity.
+        checker.onPlayerVelocity(new org.bukkit.event.player.PlayerVelocityEvent(
+                player, new org.bukkit.util.Vector(3.0, 1.0, 0.0)));
+        // Same over-speed as above, inside the two-second grace.
+        fly(player, loc(0.5, 120.0, 0.5), 2.0, 80, 12);
+        assertEquals(0, violations.count("ELYTRA"), "the boost is not the player's doing");
     }
 
 }

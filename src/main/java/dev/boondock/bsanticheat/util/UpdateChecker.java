@@ -178,44 +178,55 @@ public class UpdateChecker {
      * @param currentVersion The current version string (e.g., "2.0.0")
      * @return true if newVersion > currentVersion
      */
-    private boolean isNewerVersion(String newVersion, String currentVersion) {
-        // Simple string comparison first (fast path for exact match)
-        if (newVersion.equals(currentVersion)) {
+    static boolean isNewerVersion(String newVersion, String currentVersion) {
+        if (newVersion == null || currentVersion == null) return false;
+        Parsed n = Parsed.of(newVersion);
+        Parsed c = Parsed.of(currentVersion);
+        if (n == null || c == null) {
+            // Not a version number at all: never announce an update on a guess.
             return false;
         }
-
-        try {
-            // Parse semantic versions (MAJOR.MINOR.PATCH)
-            String[] newParts = newVersion.split("\\.");
-            String[] currentParts = currentVersion.split("\\.");
-
-            // Compare each part (major, minor, patch)
-            for (int i = 0; i < Math.max(newParts.length, currentParts.length); i++) {
-                int newPart = i < newParts.length ? parseVersionPart(newParts[i]) : 0;
-                int currentPart = i < currentParts.length ? parseVersionPart(currentParts[i]) : 0;
-
-                if (newPart > currentPart) {
-                    return true;
-                } else if (newPart < currentPart) {
-                    return false;
-                }
-            }
-
-            return false; // Versions are equal
-        } catch (NumberFormatException e) {
-            // Fallback to string comparison if version format is non-standard
-            return newVersion.compareTo(currentVersion) > 0;
+        int len = Math.max(n.numbers.length, c.numbers.length);
+        for (int i = 0; i < len; i++) {
+            long a = i < n.numbers.length ? n.numbers[i] : 0;
+            long b = i < c.numbers.length ? c.numbers[i] : 0;
+            if (a != b) return a > b;
         }
+        // Same numbers: a release is newer than a pre-release of it (1.0.7 > 1.0.7-SNAPSHOT),
+        // never the other way round.
+        return !n.preRelease && c.preRelease;
     }
 
     /**
-     * Parse a single version part, removing any non-numeric suffixes.
-     * Examples: "2" -> 2, "1-beta" -> 1, "0-SNAPSHOT" -> 0
+     * A version string reduced to its numeric core. Accepts a leading {@code v}/{@code V}
+     * (tags such as "v1.0.7"), ignores build metadata after {@code +} and records whether
+     * a pre-release suffix ({@code -SNAPSHOT}, {@code -beta.2}) was present.
      */
-    private int parseVersionPart(String part) {
-        // Remove any non-numeric suffixes (e.g., "1-beta", "2-SNAPSHOT")
-        String numericPart = part.split("-")[0];
-        return Integer.parseInt(numericPart);
+    private record Parsed(long[] numbers, boolean preRelease) {
+        static Parsed of(String raw) {
+            String s = raw.trim();
+            if (s.startsWith("v") || s.startsWith("V")) s = s.substring(1);
+            int plus = s.indexOf('+');
+            if (plus >= 0) s = s.substring(0, plus);
+            boolean pre = false;
+            int dash = s.indexOf('-');
+            if (dash >= 0) {
+                pre = true;
+                s = s.substring(0, dash);
+            }
+            if (s.isEmpty()) return null;
+            String[] parts = s.split("\\.");
+            long[] numbers = new long[parts.length];
+            for (int i = 0; i < parts.length; i++) {
+                if (parts[i].isEmpty() || !parts[i].chars().allMatch(Character::isDigit)) return null;
+                try {
+                    numbers[i] = Long.parseLong(parts[i]);
+                } catch (NumberFormatException e) {
+                    return null;
+                }
+            }
+            return new Parsed(numbers, pre);
+        }
     }
 
     /**

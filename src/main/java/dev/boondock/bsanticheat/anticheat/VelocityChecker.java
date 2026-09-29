@@ -50,6 +50,9 @@ public class VelocityChecker implements Listener {
     private TransactionManager transactionManager;
 
     private final Map<UUID, Integer> consecutive = new ConcurrentHashMap<>();
+    // Last teleport / respawn / world change per player (ms). A relocation inside the
+    // evaluation window makes the measured displacement meaningless.
+    private final Map<UUID, Long> relocated = new ConcurrentHashMap<>();
 
     public VelocityChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -81,9 +84,8 @@ public class VelocityChecker implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerVelocity(PlayerVelocityEvent event) {
         if (!config.velocityDetectionEnabled()) return;
-        if (ServerLoad.isLagging(config)) return;
-
         Player player = event.getPlayer();
+        if (ServerLoad.isLagging(config, player)) return;
         if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
 
         Vector v = event.getVelocity();
@@ -109,15 +111,20 @@ public class VelocityChecker implements Listener {
             if (rttMs > 0) delay += Math.min(10L, Math.round(rttMs / 50.0));
         }
         UUID id = player.getUniqueId();
+        final long startMs = System.currentTimeMillis();
         Scheduler.runForEntityLater(plugin, player,
-                () -> evaluate(id, start, expectedH, dirX, dirZ), delay);
+                () -> evaluate(id, start, startMs, expectedH, dirX, dirZ), delay);
     }
 
-    private void evaluate(UUID id, Location start, double expectedH, double dirX, double dirZ) {
+    void evaluate(UUID id, Location start, long startMs, double expectedH, double dirX, double dirZ) {
         Player player = org.bukkit.Bukkit.getPlayer(id);
-        if (player == null) return;
+        if (player == null || player.isDead()) return;
         if (Exemptions.isExempt(player, config, luckPerms, geyser)) return;
         if (!player.getWorld().equals(start.getWorld())) return;
+        // A teleport, respawn or world change inside the window replaces the knockback's
+        // displacement with an arbitrary one — in either direction.
+        if (relocatedSince(id, startMs)) return;
+        if (ServerLoad.isLagging(config, player)) return;
 
         // The state that legitimately eats a knockback was only sampled when the velocity was
         // applied — but the verdict is passed several ticks later, and being thrown into water,
@@ -151,15 +158,71 @@ public class VelocityChecker implements Listener {
     }
 
     /**
-     * True when the player is in a state that legitimately swallows a knockback: water drag,
-     * a vehicle taking the push instead, gliding or riptiding physics, or flight — including
-     * survival flight granted by another plugin (EssentialsX {@code /fly}), which barely
-     * displaces a player at all.
+     * True when the player is in a state that legitimately swallows a knockback: water or
+     * lava drag, a vehicle taking the push instead, gliding or riptiding physics, flight —
+     * including survival flight granted by another plugin (EssentialsX {@code /fly}), which
+     * barely displaces a player at all — a climbable, or a block that slows movement.
      */
     private boolean absorbsKnockback(Player player) {
-        return player.isInWater() || player.isInsideVehicle() || player.isGliding()
-                || player.isRiptiding() || player.isFlying() || player.getAllowFlight()
-                || isOnClimbable(player);
+        return player.isInWater() || player.isInsideVehicle()
+                || player.isGliding() || player.isRiptiding() || player.isFlying()
+                || player.getAllowFlight() || isOnClimbable(player)
+                || isInSlowingBlock(player.getLocation());
+    }
+
+    /**
+     * True when a block around the player scales their motion down every tick. Cobwebs,
+     * powder snow, sweet berry bushes and lava do so while the player is inside them (feet
+     * or head block); honey blocks and soul sand while the player stands on them; a honey-block wall
+     * beside the player slides them down and slows them too. Each of these eats most of a
+     * knockback within the evaluation window.
+     */
+    static boolean isInSlowingBlock(Location loc) {
+        if (loc == null || loc.getWorld() == null) return false;
+        org.bukkit.block.Block feet = loc.getBlock();
+        if (slowsInside(feet.getType()) || slowsInside(feet.getRelative(0, 1, 0).getType())) return true;
+        Material below = feet.getRelative(0, -1, 0).getType();
+        if (slowsOnTop(feet.getType()) || slowsOnTop(below)) return true;
+        int[][] sides = {{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}};
+        for (int[] s : sides) {
+            if (feet.getRelative(s[0], s[1], s[2]).getType() == Material.HONEY_BLOCK) return true;
+            if (feet.getRelative(s[0], s[1] + 1, s[2]).getType() == Material.HONEY_BLOCK) return true;
+        }
+        return false;
+    }
+
+    private static boolean slowsInside(Material m) {
+        return m == Material.COBWEB || m == Material.POWDER_SNOW || m == Material.SWEET_BERRY_BUSH
+                || m == Material.LAVA;
+    }
+
+    private static boolean slowsOnTop(Material m) {
+        return m == Material.HONEY_BLOCK || m == Material.SOUL_SAND;
+    }
+
+    /**
+     * Record teleports, respawns and world changes, which move the player by an amount that
+     * has nothing to do with the knockback being evaluated.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onTeleport(org.bukkit.event.player.PlayerTeleportEvent event) {
+        relocated.put(event.getPlayer().getUniqueId(), System.currentTimeMillis());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onRespawn(org.bukkit.event.player.PlayerRespawnEvent event) {
+        relocated.put(event.getPlayer().getUniqueId(), System.currentTimeMillis());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onWorldChange(org.bukkit.event.player.PlayerChangedWorldEvent event) {
+        relocated.put(event.getPlayer().getUniqueId(), System.currentTimeMillis());
+    }
+
+    /** True when the player was relocated at or after {@code sinceMs}. */
+    private boolean relocatedSince(UUID id, long sinceMs) {
+        Long at = relocated.get(id);
+        return at != null && at >= sinceMs;
     }
 
     /** True when a solid block sits directly in the knockback direction at body height. */
@@ -181,7 +244,7 @@ public class VelocityChecker implements Listener {
 
     private void handleViolation(Player player, String type, String details, double value, Location location) {
         if (database != null) {
-            database.logAsync("anticheat_" + type.toLowerCase(), value,
+            database.logAsync(player.getUniqueId(), "anticheat_" + type.toLowerCase(), value,
                     player.getName() + ": " + details + " @ " + CheckMath.formatLocation(location));
         }
         if (alertManager != null) {
@@ -196,5 +259,6 @@ public class VelocityChecker implements Listener {
 
     public void cleanup(UUID playerId) {
         consecutive.remove(playerId);
+        relocated.remove(playerId);
     }
 }

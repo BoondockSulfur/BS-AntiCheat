@@ -18,6 +18,10 @@ import java.util.stream.Collectors;
 
 public class ACWhitelistCommand implements CommandExecutor, TabCompleter {
 
+    // Names resolved for stored UUIDs while running a command, reused by tab completion,
+    // which runs on every keypress and must not read player data from disk.
+    private static final java.util.Map<String, String> NAME_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
     private final BSAntiCheat plugin;
     private final PluginConfig config;
 
@@ -79,6 +83,7 @@ public class ACWhitelistCommand implements CommandExecutor, TabCompleter {
             return;
         }
 
+        if (player.getName() != null) NAME_CACHE.put(player.getUniqueId().toString(), player.getName());
         config.addWhitelistPlayer(player.getUniqueId().toString());
         sender.sendMessage(lang().get("acwhitelist.player_added", "%player%", player.getName()));
     }
@@ -99,16 +104,67 @@ public class ACWhitelistCommand implements CommandExecutor, TabCompleter {
             return;
         }
 
-        // It's a player (cache-only lookup, see handleAdd)
-        OfflinePlayer player = Bukkit.getOfflinePlayerIfCached(target);
-
-        if (player == null) {
-            sender.sendMessage(lang().get("general.player_not_found", "%player%", target));
+        // A stored entry typed as-is (the UUID shown by /acwhitelist list) needs no lookup:
+        // players who are no longer in the user cache can only be removed this way.
+        if (config.removeWhitelistPlayer(target)) {
+            sender.sendMessage(lang().get("acwhitelist.player_removed", "%player%", displayName(target)));
             return;
         }
 
-        config.removeWhitelistPlayer(player.getUniqueId().toString());
-        sender.sendMessage(lang().get("acwhitelist.player_removed", "%player%", player.getName()));
+        // A name: the user cache first (cache-only lookup, see handleAdd), then the names
+        // the server still knows for the stored UUIDs.
+        String entry = null;
+        OfflinePlayer player = Bukkit.getOfflinePlayerIfCached(target);
+        if (player != null && config.anticheatWhitelistPlayers().contains(player.getUniqueId().toString())) {
+            entry = player.getUniqueId().toString();
+        } else {
+            for (String stored : config.anticheatWhitelistPlayers()) {
+                if (target.equalsIgnoreCase(knownName(stored))) {
+                    entry = stored;
+                    break;
+                }
+            }
+        }
+
+        if (entry == null || !config.removeWhitelistPlayer(entry)) {
+            sender.sendMessage(lang().get("acwhitelist.player_not_listed", "%player%", target));
+            return;
+        }
+        sender.sendMessage(lang().get("acwhitelist.player_removed", "%player%", displayName(entry)));
+    }
+
+    /**
+     * The name the server knows for a stored whitelist entry, or null. UUID-based lookups
+     * read local player data only; no web request is made.
+     */
+    private static String knownName(String stored) {
+        try {
+            String name = Bukkit.getOfflinePlayer(UUID.fromString(stored)).getName();
+            if (name != null) NAME_CACHE.put(stored, name);
+            return name;
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Name for a stored entry from in-memory data only: an online player, or a name resolved
+     * by an earlier command. Falls back to the entry itself.
+     */
+    private static String cachedName(String stored) {
+        try {
+            org.bukkit.entity.Player online = Bukkit.getPlayer(UUID.fromString(stored));
+            if (online != null) return online.getName();
+        } catch (IllegalArgumentException e) {
+            return stored;
+        }
+        return NAME_CACHE.getOrDefault(stored, stored);
+    }
+
+    /** Name if known, otherwise the stored entry itself — never "null". */
+    private static String displayName(String stored) {
+        String name = knownName(stored);
+        return name != null ? name : stored;
     }
 
     private void handleList(CommandSender sender) {
@@ -122,12 +178,15 @@ public class ACWhitelistCommand implements CommandExecutor, TabCompleter {
             sender.sendMessage(lang().get("acwhitelist.players_label"));
             for (String uuidStr : players) {
                 try {
-                    UUID uuid = UUID.fromString(uuidStr);
-                    OfflinePlayer player = Bukkit.getOfflinePlayer(uuid);
-                    sender.sendMessage(lang().get("acwhitelist.player_entry", "%player%", player.getName()));
+                    UUID.fromString(uuidStr);
                 } catch (IllegalArgumentException e) {
                     sender.sendMessage(lang().get("acwhitelist.player_invalid", "%uuid%", uuidStr));
+                    continue;
                 }
+                String name = knownName(uuidStr);
+                sender.sendMessage(name != null
+                        ? lang().get("acwhitelist.player_entry_named", "%player%", name, "%uuid%", uuidStr)
+                        : lang().get("acwhitelist.player_entry", "%player%", uuidStr));
             }
         }
 
@@ -171,12 +230,19 @@ public class ACWhitelistCommand implements CommandExecutor, TabCompleter {
 
             // Add online player names
             Bukkit.getOnlinePlayers().forEach(p -> suggestions.add(p.getName()));
+            if (args[0].equalsIgnoreCase("remove")) {
+                for (String stored : config.anticheatWhitelistPlayers()) {
+                    suggestions.add(cachedName(stored));
+                }
+                config.anticheatWhitelistGroups().forEach(g -> suggestions.add("group:" + g));
+            }
 
             // Add group: prefix
             suggestions.add("group:");
 
             return suggestions.stream()
                 .filter(s -> s.toLowerCase().startsWith(args[1].toLowerCase()))
+                .distinct()
                 .collect(Collectors.toList());
         }
 

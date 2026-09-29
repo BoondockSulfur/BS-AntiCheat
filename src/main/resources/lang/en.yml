@@ -39,6 +39,8 @@ acwhitelist:
   players_none: "&7No whitelisted players."
   players_label: "&ePlayers:"
   player_entry: "&7- &f%player%"
+  player_entry_named: "&7- &f%player% &8(%uuid%)"
+  player_not_listed: "&c%player% &cis not on the whitelist."
   player_invalid: "&7- &cinvalid UUID: &f%uuid%"
   groups_none: "&7No whitelisted groups."
   groups_label: "&eGroups:"
@@ -47,7 +49,7 @@ acwhitelist:
   help_title: "&6=== AntiCheat Whitelist Help ==="
   help_add_player: "&f/acwhitelist add <player> &7- Whitelist a player"
   help_add_group: "&f/acwhitelist add group:<name> &7- Whitelist a LuckPerms group"
-  help_remove_player: "&f/acwhitelist remove <player> &7- Remove a player"
+  help_remove_player: "&f/acwhitelist remove <player|uuid> &7- Remove a player"
   help_remove_group: "&f/acwhitelist remove group:<name> &7- Remove a group"
   help_list: "&f/acwhitelist list &7- Show all whitelist entries"
 
@@ -200,3 +202,9 @@ alert:
 punishment:
   kick_default: "&c&lAntiCheat\n&7You have been removed for suspicious behaviour.\n&7If you believe this is a mistake, contact a moderator."
   notify_default: "&e[AC] &f%player% &7reached punishment level &f%vl% &7for &f%check%&7."
+
+update:
+  available: "&e[BSAntiCheat] &fUpdate available: &7%current% &f-> &a%latest%"
+  link_modrinth: "&b&l[Modrinth]"
+  link_curseforge: "&6&l[CurseForge]"
+  link_hover: "&7Open &f%url%"

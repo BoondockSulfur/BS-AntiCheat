@@ -5,9 +5,16 @@ import org.bukkit.event.Event;
 import org.bukkit.event.HandlerList;
 
 /**
- * Fired (on the main thread) whenever BSAntiCheat registers a violation for a player.
- * Informational — the detection has already happened; other plugins can listen to react
- * (logging, custom punishments, dashboards, etc.).
+ * Fired whenever BSAntiCheat registers a violation for a player.
+ *
+ * <p>Fired on the thread owning the player: the main thread on Paper, the player's region
+ * thread on Folia, so listeners may touch the player directly. If the player was removed
+ * before the event could run there, it is fired on the global region instead.
+ *
+ * <p>It is fired before any punishment tier commands for the same violation run.
+ * Informational and deliberately not cancellable — the detection has already happened and
+ * the violation level is already counted; other plugins can listen to react (logging, custom
+ * punishments, dashboards, etc.).
  */
 public class ViolationEvent extends Event {
 

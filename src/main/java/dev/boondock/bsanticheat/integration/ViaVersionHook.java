@@ -14,16 +14,24 @@ import java.util.UUID;
  * flag it.
  *
  * <p>Uses the ViaVersion API by reflection ({@code Via.getAPI().getPlayerVersion(UUID)}), so
- * the plugin loads fine without ViaVersion installed. Fails safe: returns -1 (unknown) when
- * ViaVersion is absent or errors, and {@link #isLegacy} then reports false.
+ * the plugin loads fine without ViaVersion installed. The method is looked up on the public
+ * {@code ViaAPI} interface: the object {@code getAPI()} returns is an implementation class
+ * that is not necessarily accessible, and a method taken from it fails on invoke. Fails
+ * safe: returns -1 (unknown) when ViaVersion is absent or errors, and {@link #isLegacy}
+ * then reports false.
+ *
+ * <p>Called from region and Netty threads; the API is resolved once and published through
+ * a volatile field as one immutable holder.
  */
 public class ViaVersionHook {
 
     private final Plugin plugin;
     private final boolean present;
-    private Object viaApi;         // ViaAPI instance
-    private Method getPlayerVersion;
-    private boolean resolved;
+    private volatile Api api;
+
+    private record Api(Object instance, Method getPlayerVersion) {}
+
+    private static final Api UNAVAILABLE = new Api(null, null);
 
     private ViaVersionHook(Plugin plugin, boolean present) {
         this.plugin = plugin;
@@ -43,23 +51,42 @@ public class ViaVersionHook {
     /** The player's protocol version number, or -1 if unknown/unavailable. */
     public int protocolVersion(Player player) {
         if (!present) return -1;
-        if (!resolved) {
-            resolved = true;
-            try {
-                Class<?> via = Class.forName("com.viaversion.viaversion.api.Via");
-                viaApi = via.getMethod("getAPI").invoke(null);
-                getPlayerVersion = viaApi.getClass().getMethod("getPlayerVersion", UUID.class);
-            } catch (Throwable t) {
-                viaApi = null;
-                getPlayerVersion = null;
+        Api resolved = api;
+        if (resolved == null) {
+            synchronized (this) {
+                resolved = api;
+                if (resolved == null) {
+                    resolved = resolve();
+                    api = resolved;
+                }
             }
         }
-        if (viaApi == null || getPlayerVersion == null) return -1;
+        if (resolved == UNAVAILABLE) return -1;
         try {
-            Object result = getPlayerVersion.invoke(viaApi, player.getUniqueId());
-            return result instanceof Integer ? (Integer) result : -1;
+            Object result = resolved.getPlayerVersion().invoke(resolved.instance(), player.getUniqueId());
+            return result instanceof Integer i ? i : -1;
         } catch (Throwable t) {
             return -1;
+        }
+    }
+
+    private Api resolve() {
+        try {
+            Plugin via = Bukkit.getPluginManager().getPlugin("ViaVersion");
+            ClassLoader loader = via != null ? via.getClass().getClassLoader() : ViaVersionHook.class.getClassLoader();
+            Class<?> viaClass = Class.forName("com.viaversion.viaversion.api.Via", true, loader);
+            Class<?> apiInterface = Class.forName("com.viaversion.viaversion.api.ViaAPI", true, loader);
+            Object instance = viaClass.getMethod("getAPI").invoke(null);
+            Method getPlayerVersion = apiInterface.getMethod("getPlayerVersion", UUID.class);
+            if (instance == null || !apiInterface.isInstance(instance)) {
+                plugin.getLogger().warning("ViaVersion API not available - legacy-client exemption inactive.");
+                return UNAVAILABLE;
+            }
+            return new Api(instance, getPlayerVersion);
+        } catch (Throwable t) {
+            plugin.getLogger().warning("ViaVersion API could not be resolved (" + t.getClass().getSimpleName()
+                    + ") - legacy-client exemption inactive.");
+            return UNAVAILABLE;
         }
     }
 

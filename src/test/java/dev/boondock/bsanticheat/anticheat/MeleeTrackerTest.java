@@ -11,23 +11,50 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Telling a swing from an item plugin's ranged ability.
  *
- * <p>Live case, rattenkolonie 2026-08-27: a sword whose right-click fires a 10-block beam.
- * MythicLib delivers that damage as {@code LivingEntity.damage(amount, player)}, which Bukkit
- * reports as ENTITY_ATTACK with the player as damager — the exact shape of a melee hit. All 17
- * of that player's REACH alerts (4.14 to 9.37 blocks) fell inside the beam's range.
+ * <p>Example: a sword whose right-click fires a 10-block beam. Item plugins deliver that
+ * damage as {@code LivingEntity.damage(amount, player)}, which Bukkit reports as ENTITY_ATTACK
+ * with the player as damager — the exact shape of a melee hit. Reach measured on such damage
+ * is bounded by the ability's range, not by the player's arm.
  */
 class MeleeTrackerTest {
 
     private static final long T = 5_000_000L;
+    private static final int TARGET = 42;
+
+    @Test
+    @DisplayName("A swing at one entity does not vouch for damage to another")
+    void attackIsBoundToItsTarget() {
+        // A ranged ability landing on a different entity right after an ordinary swing is
+        // still ability damage.
+        MeleeTracker t = new MeleeTracker();
+        UUID id = UUID.randomUUID();
+        t.noteAttack(id, TARGET, T);
+        assertFalse(t.isMeleeHit(id, TARGET + 1, T + 50), "the client attacked something else");
+    }
+
+    @Test
+    @DisplayName("Several targets attacked in one tick are all vouched for")
+    void multiTargetAttacksAllCount() {
+        // Multi-aura sends several attack packets before the server processes the first hit;
+        // remembering only the last one would hide exactly that pattern.
+        MeleeTracker t = new MeleeTracker();
+        UUID id = UUID.randomUUID();
+        t.noteAttack(id, 1, T);
+        t.noteAttack(id, 2, T);
+        t.noteAttack(id, 3, T);
+        assertTrue(t.isMeleeHit(id, 1, T + 10));
+        assertTrue(t.isMeleeHit(id, 2, T + 10));
+        assertTrue(t.isMeleeHit(id, 3, T + 10));
+    }
 
     @Test
     @DisplayName("Damage right after an attack packet is a melee hit")
     void attackPacketVouchesForTheHit() {
         MeleeTracker t = new MeleeTracker();
         UUID id = UUID.randomUUID();
-        t.noteAttack(id, T);
-        assertTrue(t.isMeleeHit(id, T));
-        assertTrue(t.isMeleeHit(id, T + 200), "still the same swing being processed");
+        t.noteAttack(id, TARGET, T);
+        assertTrue(t.isMeleeHit(id, TARGET, T));
+        assertTrue(t.isMeleeHit(id, TARGET, T + 200), "still the same swing being processed");
     }
 
     @Test
@@ -36,8 +63,8 @@ class MeleeTrackerTest {
         MeleeTracker t = new MeleeTracker();
         UUID shooter = UUID.randomUUID();
         // Somebody else swung; this player only right-clicked.
-        t.noteAttack(UUID.randomUUID(), T);
-        assertFalse(t.isMeleeHit(shooter, T), "the client never asked to attack anything");
+        t.noteAttack(UUID.randomUUID(), TARGET, T);
+        assertFalse(t.isMeleeHit(shooter, TARGET, T), "the client never asked to attack anything");
     }
 
     @Test
@@ -46,8 +73,8 @@ class MeleeTrackerTest {
         // Otherwise one swing would cover every ability the player fires afterwards.
         MeleeTracker t = new MeleeTracker();
         UUID id = UUID.randomUUID();
-        t.noteAttack(id, T);
-        assertFalse(t.isMeleeHit(id, T + 1000));
+        t.noteAttack(id, TARGET, T);
+        assertFalse(t.isMeleeHit(id, TARGET, T + 1000));
     }
 
     @Test
@@ -58,7 +85,7 @@ class MeleeTrackerTest {
         // checks off entirely instead of making them more precise.
         MeleeTracker t = new MeleeTracker();
         assertFalse(t.isActive());
-        assertTrue(t.isMeleeHit(UUID.randomUUID(), T));
+        assertTrue(t.isMeleeHit(UUID.randomUUID(), TARGET, T));
     }
 
     @Test
@@ -66,8 +93,8 @@ class MeleeTrackerTest {
     void cleanupForgets() {
         MeleeTracker t = new MeleeTracker();
         UUID id = UUID.randomUUID();
-        t.noteAttack(id, T);
+        t.noteAttack(id, TARGET, T);
         t.cleanup(id);
-        assertFalse(t.sawAttackRecently(id, T));
+        assertFalse(t.sawAttackRecently(id, TARGET, T));
     }
 }

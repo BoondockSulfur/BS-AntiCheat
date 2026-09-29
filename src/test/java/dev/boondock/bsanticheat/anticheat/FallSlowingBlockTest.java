@@ -16,11 +16,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The Fly-check exemption for blocks that slow a descent.
  *
- * <p>From a live false positive: a player standing in a mineshaft was flagged for "hovering"
- * twice. Cobwebs slow a fall below the rate the hover check counts as falling, so the counter
- * kept climbing while the player was in fact sinking — and the support scan only looks
- * downward, so the web holding them at body height was never seen. Honey walls do the same
- * thing sideways.
+ * <p>A player standing in a mineshaft must not be flagged for "hovering". Cobwebs slow a fall
+ * below the rate the hover check counts as falling, so the counter would keep climbing while
+ * the player is in fact sinking — and the support scan only looks downward, so the web holding
+ * them at body height is never seen. Honey walls do the same thing sideways.
  *
  * <p>The last two cases guard the other direction: an actual hover must still be visible.
  */
@@ -59,7 +58,7 @@ class FallSlowingBlockTest {
     @Test
     @DisplayName("A cobweb at head height is exempt — the support scan never looks up")
     void cobwebAtHeadHeight() {
-        // The live case: web holding the player at body height, cave below.
+        // Web holding the player at body height, cave below.
         set(0, 61, 0, Material.COBWEB);
         assertTrue(MovementChecker.isInFallSlowingBlock(feet(0, 60, 0)));
     }

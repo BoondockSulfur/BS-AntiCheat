@@ -29,13 +29,46 @@ public final class CheckMath {
     }
 
     /**
+     * Highest latency that still earns additional slack. The round trip is measured from
+     * pongs the client chooses when to send, so an uncapped slack is an allowance a cheat
+     * can buy by simply holding its replies. Beyond this point latency no longer widens
+     * the per-tick thresholds: the time-based sampling in the checks already absorbs the
+     * packet bunching a slow connection produces.
+     */
+    public static final int MAX_SLACK_PING_MS = 500;
+
+    /**
      * Latency slack multiplier for detection thresholds. Square-root scaling so
-     * high-ping players get progressively more tolerance without allowing extreme
-     * values: 200ms → +10%, 500ms → +20%, 1000ms → +30%. 1.0 at or below 100ms.
+     * high-ping players get progressively more tolerance: 200ms → +10%, 500ms → +20%.
+     * 1.0 at or below 100ms; capped at {@link #MAX_SLACK_PING_MS} (+20%).
      */
     public static double pingSlack(int ping) {
         if (ping <= 100) return 1.0;
-        return 1.0 + (Math.sqrt(ping - 100) / 100.0);
+        int capped = Math.min(ping, MAX_SLACK_PING_MS);
+        return 1.0 + (Math.sqrt(capped - 100) / 100.0);
+    }
+
+    // ==================== FREE FALL ====================
+
+    /**
+     * Net height gained over {@code ticks} ticks of unassisted flight that starts with vertical
+     * speed {@code v0}, under vanilla-style physics: each tick the entity moves by its current
+     * speed, then loses {@code gravity} and is multiplied by {@code drag}.
+     *
+     * <p>Closed form of {@code sum(v_k)} with {@code v_(k+1) = (v_k - gravity) * drag}: the speed
+     * converges geometrically on the terminal value {@code -gravity*drag/(1-drag)}. Negative
+     * results mean the entity must have ended up lower than it started. Non-integer tick
+     * counts are accepted and interpolate smoothly.
+     */
+    public static double ballisticRise(double v0, double gravity, double drag, double ticks) {
+        if (ticks <= 0) return 0.0;
+        if (drag >= 1.0) {
+            // No drag: plain constant deceleration.
+            return v0 * ticks - gravity * ticks * (ticks - 1) / 2.0;
+        }
+        double terminal = gravity * drag / (1.0 - drag);
+        double decay = Math.pow(drag, ticks);
+        return (v0 + terminal) * (1.0 - decay) / (1.0 - drag) - terminal * ticks;
     }
 
     // ==================== ATTRIBUTES ====================
@@ -126,11 +159,9 @@ public final class CheckMath {
     }
 
     /**
-     * "world [x, y, z]" for alert text and database rows. Movement-family violations
-     * used to log only the player and the reason, so an alert could not be judged after
-     * the fact — the in-memory alert holding the position is dropped after 30 minutes,
-     * and by then nobody can tell whether the player was on a boat, a decoration or
-     * genuinely mid-air. XRay rows always carried their coordinates; now all of them do.
+     * "world [x, y, z]" for alert text and database rows. The in-memory alert holding the
+     * position is dropped after 30 minutes, so the stored row must carry it for an alert
+     * to be judged after the fact.
      */
     public static String formatLocation(Location loc) {
         if (loc == null) return "unknown";

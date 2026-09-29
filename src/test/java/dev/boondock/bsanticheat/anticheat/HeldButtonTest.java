@@ -9,11 +9,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The AutoClicker held-button exclusion.
  *
- * <p>These cases exist because of a live false positive: a player holding the mouse button
- * was flagged at "23 CPS (Max: 22)" four times. The exclusion was keyed off the CPS count,
- * which is a sliding window over packet ARRIVAL times — network jitter bunches arrivals and
- * lifts the count while the actual cadence never changes. The fix reads the cadence instead,
- * and the tests below pin both halves of that: jitter must not break the exclusion, and the
+ * <p>A player holding the mouse button must not be flagged at, for example, "23 CPS (Max: 22)".
+ * The CPS count is a sliding window over packet ARRIVAL times — network jitter bunches arrivals
+ * and lifts the count while the actual cadence never changes. The exclusion therefore reads
+ * the cadence instead, and the tests below pin both halves of that: jitter must not break the exclusion, and the
  * exclusion must not become a hiding place for a genuine clicker.
  */
 class HeldButtonTest {
@@ -36,8 +35,8 @@ class HeldButtonTest {
     @Test
     @DisplayName("A held button still counts when the network jitters it")
     void heldButtonWithJitter() {
-        // This is the live case: arrivals scatter, the window reads 23 CPS, the cadence is
-        // untouched. Under the old CPS-range rule this fell into the gap and was flagged.
+        // Arrivals scatter and the window reads 23 CPS, but the cadence is untouched. A rule
+        // based on a CPS range alone would flag this.
         assertTrue(PacketChecker.isHeldButton(intervals(20, 50, 8)));
     }
 

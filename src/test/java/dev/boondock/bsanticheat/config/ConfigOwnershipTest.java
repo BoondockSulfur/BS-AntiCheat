@@ -21,11 +21,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Who owns config.yml.
  *
- * <p>The plugin used to save the file on every shutdown whether or not it had changed
- * anything, which made it the last writer of a file it had not edited. An admin editing a
- * threshold while the server runs, without a {@code /bsac reload}, had the edit overwritten
- * by the stale in-memory value at the next stop — on a server that auto-restarts twice a day,
- * within hours, and with nothing in the log to say so.
+ * <p>The plugin must not save the file on shutdown unless it changed something itself.
+ * Otherwise it becomes the last writer of a file it had not edited: an admin editing a
+ * threshold while the server runs, without a {@code /bsac reload}, would have the edit
+ * overwritten by the stale in-memory value at the next stop, with nothing in the log to say so.
  *
  * <p>Bukkit's {@code saveConfig()} rewrites YAML in its own style (quotes dropped, comment
  * spacing collapsed), so "was the file written" is observable byte for byte: the fixture below

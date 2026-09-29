@@ -25,13 +25,14 @@ public final class Constants {
     public static final int DB_FLUSH_INTERVAL_SECONDS = 30;
 
     // ==================== DISCORD WEBHOOK ====================
-    public static final long DISCORD_MIN_REQUEST_DELAY_MS = 2000L;
+    // Spacing between two requests to one webhook URL: Discord allows about 30 per minute.
+    public static final long DISCORD_MIN_REQUEST_DELAY_MS = 2100L;
     public static final int DISCORD_MAX_QUEUE_SIZE = 50;
     public static final int DISCORD_CONNECT_TIMEOUT_MS = 5000;
     public static final int DISCORD_READ_TIMEOUT_MS = 10000;
 
     // ==================== MOVEMENT CHECKER ====================
-    // Phase 1: event sampling removed — every PlayerMoveEvent is checked.
+    // Every PlayerMoveEvent is checked; there is no event sampling.
     public static final double MOVEMENT_MIN_TIME_DELTA = 0.01;
     // Longest gap between two movement packets that is still treated as ordinary play. A
     // vanilla client sends one every tick even while standing still, so silence beyond this
@@ -44,9 +45,9 @@ public final class Constants {
     public static final long XRAY_PLACED_BLOCK_EXPIRY_MS = 3600000L;
     public static final long XRAY_CLEANUP_INTERVAL_TICKS = 6000L;
     public static final int XRAY_MAX_PLACED_BLOCKS_SIZE = 10000;
-    // Raised from 20: cave miners legitimately break the ores they SEE plus little stone,
-    // so a small sample flags instantly (21 stone + 3 diamonds = 14%). A meaningful ratio
-    // needs a real tunnel-mining sample.
+    // Cave miners legitimately break the ores they SEE plus little stone, so on a small
+    // sample the ratio is high without any X-Ray. A meaningful ratio needs a real
+    // tunnel-mining sample.
     /** How much stone marks a player as visibly SEARCHING, over {@link #XRAY_STONE_WINDOW_SECONDS}. */
     public static final int XRAY_MIN_STONE_FOR_RATIO_CHECK = 60;
     /**
@@ -56,9 +57,9 @@ public final class Constants {
      * separated in time, so a miner who tunnels for minutes and then spends one minute pulling
      * ore out shows almost no spoil in the window that judges the ore. But it does not
      * separate anything: an X-Ray user tunnels straight from vein to vein and digs just as
-     * much, so a wider window hands THEM the searching exemption too. Measured on real data
-     * (2026-08-22): the honest miner's giveaway is not how much they dug, it is that eleven of
-     * twelve five-minute windows found NOTHING. Spoil volume alone cannot see that.
+     * much, so a wider window hands THEM the searching exemption too. What distinguishes an
+     * honest miner is not how much they dug but that most of their windows find nothing,
+     * which spoil volume alone cannot see.
      */
     public static final int XRAY_STONE_WINDOW_SECONDS = 60;
     /**
@@ -70,21 +71,21 @@ public final class Constants {
      * because the count it guards stays block-based.
      */
     public static final int XRAY_MAX_COUNT_PER_VEIN = 2;
-    // ---- Shape vetoes (see MiningProfile for the measurements these come from) ----
+    // ---- Shape vetoes (see MiningProfile for what each value describes) ----
     /** Stone breaks needed before the shape of the digging says anything at all. */
     public static final int XRAY_PROFILE_MIN_SAMPLE = 300;
     /** How far back the shape profile looks. Wider than the ratio window, on purpose. */
     public static final int XRAY_PROFILE_WINDOW_SECONDS = 300;
-    /** How tightly strip mining holds one level. Measured: 1.1-1.2 for three honest miners. */
+    /** How tightly strip mining holds one level (standard deviation of Y). */
     public static final double XRAY_PROFILE_MAX_Y_STDDEV = 2.0;
-    /** How much of it is corridor rather than open excavation. Measured: 0.75-0.89. */
+    /** How much of it is corridor rather than open excavation. */
     public static final double XRAY_PROFILE_MIN_CORRIDOR = 0.70;
-    /** How far the judged ore may sit from the corridor level. Measured spans: 3.0-3.6. */
+    /** How far the judged ore may sit from the corridor level, in blocks. */
     public static final int XRAY_PROFILE_ORE_BAND = 4;
     public static final int XRAY_MAX_PLAYER_ENTRIES = 5000;
     // Combined rare-ore count (diamond + emerald + ancient debris) that triggers an
-    // alert even when no single rare ore exceeded its individual threshold. Raised from
-    // 8 after live data: beacon/efficiency deepslate mining legitimately clears that.
+    // alert even when no single rare ore exceeded its individual threshold. Set so that
+    // beacon/efficiency deepslate mining does not reach it legitimately.
     public static final int XRAY_RARE_COMBINED_THRESHOLD = 12;
 
     // ==================== TRANSACTION LATENCY ====================
@@ -122,13 +123,12 @@ public final class Constants {
     public static final double BOAT_MAX_SPEED = 10.0;
     public static final double MINECART_MAX_SPEED = 20.0;
     // Elytra: gliding tops out near 3 b/t, but a rocket-assisted dive legitimately reaches
-    // 5–6 b/t (100–120 b/s). The old 100 sat right in that legitimate band and flagged
-    // ordinary rocket flight — live alert data showed a clean 110→100 b/s decay curve, i.e.
-    // a boost bleeding off, not sustained impossible speed.
+    // 5–6 b/t (100–120 b/s), so the limit sits above that band; a boost bleeding off is not
+    // sustained impossible speed.
     public static final double ELYTRA_MAX_SPEED = 140.0;
     // Riptide: vanilla launches the player at (1.5 + 0.5 × level) blocks/tick, so Riptide III
-    // alone is 3 b/t = 60 b/s before any sprint or fall momentum is added. The old 50 was
-    // below what the enchantment does by design; live data flagged 50.5–51.5 b/s.
+    // alone is 3 b/t = 60 b/s before any sprint or fall momentum is added, so the limit sits
+    // above that.
     public static final double RIPTIDE_MAX_SPEED = 75.0;
     public static final double OTHER_VEHICLE_MAX_SPEED = 20.0;
 
@@ -150,11 +150,11 @@ public final class Constants {
     public static final int SUSTAINED_ASCENT_VIOLATIONS = 8;
     public static final double SUSTAINED_ASCENT_MIN_DECAY = 0.05;
     // NoSlow: allowed fraction of walk speed while using an item, and consecutive samples.
-    // Cap raised to 0.8 so normal walking-with-item (and transitions) don't false-flag.
+    // 0.8 leaves room for walking-with-item transitions.
     public static final double NOSLOW_SPEED_MULTIPLIER = 0.8;
     public static final int NOSLOW_VIOLATIONS = 5;
-    // Jesus / Spider / Step — thresholds raised after live testing showed jumping next to a
-    // wall / stepping up blocks false-flagged Spider/Step at the old low counts.
+    // Jesus / Spider / Step — high enough that jumping next to a wall or stepping up blocks
+    // does not reach them.
     public static final int JESUS_VIOLATIONS = 8;
     public static final int SPIDER_VIOLATIONS = 8;
     public static final double STEP_MAX_HEIGHT = 0.75; // vanilla auto-step is 0.6
@@ -226,8 +226,8 @@ public final class Constants {
     /**
      * How much the balance must still GROW across the excursion before it counts as a hack.
      * A connection catching up after a stall drains its backlog and then plateaus; a timer
-     * hack keeps gaining every tick it runs. Duration alone cannot tell those apart, which is
-     * what produced the 2026-08-23 alert on a 1275-1444ms link.
+     * hack keeps gaining every tick it runs. Duration alone cannot tell those apart on a
+     * high-latency link.
      */
     public static final long TIMER_MIN_GROWTH_MS = 150L;
     /** Ceiling on how far a measured round trip may stretch the excursion window. */
@@ -236,8 +236,7 @@ public final class Constants {
     // window is a connection catching up after a stall; an attack floods every window.
     public static final int PACKETFLOOD_WINDOWS = 2;
     // Grace after a teleport/join/world change: chunk loading stalls the CLIENT, which
-    // then flushes its queued packets in one burst. The movement checks have always had
-    // these windows; the packet checks had none.
+    // then flushes its queued packets in one burst.
     public static final long PACKET_GRACE_MS = 5000L;
 
     // ==================== CRASH PROTECTION ====================
@@ -254,6 +253,10 @@ public final class Constants {
 
     // ==================== UPDATE CHECKER ====================
     public static final long UPDATE_CHECKER_DELAY_TICKS = 60L;
+    /** Download pages shown in the update notice (console and, for operators, in chat). */
+    public static final String URL_MODRINTH = "https://modrinth.com/plugin/bs-anticheat";
+    /** Empty = no CurseForge page; the notice then shows the Modrinth link only. */
+    public static final String URL_CURSEFORGE = "https://www.curseforge.com/minecraft/bukkit-plugins/bs-anticheat";
 
     // ==================== METRICS ====================
     public static final int BSTATS_PLUGIN_ID = 32112;

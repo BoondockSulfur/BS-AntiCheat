@@ -70,21 +70,23 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     private MeleeTracker meleeTracker;
 
     private final Map<UUID, ConcurrentLinkedDeque<Long>> clicks = new ConcurrentHashMap<>();
-    // Timer balance per player: [0]=balance(centi-ms), [1]=last packet time(ms),
-    // [2]=time the balance first went over the limit (0 = currently under),
-    // [3]=balance at that moment, so a still-climbing balance can be told from a plateau
-    private final Map<UUID, long[]> timerState = new ConcurrentHashMap<>();
+    // Timer accounting per player, see TimerState.
+    private final Map<UUID, TimerState> timerState = new ConcurrentHashMap<>();
     private static final long TICK_MS = 50L;
-    // Silence longer than this between movement packets is a stalled connection, not play:
-    // a vanilla client sends one every tick even while standing still.
-    private static final long PACKET_GAP_MS = 400L;
-    // How long the catch-up burst after such a stall is left unjudged.
-    private static final long STALL_GRACE_MS = 3000L;
+    // Most credit (ms) idling or a short hiccup can bank. Bounds how far a timer hack can
+    // run ahead after pausing, instead of opening a judgement-free window.
+    private static final long MAX_CREDIT_MS = 1000L;
+    // A gap between claimed ticks longer than this is a stalled connection, whose backlog
+    // may pay off the real time the gap took (up to STALL_MAX_CREDIT_MS) — but only while
+    // it arrives within the catch-up window that follows.
+    private static final long STALL_GAP_MS = 1000L;
+    private static final long STALL_MAX_CREDIT_MS = 30_000L;
+    private static final long STALL_CATCHUP_BASE_MS = 1000L;
+    private static final int MAX_PENDING_TELEPORT_MOVES = 3;
     // AimSnap looks at three consecutive rotation packets, which should span ~2 ticks. This
     // bounds how far apart they may actually have arrived before the "flick" is just a player
     // turning around at human speed with a packet gap in the middle.
     private static final long AIMSNAP_MAX_SPAN_MS = 150L;
-    private final Map<UUID, Long> timerGraceUntil = new ConcurrentHashMap<>();
     // Held-button (mining, or simply swinging at air) signature to exclude from AutoClicker.
     // It is identified by the RATE the swings arrive at, not by how many land in a window:
     // a held button is bound to the server tick, so its typical interval is TICK_MS. How far
@@ -111,22 +113,44 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     // Packet flood: [0]=window start(ms), [1]=count in window, [2]=consecutive windows over the limit
     private final Map<UUID, long[]> packetCounts = new ConcurrentHashMap<>();
     // Mining state: while a player is breaking a block the client sends a swing every tick,
-    // which would false-flag AutoClicker. Value = timestamp until which we treat the player
-    // as mining (set on START_DIGGING with a safety cap, cleared on FINISH/CANCEL).
-    private final Map<UUID, Long> miningUntil = new ConcurrentHashMap<>();
+    // which would false-flag AutoClicker. A START_DIGGING packet alone only opens a short
+    // provisional window (it may name any position). It is extended to the block's expected
+    // break time by a server-side confirmation that the named block is non-air and within
+    // reach: either BlockDamageEvent, or a region-thread lookup scheduled for every START.
+    // The lookup is needed because Paper skips BlockDamageEvent when the dig is refused
+    // earlier (spawn protection, region plugins), while the client keeps digging and
+    // swinging. FINISH/CANCEL and entity attacks (vanilla aborts digging before attacking)
+    // close the window.
+    private final Map<UUID, MiningState> mining = new ConcurrentHashMap<>();
+    // Covers the swings between the START packet and the server processing it (<= 1-2 ticks).
+    private static final long MINING_PROVISIONAL_MS = 250L;
+    // STARTs the server never confirmed; beyond this they no longer open a window.
+    private static final int MAX_UNCONFIRMED_STARTS = 2;
+    // Upper bound for a confirmed window. Longer digs are still covered by the held-button
+    // exclusion, which recognises tick-cadence swings on its own.
     private static final long MINING_SAFETY_MS = 5000L;
+    private static final long MINING_MARGIN_MS = 250L;
+    // Eye-to-block-centre distance a START may name to count as a dig: survival block reach
+    // plus the block's half diagonal, with some slack. Only used when the player has no
+    // block interaction range attribute.
+    private static final double MINING_REACH_FALLBACK = 6.0;
+    private static final double MINING_REACH_SLACK = 1.5;
     // Drop state: holding Q sends a DROP_ITEM every tick, each accompanied by an arm swing,
-    // which read as ~20-26 CPS and false-flagged AutoClicker. Deliberately a SHORT window,
-    // refreshed by every drop packet — a mining-sized 5s window would turn one dropped item
-    // into a five-second free pass for a real clicker.
+    // which would count as clicks. Deliberately a SHORT window, refreshed by every drop
+    // packet, so a single dropped item cannot open a long exemption for a real clicker.
     private final Map<UUID, Long> droppingUntil = new ConcurrentHashMap<>();
     private static final long DROP_SUPPRESSION_MS = 200L;
     // Grace after a teleport/join/respawn/world change. Loading the destination stalls
-    // the CLIENT, which then flushes everything it queued in one burst — that burst is
-    // what produced the Timer/PacketFlood alerts. MovementChecker has always had these
-    // windows; the packet checks had none, because they live outside the Bukkit event
-    // world. Hence this class now listens for those events too.
+    // the CLIENT, which then flushes everything it queued in one burst; Timer and
+    // PacketFlood would read that burst as a violation. This class listens for those Bukkit
+    // events for that reason.
     private final Map<UUID, Long> graceUntil = new ConcurrentHashMap<>();
+    // Teleports shorter than this stay inside the chunks the client already has loaded
+    // (two chunks is the minimum view distance), so they cannot stall it.
+    private static final double TELEPORT_GRACE_BLOCKS = 32.0;
+    // Player-triggered teleports: beyond any ordinary pearl throw, so only stasis-chamber
+    // style long jumps qualify.
+    private static final double SELF_TELEPORT_GRACE_BLOCKS = 96.0;
 
     public PacketChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -161,9 +185,44 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
 
     // ---- Bukkit events that make a client stall and then burst ----
 
-    @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.MONITOR)
+    @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.MONITOR, ignoreCancelled = true)
     public void onTeleport(org.bukkit.event.player.PlayerTeleportEvent event) {
-        grant(event.getPlayer().getUniqueId());
+        UUID id = event.getPlayer().getUniqueId();
+        if (teleportNeedsGrace(event.getCause(), event.getFrom(), event.getTo())) {
+            grant(id);
+        } else {
+            // The client answers a teleport with one movement packet outside its tick loop.
+            TimerState st = timerState.get(id);
+            if (st != null) st.expectTeleportMove();
+        }
+    }
+
+    /**
+     * Whether a teleport can stall the client (chunk loading) or desync positions enough to
+     * warrant a grace window. Shared with CombatChecker.
+     *
+     * <p>A world change always does. Otherwise only a long teleport does: a destination
+     * within the chunks the client already holds loads nothing. Causes the player triggers
+     * themselves (pearls, chorus fruit, consumables, dismounting, leaving a bed) get a much
+     * higher distance bar, because they can be repeated at will — granting grace for every
+     * pearl would let pearl spam keep the checks off indefinitely. Setbacks and other short
+     * plugin teleports get none for the same reason.
+     */
+    static boolean teleportNeedsGrace(org.bukkit.event.player.PlayerTeleportEvent.TeleportCause cause,
+                                      org.bukkit.Location from, org.bukkit.Location to) {
+        if (from == null || to == null || from.getWorld() == null || to.getWorld() == null) return true;
+        if (!from.getWorld().equals(to.getWorld())) return true;
+        double limit = isSelfInitiated(cause) ? SELF_TELEPORT_GRACE_BLOCKS : TELEPORT_GRACE_BLOCKS;
+        return from.distanceSquared(to) > limit * limit;
+    }
+
+    private static boolean isSelfInitiated(org.bukkit.event.player.PlayerTeleportEvent.TeleportCause cause) {
+        if (cause == null) return false;
+        // Chorus fruit reports CONSUMABLE_EFFECT (CHORUS_FRUIT is only a deprecated alias).
+        return switch (cause) {
+            case ENDER_PEARL, CONSUMABLE_EFFECT, DISMOUNT, EXIT_BED -> true;
+            default -> false;
+        };
     }
 
     @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.MONITOR)
@@ -210,6 +269,23 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
             return;
         }
 
+        // A real melee hit is announced by the client. Recorded before the packet_checks
+        // toggle and regardless of lag or grace: the combat checks read its absence as
+        // "plugin damage", so a gap here — or a tracker left active while nothing feeds it —
+        // would silently switch Reach/KillAura off.
+        if (type == PacketType.Play.Client.INTERACT_ENTITY && meleeTracker != null) {
+            User attacker = event.getUser();
+            if (attacker != null && attacker.getUUID() != null) {
+                WrapperPlayClientInteractEntity interact = new WrapperPlayClientInteractEntity(event);
+                if (interact.getAction() == WrapperPlayClientInteractEntity.InteractAction.ATTACK) {
+                    long now = System.currentTimeMillis();
+                    meleeTracker.noteAttack(attacker.getUUID(), interact.getEntityId(), now);
+                    // Vanilla aborts any dig before attacking, so an attack ends the mining window.
+                    noteEntityAttack(attacker.getUUID());
+                }
+            }
+        }
+
         if (!config.packetChecksEnabled()) return;
 
         User u = event.getUser();
@@ -229,24 +305,14 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
             handleDigging(event);
         }
 
-        // A real melee hit is announced by the client. Recorded unconditionally — even while
-        // lagging or in a grace window — because its absence is what the combat checks read,
-        // and a gap here would make an ordinary swing look like plugin-dealt damage.
-        if (type == PacketType.Play.Client.INTERACT_ENTITY && meleeTracker != null) {
-            User attacker = event.getUser();
-            if (attacker != null && attacker.getUUID() != null
-                    && new WrapperPlayClientInteractEntity(event).getAction()
-                            == WrapperPlayClientInteractEntity.InteractAction.ATTACK) {
-                meleeTracker.noteAttack(attacker.getUUID(), System.currentTimeMillis());
-            }
-        }
-
-        if (grace || ServerLoad.isLagging(config)) return;
+        if (grace || ServerLoad.isLagging(config, u != null ? u.getUUID() : null)) return;
         if (type == PacketType.Play.Client.ANIMATION) {
             handleSwing(event);
         } else if (WrapperPlayClientPlayerFlying.isFlying(type)) {
             handleFlying(event);
-            handleTimer(event.getUser());
+            handleTimer(event.getUser(), false);
+        } else if (type == PacketType.Play.Client.CLIENT_TICK_END) {
+            handleTimer(event.getUser(), true);
         }
     }
 
@@ -257,28 +323,173 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     private void handleDigging(PacketReceiveEvent event) {
         User user = event.getUser();
         if (user == null || user.getUUID() == null) return;
-        DiggingAction action = new WrapperPlayClientPlayerDigging(event).getAction();
-        noteDigging(user.getUUID(), action, System.currentTimeMillis());
+        WrapperPlayClientPlayerDigging wrapper = new WrapperPlayClientPlayerDigging(event);
+        DiggingAction action = wrapper.getAction();
+        UUID id = user.getUUID();
+        long seq = noteDigging(id, action, System.currentTimeMillis());
+        if (seq > 0L && wrapper.getBlockPosition() != null) {
+            var pos = wrapper.getBlockPosition();
+            scheduleDigConfirmation(id, seq, pos.getX(), pos.getY(), pos.getZ());
+        }
+    }
+
+    /**
+     * Look the dug block up on the player's region thread (Netty must not touch the world)
+     * and confirm the START if it names a non-air block within reach.
+     */
+    private void scheduleDigConfirmation(UUID id, long seq, int x, int y, int z) {
+        Player player = Bukkit.getPlayer(id);
+        if (player == null) return;
+        try {
+            Scheduler.runForEntity(plugin, player, () -> confirmDig(player, seq, x, y, z));
+        } catch (RuntimeException e) {
+            // Scheduler refused (plugin disabling, entity removed): the START stays provisional.
+        }
+    }
+
+    private void confirmDig(Player player, long seq, int x, int y, int z) {
+        if (!player.isOnline()) return;
+        org.bukkit.World world = player.getWorld();
+        if (!Bukkit.isOwnedByCurrentRegion(world, x >> 4, z >> 4)) return;
+        org.bukkit.Location eye = player.getEyeLocation();
+        if (!withinDigReach(eye.getX(), eye.getY(), eye.getZ(), x, y, z, digReach(player))) return;
+        org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+        if (block.getType().isAir()) return;
+        long expectedMs = expectedBreakMs(block.getBreakSpeed(player));
+        noteDigConfirmed(player.getUniqueId(), seq, expectedMs, System.currentTimeMillis());
+    }
+
+    private static double digReach(Player player) {
+        try {
+            var range = player.getAttribute(org.bukkit.attribute.Attribute.BLOCK_INTERACTION_RANGE);
+            if (range != null) return range.getValue() + MINING_REACH_SLACK;
+        } catch (Throwable ignored) {
+            // attribute not available on this server build
+        }
+        return MINING_REACH_FALLBACK;
+    }
+
+    /** Whether the centre of block (x, y, z) lies within {@code reach} of the eye position. */
+    static boolean withinDigReach(double eyeX, double eyeY, double eyeZ, int x, int y, int z, double reach) {
+        double dx = x + 0.5 - eyeX;
+        double dy = y + 0.5 - eyeY;
+        double dz = z + 0.5 - eyeZ;
+        return dx * dx + dy * dy + dz * dz <= reach * reach;
+    }
+
+    /**
+     * Expected break time in ms from the per-tick break progress; 0 for instant breaks
+     * ({@code speed >= 1}) and unbreakable blocks ({@code speed <= 0}), which keep only the
+     * provisional window.
+     */
+    static long expectedBreakMs(float speed) {
+        if (!(speed > 0.0f) || speed >= 1.0f) return 0L;
+        return (long) Math.ceil(1.0 / speed) * TICK_MS;
     }
 
     /**
      * The state transitions behind {@link #handleDigging}, split out so they can be driven
      * without a packet: PLAYER_DIGGING carries both block breaking and item drops.
      */
-    void noteDigging(UUID id, DiggingAction action, long now) {
+    long noteDigging(UUID id, DiggingAction action, long now) {
         if (action == DiggingAction.START_DIGGING) {
-            miningUntil.put(id, now + MINING_SAFETY_MS); // mining until finish (safety-capped)
+            MiningState st = mining.computeIfAbsent(id, k -> new MiningState());
+            synchronized (st) {
+                st.open = true;
+                long seq = ++st.seq;
+                // Only a bounded number of STARTs may open a window before the server has
+                // confirmed one of them — otherwise resending START at every click would
+                // hide the clicks behind an endless provisional window.
+                if (++st.unconfirmed <= MAX_UNCONFIRMED_STARTS) {
+                    st.until = now + MINING_PROVISIONAL_MS;
+                } else {
+                    st.until = now;
+                }
+                return seq;
+            }
         } else if (action == DiggingAction.FINISHED_DIGGING || action == DiggingAction.CANCELLED_DIGGING) {
-            miningUntil.put(id, now); // done
+            MiningState st = mining.get(id);
+            if (st != null) {
+                synchronized (st) {
+                    st.open = false;
+                    st.until = now;
+                }
+            }
         } else if (action == DiggingAction.DROP_ITEM || action == DiggingAction.DROP_ITEM_STACK) {
             droppingUntil.put(id, now + DROP_SUPPRESSION_MS); // dropping, not clicking
         }
+        return 0L;
+    }
+
+    /**
+     * Server-side confirmation of a dig: BlockDamageEvent only fires for a non-air block
+     * within reach. Extends the window to that block's expected break time (0 = instant or
+     * unbreakable, which keeps only the provisional window).
+     */
+    void noteBlockDamage(UUID id, long expectedMs, long now) {
+        MiningState st = mining.computeIfAbsent(id, k -> new MiningState());
+        synchronized (st) {
+            confirm(st, expectedMs, now);
+        }
+    }
+
+    /**
+     * Confirmation from the region-thread block lookup for START number {@code seq}. Ignored
+     * when a later START has superseded it, so a stale lookup cannot extend the window of a
+     * different block.
+     */
+    void noteDigConfirmed(UUID id, long seq, long expectedMs, long now) {
+        MiningState st = mining.get(id);
+        if (st == null) return;
+        synchronized (st) {
+            if (st.seq != seq) return;
+            confirm(st, expectedMs, now);
+        }
+    }
+
+    /** Caller holds the lock on {@code st}. */
+    private static void confirm(MiningState st, long expectedMs, long now) {
+        st.unconfirmed = 0;
+        // The dig already ended (START and FINISH arrived before the server processed
+        // them): nothing left to cover.
+        if (!st.open) return;
+        long window = expectedMs <= 0L ? MINING_PROVISIONAL_MS
+                : Math.min(MINING_SAFETY_MS, expectedMs * 3L / 2L + MINING_MARGIN_MS);
+        st.until = Math.max(st.until, now + window);
+    }
+
+    /** An entity attack: vanilla aborts digging first, so the swings are clicks again. */
+    void noteEntityAttack(UUID id) {
+        MiningState st = mining.get(id);
+        if (st == null) return;
+        synchronized (st) {
+            st.open = false;
+            st.until = 0L;
+        }
+    }
+
+    @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.MONITOR)
+    public void onBlockDamage(org.bukkit.event.block.BlockDamageEvent event) {
+        Player player = event.getPlayer();
+        long expectedMs = event.getInstaBreak() ? 0L : expectedBreakMs(event.getBlock().getBreakSpeed(player));
+        noteBlockDamage(player.getUniqueId(), expectedMs, System.currentTimeMillis());
     }
 
     /** True while the player is (very recently) breaking a block. */
     boolean isMining(UUID id) {
-        Long until = miningUntil.get(id);
-        return until != null && System.currentTimeMillis() < until;
+        MiningState st = mining.get(id);
+        if (st == null) return false;
+        synchronized (st) {
+            return System.currentTimeMillis() < st.until;
+        }
+    }
+
+    /** Written from the Netty thread (packets) and the region thread (BlockDamageEvent). */
+    private static final class MiningState {
+        long until;
+        long seq;
+        int unconfirmed;
+        boolean open;
     }
 
     /** True while the player is (very recently) dropping items via the drop key. */
@@ -292,10 +503,7 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
      * opened yet. Reported alongside every AutoClicker verdict because the two are easy to
      * confuse: a burst of arrivals and a fast hand both raise the click count, and a
      * connection that Paper itself is about to drop for flooding is not evidence of clicking.
-     * Live case 2026-08-25 on NewBeginnings: 12 AutoClicker alerts on a player who was mining
-     * continuously for 25 minutes, 10 of them in the exact seconds Paper disconnected him with
-     * "You are sending too many packets". Without this number the two readings cannot be told
-     * apart after the fact, which is why no threshold is drawn from it yet.
+     * Diagnostic only; no threshold is derived from it.
      */
     private long currentPacketRate(UUID id) {
         long[] st = packetCounts.get(id);
@@ -329,10 +537,8 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
             }
             st[1]++;
             if (st[1] > config.packetFloodMaxPerSecond()) {
-                // Read the count BEFORE the window is restarted below. The alert used to
-                // report the configured limit plus one, which is the same number every time
-                // and says nothing about what was actually seen — a logged flood could not
-                // be told apart from a marginal one afterwards, nor the limit tuned from it.
+                // Read the count BEFORE the window is restarted below, so the alert reports
+                // the observed rate rather than the limit.
                 long observed = st[1];
                 long over = ++st[2];
                 st[0] = now;
@@ -392,104 +598,176 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     }
 
     /**
-     * Timer: each movement (flying) packet claims one tick (50ms) of game time. A balance
-     * accumulates 50ms per packet minus the real time elapsed; if the client sends packets
-     * faster than real time (game-speed/timer hack), the balance grows past the limit.
+     * Timer: every client tick claims 50ms of game time. A balance accumulates those claims
+     * minus the real time elapsed; a client running faster than real time (game-speed/timer
+     * hack) pushes it past the limit.
+     *
+     * <p>The tick signal is CLIENT_TICK_END (one per client tick, sent by 1.21.2+ clients
+     * even while idle). Clients that never send it fall back to movement packets, which a
+     * modern client only sends on change or as a once-per-second position reminder.
+     *
+     * <p>The balance is judged continuously; there is no judgement-free window. Credit from
+     * idling or a hiccup is clamped to {@link #MAX_CREDIT_MS}. A genuine stall is absorbed by
+     * letting its backlog pay off the stalled time, but only within a short catch-up window
+     * after it — a backlog arrives at once, a timer hack cannot bank it for later.
      *
      * <p>The balance is kept in hundredths of a millisecond so the 1% drift leak survives
      * integer arithmetic: real time is counted at 101%, which absorbs benign client clock
-     * drift (cheap hardware clocks run up to ~0.5% fast — that otherwise accumulates
-     * ~10ms/s and periodically crosses any fixed limit). A real timer hack gains far more.
+     * drift (cheap hardware clocks run up to ~0.5% fast). A real timer hack gains far more.
      */
-    private void handleTimer(User user) {
+    private void handleTimer(User user, boolean tickEnd) {
         if (!config.timerDetectionEnabled()) return;
         if (user == null || user.getUUID() == null) return;
         UUID id = user.getUUID();
         long now = System.currentTimeMillis();
 
-        long[] st = timerState.computeIfAbsent(id, k -> new long[]{0L, now, 0L, 0L});
-        long elapsed = now - st[1];
+        double rtt = transactionManager != null ? transactionManager.roundTripMs(id) : -1;
+        long rttComp = rtt > 0 ? (long) Math.min(rtt, config.timerMaxRttCompensationMs()) : 0L;
+        long catchUpWindow = STALL_CATCHUP_BASE_MS + rttComp;
 
-        // A gap in the packet stream means the connection stalled — a vanilla client sends a
-        // movement packet every tick even standing still, so silence this long is not normal
-        // play. What follows is the client flushing what it queued, and every queued packet
-        // credits a full tick with no real time attached: the balance climbs by the whole
-        // backlog at once. The sustained-excursion rule does not catch it, because an
-        // eight-second backlog is not paid off in a few hundred milliseconds either.
-        // Live data: two TIMER alerts, one of them 8284ms, inside the minutes a player was
-        // timing out and reconnecting repeatedly.
-        if (elapsed > PACKET_GAP_MS) {
-            st[0] = 0L;             // discard the balance built before the stall
-            st[1] = now;
-            st[2] = 0L;             // and any excursion in progress
-            timerGraceUntil.put(id, now + STALL_GRACE_MS);
-            return;
-        }
-        Long graceUntil = timerGraceUntil.get(id);
-        if (graceUntil != null) {
-            if (now < graceUntil) {
-                st[1] = now;        // keep the clock moving, but do not judge the catch-up
-                return;
-            }
-            timerGraceUntil.remove(id);
-        }
-        long balance = updateBalance(st[0], elapsed);
-        st[1] = now;
-
-        st[0] = balance;
-
-        // The balance must stay over the limit, not merely touch it. TCP delivers packets
-        // in bundles: five movement packets arriving in the same millisecond each credit a
-        // full tick with no real time to subtract, so the balance jumps by exactly 5x50ms
-        // and crosses any limit instantly — that was the single biggest source of false
-        // Timer alerts. The gap that always follows such a bundle brings the balance back
-        // down within a few hundred ms, while a real timer hack holds it up indefinitely.
-        if (balance > config.timerMaxBalanceMs() * 100L) {
-            if (st[2] == 0L) {
-                st[2] = now;        // excursion started
-                st[3] = balance;    // ...and what it started from
-            }
-            double rtt = transactionManager != null ? transactionManager.roundTripMs(id) : -1;
-            long required = requiredExcursionMs(config.timerSustainedMs(), rtt,
-                    config.timerMaxRttCompensationMs());
-            long growth = balance - st[3];
-            long minGrowth = config.timerMinGrowthMs() * 100L;
-            if (now - st[2] >= required) {
-                if (growth >= minGrowth) {
-                    st[0] = 0L;
-                    st[2] = 0L;
-                    st[3] = 0L;
-                    long balMs = balance / 100L;
-                    String details = lang.format("alert.timer", balMs);
-                    Scheduler.runForPlayer(plugin, id, () -> flagOnMain(id, "TIMER", details, balMs));
-                } else if (config.debugMode()) {
-                    // The case the growth rule exists for. Logged rather than flagged, so a
-                    // link that keeps landing here can be told apart from one that never
-                    // reaches the limit at all — the check had no diagnostic output before,
-                    // which is why the 2026-08-23 alert could not be taken apart afterwards.
-                    plugin.getLogger().info(String.format(java.util.Locale.ROOT,
-                            "[TIMER-DEBUG] %s Ausschlag %dms lang, Balance %dms, Zuwachs %dms "
-                                    + "(<%dms) rtt=%.0fms -> kein Alarm, Leitung holt auf",
-                            user.getName(), now - st[2], balance / 100L, growth / 100L,
-                            minGrowth / 100L, Math.max(rtt, 0)));
-                }
-            }
+        TimerState st = timerState.computeIfAbsent(id, k -> new TimerState());
+        boolean claimed;
+        if (tickEnd) {
+            st.onTickEnd(now, catchUpWindow);
+            claimed = true;
         } else {
-            st[2] = 0L; // back under the limit — it was a bundle, not a hack
-            st[3] = 0L;
+            claimed = st.onMovement(now, catchUpWindow);
+        }
+        if (!claimed) return;
+
+        long required = requiredExcursionMs(config.timerSustainedMs(), rtt, config.timerMaxRttCompensationMs());
+        long balance = st.balance;
+        long start = st.excursionStart;
+        long growth = balance - st.excursionBase;
+        int verdict = st.judge(now, config.timerMaxBalanceMs() * 100L, required,
+                config.timerMinGrowthMs() * 100L);
+        if (verdict == TimerState.FLAG) {
+            long balMs = balance / 100L;
+            String details = lang.format("alert.timer", balMs);
+            Scheduler.runForPlayer(plugin, id, () -> flagOnMain(id, "TIMER", details, balMs));
+        } else if (verdict == TimerState.PLATEAU && config.debugMode()) {
+            // Over the limit for the whole window but no longer gaining: a catch-up, not a hack.
+            plugin.getLogger().info(String.format(java.util.Locale.ROOT,
+                    "[TIMER-DEBUG] %s Ausschlag %dms lang, Balance %dms, Zuwachs %dms "
+                            + "(<%dms) rtt=%.0fms -> kein Alarm, Leitung holt auf",
+                    user.getName(), now - start, balance / 100L, growth / 100L,
+                    config.timerMinGrowthMs(), Math.max(rtt, 0)));
         }
     }
 
     /**
-     * One flying packet's effect on the timer balance, in hundredths of a millisecond.
-     *
-     * <p>Each packet claims one tick of game time and pays back the real time that passed,
-     * counted at 101% so benign client clock drift leaks away instead of accumulating. The
-     * floor stops an idle player from banking unlimited credit to spend later.
+     * Per-player timer accounting. Free of server state and clock, so the accounting can be
+     * driven directly by tests. Only ever touched from the connection's Netty thread.
+     */
+    static final class TimerState {
+        static final int NONE = 0;
+        static final int FLAG = 1;
+        static final int PLATEAU = 2;
+
+        long balance;              // centi-ms: claimed game time minus real time
+        long lastClaim = -1L;      // ms, arrival of the previous claimed tick
+        long excursionStart;       // ms the balance went over the limit, 0 = under it
+        long excursionBase;        // balance at that moment
+        long stallFloor = -MAX_CREDIT_MS * 100L; // lowest balance allowed while a backlog is due
+        long stallUntil;           // ms, end of the catch-up window
+        boolean tickEndMode;       // the client sends CLIENT_TICK_END
+        boolean tickEndSinceMove;
+        // Teleports whose confirming movement packet has not arrived yet. Written from the
+        // region thread (teleport event), read from the Netty thread.
+        private final java.util.concurrent.atomic.AtomicInteger teleportMoves =
+                new java.util.concurrent.atomic.AtomicInteger();
+
+        /** A server teleport: the next movement packet answers it and is not a tick. */
+        void expectTeleportMove() {
+            // Bounded, so a burst of teleports cannot pile up free packets for later.
+            teleportMoves.updateAndGet(n -> Math.min(n + 1, MAX_PENDING_TELEPORT_MOVES));
+        }
+
+        /** One CLIENT_TICK_END: exactly one client tick. */
+        void onTickEnd(long now, long catchUpWindowMs) {
+            tickEndMode = true;
+            tickEndSinceMove = true;
+            claim(now, catchUpWindowMs);
+        }
+
+        /**
+         * One movement packet. Returns whether it claimed a tick. Once the client is known to
+         * send tick-end packets, a movement packet only claims a tick when no tick-end came
+         * since the previous one — so a client that stops sending them, or packs extra
+         * movement packets into a tick, is still charged for every tick it plays.
+         */
+        boolean onMovement(long now, long catchUpWindowMs) {
+            if (teleportMoves.getAndUpdate(n -> Math.max(0, n - 1)) > 0) return false;
+            if (tickEndMode && tickEndSinceMove) {
+                tickEndSinceMove = false;
+                return false;
+            }
+            claim(now, catchUpWindowMs);
+            return true;
+        }
+
+        void claim(long now, long catchUpWindowMs) {
+            if (lastClaim < 0L) {
+                lastClaim = now;
+                return;
+            }
+            long elapsed = Math.max(0L, now - lastClaim);
+            lastClaim = now;
+            long normalFloor = -MAX_CREDIT_MS * 100L;
+            if (now > stallUntil) {
+                // The catch-up window is over: whatever backlog did not arrive is not banked.
+                stallFloor = normalFloor;
+                balance = Math.max(balance, normalFloor);
+            }
+            long raw = rawBalance(balance, elapsed);
+            if (raw < normalFloor && elapsed > STALL_GAP_MS) {
+                // A stall. Its backlog is about to arrive and will claim the stalled time, so
+                // the balance may briefly go as low as the stall actually took (capped).
+                stallFloor = Math.min(stallFloor, Math.max(raw, -STALL_MAX_CREDIT_MS * 100L));
+                stallUntil = now + catchUpWindowMs;
+            }
+            balance = Math.max(raw, Math.min(stallFloor, normalFloor));
+        }
+
+        /**
+         * Judge the balance after a claim. It must stay over the limit for {@code requiredMs}
+         * and still be gaining at least {@code minGrowthCenti} across that span: TCP bundles
+         * spike it briefly, a drained backlog plateaus, a timer hack keeps gaining.
+         */
+        int judge(long now, long limitCenti, long requiredMs, long minGrowthCenti) {
+            if (balance <= limitCenti) {
+                excursionStart = 0L;
+                excursionBase = 0L;
+                return NONE;
+            }
+            if (excursionStart == 0L) {
+                excursionStart = now;
+                excursionBase = balance;
+                return NONE;
+            }
+            if (now - excursionStart < requiredMs) return NONE;
+            if (balance - excursionBase >= minGrowthCenti) {
+                balance = 0L;
+                excursionStart = 0L;
+                excursionBase = 0L;
+                return FLAG;
+            }
+            return PLATEAU;
+        }
+    }
+
+    /** One tick's claim minus the real time elapsed, in hundredths of a millisecond. */
+    static long rawBalance(long balanceCenti, long elapsedMs) {
+        return balanceCenti + TICK_MS * 100L - elapsedMs * 101L;
+    }
+
+    /**
+     * One claimed tick's effect on the timer balance outside a stall, in hundredths of a
+     * millisecond: counted at 101% of real time so benign clock drift leaks away, floored so
+     * an idle player cannot bank more than {@link #MAX_CREDIT_MS} to spend later.
      */
     static long updateBalance(long balanceCenti, long elapsedMs) {
-        long balance = balanceCenti + TICK_MS * 100L - elapsedMs * 101L;
-        return Math.max(balance, -100000L); // -1000ms
+        return Math.max(rawBalance(balanceCenti, elapsedMs), -MAX_CREDIT_MS * 100L);
     }
 
     /**
@@ -498,9 +776,8 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
      * <p>Extended by the player's measured round trip. A connection recovering from a stall
      * delivers its backlog over roughly one round trip, and every packet in that burst credits
      * a full tick against almost no real time — so the balance climbs for about that long
-     * through no fault of the player. Live case, 2026-08-23: a player at 1275-1444ms RTT
-     * reached a balance of 779ms and was flagged, with no single gap ever exceeding
-     * PACKET_GAP_MS, so the stall grace never engaged.
+     * through no fault of the player, even when no single gap is long enough to count as a
+     * stall.
      *
      * <p>Deliberately extends the WINDOW and not the limit. A cheat can inflate its measured
      * latency by answering transaction pings late, and against a raised limit that would buy
@@ -572,10 +849,9 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         }
         // Held left-click sends exactly one swing per tick, so the swings' typical INTERVAL is
         // one tick however much their arrival times jitter. That distinction is the whole
-        // point of measuring intervals here: `cps` counts arrivals in a sliding window, so
-        // bunched packets push it past any fixed ceiling — which is how held-button swinging
-        // came to be flagged at 23 CPS against a 22 cap while its interval never moved off
-        // 50ms. A hand clicking at 23 CPS, by contrast, has a ~43.5ms interval and is not
+        // point of measuring intervals here: a count of arrivals in a sliding window is
+        // pushed past any fixed ceiling by bunched packets while the interval stays at 50ms.
+        // A hand clicking at 23 CPS, by contrast, has a ~43.5ms interval and is not
         // excluded. Median and MAD rather than mean and standard deviation: one pause between
         // swings shifts a mean and explodes a deviation, but leaves the median where it is.
         double medianInterval = intervals.length >= MIN_INTERVALS_FOR_SD ? median(intervals) : -1;
@@ -584,13 +860,8 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         // The rate is derived from the TYPICAL INTERVAL, not from how many packets landed in
         // the last second. A sliding count over arrival times is at the mercy of the network:
         // when a connection delivers a tick's swings in bundles, the count reads whatever the
-        // bundling happens to line up, while nothing about the clicking changed.
-        //
-        // Live evidence for both halves of that: an alert at 26 CPS whose interval median sat
-        // at exactly 50.0 ms — one tick — through the entire run-up, while the count climbed
-        // 14, 15, 16 … 26 in a single second and reset to 1 the moment it flagged. The median
-        // was right the whole time; the count was not. It is also the same statistic the
-        // held-button test already trusts for the same reason.
+        // bundling happens to line up, while nothing about the clicking changed. It is the
+        // same statistic the held-button test relies on.
         int cps = cpsFromInterval(medianInterval, arrivals);
 
         if (config.debugMode()) {
@@ -635,10 +906,6 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     }
 
     /**
-     * Share of intervals longer than 1.5x the median. A human pauses regularly (high share),
-     * an autoclicker runs without a break (near zero).
-     */
-    /**
      * Whether these swing intervals carry the cadence of a held mouse button.
      *
      * <p>A held button is bound to the server tick — the client emits exactly one swing per
@@ -648,7 +915,7 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
      * it past any fixed ceiling while the cadence never moved.
      *
      * <p>Package-private and free of any server state so the behaviour can be tested
-     * directly — this is where the 23-CPS false positives came from.
+     * directly.
      */
     static boolean isHeldButton(long[] intervals) {
         if (intervals.length < MIN_INTERVALS_FOR_SD) return false;
@@ -671,12 +938,10 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         // only defensible answer.
         //
         // The arrival count is inflated by a network that delivers a tick's swings in
-        // bundles — that is what read 26 CPS off a held mouse button. The interval median is
-        // immune to that, but it is not a rate: it is measured over the whole consistency
-        // window, so a short fast burst fills it with burst intervals and the median reports
-        // the speed INSIDE the burst as though it were sustained. Live data: three alerts of
-        // 29-30 CPS where the arrival count for the same second was 5, 8 and 10 — eight quick
-        // clicks in a row, which is an ordinary thing to do.
+        // bundles. The interval median is immune to that, but it is not a rate: it is
+        // measured over the whole consistency window, so a short fast burst fills it with
+        // burst intervals and the median reports the speed INSIDE the burst as though it
+        // were sustained.
         //
         // Neither can go below the true rate, so min() is safe in both directions: bundling
         // is capped by the median, a burst is capped by how many clicks actually arrived, and
@@ -707,6 +972,10 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         return median(deviations);
     }
 
+    /**
+     * Share of intervals longer than 1.5x the median. A human pauses regularly (high share),
+     * an autoclicker runs without a break (near zero).
+     */
     static double outlierRatio(long[] intervals) {
         if (intervals.length == 0) return 1.0;
         double median = median(intervals);
@@ -789,9 +1058,8 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
                 // The three samples must be consecutive in TIME, not merely in arrival order.
                 // Turning to look at something and back is an entirely ordinary thing to do
                 // over a second — it is only beyond a mouse inside two ticks. Without this
-                // bound, a packet gap (a stalled connection catching up, which this server
-                // sees regularly) hands the check three rotations seconds apart and they read
-                // as one impossible flick.
+                // bound, a packet gap (a stalled connection catching up) hands the check three
+                // rotations seconds apart and they read as one impossible flick.
                 boolean withinTwoTicks = d[2][3] - d[0][3] <= AIMSNAP_MAX_SPAN_MS;
                 if (withinTwoTicks && spikeIn > config.aimSnapMinAngle()
                         && spikeOut > config.aimSnapMinAngle()
@@ -856,7 +1124,7 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
      */
     private void flagSimple(UUID id, String name, String type, String details, double value) {
         if (database != null) {
-            database.logAsync("anticheat_" + type.toLowerCase(), value, name + ": " + details);
+            database.logAsync(id, "anticheat_" + type.toLowerCase(), value, name + ": " + details);
         }
         Runnable main = () -> {
             Player player = Bukkit.getPlayer(id);
@@ -891,7 +1159,7 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
             plugin.getLogger().info("[AC-DEBUG] FLAG " + player.getName() + " " + type + " - " + details);
         }
         if (database != null) {
-            database.logAsync("anticheat_" + type.toLowerCase(), value,
+            database.logAsync(id, "anticheat_" + type.toLowerCase(), value,
                     player.getName() + ": " + details + " @ "
                             + dev.boondock.bsanticheat.util.CheckMath.formatLocation(player.getLocation()));
         }
@@ -909,11 +1177,10 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     public void cleanup(UUID playerId) {
         if (meleeTracker != null) meleeTracker.cleanup(playerId);
         clicks.remove(playerId);
-        timerGraceUntil.remove(playerId);
         graceUntil.remove(playerId);
         timerState.remove(playerId);
         packetCounts.remove(playerId);
-        miningUntil.remove(playerId);
+        mining.remove(playerId);
         droppingUntil.remove(playerId);
         lastYaw.remove(playerId);
         yawDeltas.remove(playerId);

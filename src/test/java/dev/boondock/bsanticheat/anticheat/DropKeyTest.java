@@ -13,10 +13,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The AutoClicker drop-key exclusion.
  *
- * <p>Live false positive, 2026-08-21: "AutoClicker: 26 CPS (Max: 25)" from a player holding
- * the drop key with a stack in hand. Every drop rides on PLAYER_DIGGING and is accompanied by
- * an arm swing, so the swings arrive once per tick — a hand on a key, not a click rate. Only
- * the mining actions of that packet were excluded; the drop actions were not.
+ * <p>A player holding the drop key with a stack in hand would otherwise read as an
+ * autoclicker at 26 CPS. Every drop rides on PLAYER_DIGGING and is accompanied by an arm
+ * swing, so the swings arrive once per tick — a hand on a key, not a click rate. Both the
+ * mining actions and the drop actions of that packet must be excluded.
  *
  * <p>The window is deliberately short. Mining gets a five-second safety cap because a break
  * legitimately lasts that long; a drop is instantaneous, and a five-second window would let

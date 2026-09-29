@@ -34,8 +34,14 @@ public class XRayAlertManager {
     // Store alerts per player
     private final Map<UUID, List<XRayAlert>> playerAlerts = new ConcurrentHashMap<>();
 
-    // Track if we already notified admins about suspicious players
-    private final Set<UUID> notifiedPlayers = ConcurrentHashMap.newKeySet();
+    /** How long after a summary notification further alerts for the player stay quiet. */
+    private static final long NOTIFY_COOLDOWN_MS = 5 * 60 * 1000L;
+    /** How long alerts are kept for review. */
+    private static final long ALERT_RETENTION_MS = 30 * 60 * 1000L;
+
+    // Per player: until when admins are not notified again. A timestamp rather than a
+    // scheduled removal, so clearing and re-alerting cannot be undone by a stale timer.
+    private final Map<UUID, Long> notifyCooldownUntil = new ConcurrentHashMap<>();
     private AlertPreferenceManager preferenceManager;
 
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss")
@@ -78,24 +84,44 @@ public class XRayAlertManager {
     public void addAlert(Player player, String type, String details, int oreCount, Map<String, Integer> oreBreakdown, List<String> locations) {
         UUID playerId = player.getUniqueId();
 
-        List<XRayAlert> alerts = playerAlerts.computeIfAbsent(playerId, k -> new CopyOnWriteArrayList<>());
-        XRayAlert alert = new XRayAlert(type, details, oreCount, System.currentTimeMillis(), oreBreakdown, locations);
-        alerts.add(alert);
+        long now = System.currentTimeMillis();
+        XRayAlert alert = new XRayAlert(type, details, oreCount, now, oreBreakdown, locations);
+        // Added under the map's lock: the cleanup drops emptied lists with computeIfPresent,
+        // so a list fetched here can never be removed before the alert lands in it.
+        playerAlerts.compute(playerId, (k, list) -> {
+            if (list == null) list = new CopyOnWriteArrayList<>();
+            list.add(alert);
+            return list;
+        });
 
         // Only log to console in debug mode
         if (config.debugMode()) {
             plugin.getLogger().info("[XRay] " + player.getName() + ": " + type + " - " + details);
         }
 
-        // Only send one summary notification per player (reset after 5 minutes)
-        if (!notifiedPlayers.contains(playerId)) {
-            notifiedPlayers.add(playerId);
+        // Only send one summary notification per player per NOTIFY_COOLDOWN_MS
+        if (tryStartNotifyCooldown(playerId, now)) {
             notifyAdmins(player, oreBreakdown, locations);
             sendDiscordAlert(player, type, details, oreCount, oreBreakdown, locations);
-
-            // Reset notification flag after 5 minutes
-            dev.boondock.bsanticheat.util.Scheduler.runGlobalLater(plugin, () -> notifiedPlayers.remove(playerId), 6000L);
         }
+    }
+
+    private boolean tryStartNotifyCooldown(UUID playerId, long now) {
+        return tryStartCooldown(notifyCooldownUntil, playerId, now, NOTIFY_COOLDOWN_MS);
+    }
+
+    /**
+     * Atomically: true, and the cooldown started, if none is running for this player.
+     * Static with its state passed in, so it can be tested without a scheduler behind it.
+     */
+    static boolean tryStartCooldown(Map<UUID, Long> untilByPlayer, UUID playerId, long now, long cooldownMs) {
+        boolean[] started = {false};
+        untilByPlayer.compute(playerId, (k, until) -> {
+            if (until != null && until > now) return until;
+            started[0] = true;
+            return now + cooldownMs;
+        });
+        return started[0];
     }
 
     /**
@@ -200,7 +226,7 @@ public class XRayAlertManager {
      */
     public void clearAlerts(UUID playerId) {
         playerAlerts.remove(playerId);
-        notifiedPlayers.remove(playerId);
+        notifyCooldownUntil.remove(playerId);
     }
 
     /**
@@ -208,22 +234,25 @@ public class XRayAlertManager {
      */
     public void clearAllAlerts() {
         playerAlerts.clear();
-        notifiedPlayers.clear();
+        notifyCooldownUntil.clear();
     }
 
     /**
-     * Cleanup alerts older than 30 minutes.
+     * Cleanup alerts older than 30 minutes and expired notification cooldowns.
      */
-    private void cleanupOldAlerts() {
-        long cutoff = System.currentTimeMillis() - (30 * 60 * 1000L);
+    void cleanupOldAlerts() {
+        long now = System.currentTimeMillis();
+        long cutoff = now - ALERT_RETENTION_MS;
 
-        playerAlerts.forEach((uuid, alerts) -> {
-            alerts.removeIf(alert -> alert.timestamp() < cutoff);
-            if (alerts.isEmpty()) {
-                playerAlerts.remove(uuid);
-                notifiedPlayers.remove(uuid);
-            }
-        });
+        // Remove-if-empty happens inside computeIfPresent, i.e. under the same lock that
+        // addAlert holds while appending, so a concurrent alert is never dropped with the list.
+        for (UUID uuid : playerAlerts.keySet()) {
+            playerAlerts.computeIfPresent(uuid, (k, alerts) -> {
+                alerts.removeIf(alert -> alert.timestamp() < cutoff);
+                return alerts.isEmpty() ? null : alerts;
+            });
+        }
+        notifyCooldownUntil.entrySet().removeIf(e -> e.getValue() <= now);
     }
 
     /**

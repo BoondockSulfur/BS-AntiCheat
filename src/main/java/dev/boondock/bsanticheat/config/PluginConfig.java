@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 
 /**
  * Configuration manager for BSAntiCheat.
@@ -25,53 +26,112 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class PluginConfig {
 
     private final JavaPlugin plugin;
-    // volatile + publish-after-prepare: config values are read from async tasks and
-    // Netty threads; without this a /bsac reload could expose a half-merged config.
+    // Copy-on-write: the published configuration is never mutated after it is assigned.
+    // Values are read from region threads, async tasks and Netty threads, and a
+    // YamlConfiguration is backed by plain LinkedHashMaps, so a set() on one thread while
+    // another reads (or serialises for a save) is a data race. Every change builds a copy
+    // under mutationLock and publishes it through this volatile field instead.
     private volatile FileConfiguration cfg;
+    private final Object mutationLock = new Object();
     private final AsyncConfigSaver asyncSaver;
 
     // Hot-path membership caches. These lists are consulted on every movement, every hit
     // and every block break, and cfg.getStringList() allocates a fresh ArrayList on each
     // call — far too expensive there. Rebuilt on load/reload and on every mutation below.
     private volatile Set<String> whitelistPlayersSet = Set.of();
+    private volatile List<String> whitelistGroupsList = List.of();
     private volatile Set<String> xrayExemptWorldsSet = Set.of();
     private volatile Set<String> restrictedWorldsSet = Set.of();
 
     // Whether THIS PLUGIN has changed a config value since the file was last read.
     //
-    // The shutdown save used to be unconditional, which quietly made the plugin the last
-    // writer of a file it had not edited: an admin who changes a threshold in config.yml
-    // while the server runs and does not run /bsac reload has their edit overwritten by the
-    // in-memory values at the next stop — and on a server that auto-restarts twice a day
-    // that happens within hours, with nothing in the log to explain it. Saving is now tied
-    // to the plugin actually having something to write: the whitelist and ore-exclusion
-    // commands, and the validator repairing an invalid value.
+    // The shutdown save only writes when this is set. An unconditional save would make the
+    // plugin the last writer of a file it had not edited: an admin who changes a threshold
+    // in config.yml while the server runs, without /bsac reload, would have the edit
+    // overwritten by the in-memory values at the next stop. Only the whitelist and
+    // ore-exclusion commands, and the validator repairing an invalid value, set it.
     private final AtomicBoolean pluginModified = new AtomicBoolean(false);
 
     public PluginConfig(JavaPlugin plugin) {
         this.plugin = plugin;
-        this.asyncSaver = new AsyncConfigSaver(plugin);
+        this.asyncSaver = new AsyncConfigSaver(plugin, this::snapshotYaml);
         FileConfiguration fresh = plugin.getConfig();
         mergeDefaults(fresh);
-        validateConfig(fresh);
-        this.cfg = fresh;
-        rebuildCaches();
+        boolean repaired = validateConfig(fresh);
+        synchronized (mutationLock) {
+            this.cfg = fresh;
+            rebuildCaches();
+        }
+        if (repaired) markAndSave();
     }
 
     public void reload() {
+        // Changes whose save is still queued must reach the file before it is re-read;
+        // otherwise the reload drops them and resets pluginModified.
+        asyncSaver.flushPending();
         plugin.reloadConfig();
         FileConfiguration fresh = plugin.getConfig();
         mergeDefaults(fresh);
-        validateConfig(fresh);
-        this.cfg = fresh;
-        rebuildCaches();
-        // Memory and file agree again, so nothing of ours is pending.
-        pluginModified.set(false);
+        boolean repaired = validateConfig(fresh);
+        synchronized (mutationLock) {
+            this.cfg = fresh;
+            rebuildCaches();
+            // Memory and file agree again, so nothing of ours is pending.
+            pluginModified.set(false);
+        }
+        if (repaired) markAndSave();
+    }
+
+    /** The current configuration as YAML, serialised under the mutation lock. */
+    private String snapshotYaml() {
+        synchronized (mutationLock) {
+            return cfg.saveToString();
+        }
+    }
+
+    /** A private, mutable copy of {@code src} with the same defaults. */
+    private static FileConfiguration copyOf(FileConfiguration src) {
+        YamlConfiguration copy = new YamlConfiguration();
+        try {
+            copy.loadFromString(src.saveToString());
+        } catch (org.bukkit.configuration.InvalidConfigurationException e) {
+            throw new IllegalStateException("Config could not be copied", e);
+        }
+        if (src.getDefaults() != null) copy.setDefaults(src.getDefaults());
+        return copy;
+    }
+
+    /**
+     * Apply a change to a copy of the current configuration and publish the copy.
+     * Nothing is published or saved when {@code change} reports that it changed nothing.
+     */
+    private void mutate(Predicate<FileConfiguration> change) {
+        synchronized (mutationLock) {
+            FileConfiguration copy = copyOf(cfg);
+            if (!change.test(copy)) return;
+            cfg = copy;
+            rebuildCaches();
+        }
+        markAndSave();
+    }
+
+    /** {@link #mutate} for a string list: {@code change} edits the list and returns true if it did. */
+    private void mutateList(String path, Predicate<List<String>> change) {
+        // Cheap pre-check on the published list, so a no-op command costs no copy.
+        if (!change.test(new ArrayList<>(cfg.getStringList(path)))) return;
+        mutate(copy -> {
+            // Re-applied inside the lock: another change may have landed in between.
+            List<String> current = new ArrayList<>(copy.getStringList(path));
+            if (!change.test(current)) return false;
+            copy.set(path, current);
+            return true;
+        });
     }
 
     /** Rebuild the hot-path lookup sets from the current config. */
     private void rebuildCaches() {
         whitelistPlayersSet = toSet(cfg.getStringList("anticheat.whitelist_players"));
+        whitelistGroupsList = toList(cfg.getStringList("anticheat.whitelist_groups"));
         xrayExemptWorldsSet = toSet(cfg.getStringList("anticheat.xray_exempt_worlds"));
         restrictedWorldsSet = toSet(cfg.getStringList("anticheat.restricted_worlds"));
     }
@@ -82,6 +142,14 @@ public class PluginConfig {
             if (v != null) set.add(v);
         }
         return Collections.unmodifiableSet(set);
+    }
+
+    private static List<String> toList(List<String> values) {
+        List<String> list = new ArrayList<>(values.size());
+        for (String v : values) {
+            if (v != null) list.add(v);
+        }
+        return List.copyOf(list);
     }
 
     /**
@@ -123,16 +191,25 @@ public class PluginConfig {
                     // ...along with the reasoning that ships above it. A merged key arrives
                     // as a bare value otherwise, so an admin updating the plugin gets every
                     // new switch without a word about what it is for, while a fresh install
-                    // gets the full explanation. The keys that need it most are the ones
-                    // that were calibrated against live data.
+                    // gets the full explanation.
                     List<String> comments = defaults.getComments(key);
                     if (!comments.isEmpty()) cfg.setComments(key, comments);
                     changed = true;
                 }
             }
+            // Keys an earlier migration imported from PerformanceAnalyzer's own features.
+            // Checked on every start; it only removes what the defaults do not contain.
+            List<String> foreign = ConfigMigrator.removeForeignKeys(cfg, defaults);
+            if (!foreign.isEmpty()) {
+                plugin.getLogger().info("[Config] Removed settings that belong to another plugin: "
+                        + String.join(", ", foreign));
+            }
             if (changed) {
-                plugin.saveConfig();
                 plugin.getLogger().info("[Config] Added missing config keys from defaults.");
+            }
+            if (changed || !foreign.isEmpty()) {
+                // Not published yet, so no other thread can see this object.
+                asyncSaver.writeNow(cfg.saveToString());
             }
         } catch (Exception e) {
             plugin.getLogger().warning("[Config] Could not merge default config keys: " + e.getMessage());
@@ -151,46 +228,198 @@ public class PluginConfig {
         return false;
     }
 
-    private void validateConfig(FileConfiguration cfg) {
+    /**
+     * Allowed range per numeric setting. A value outside it is replaced by the default with
+     * one warning: most of these fail silently otherwise — a violation count of 0 flags on
+     * every sample, a window or rate limit of 0 disables its check, a negative pool size
+     * stops the database from starting. Bounds are inclusive.
+     */
+    private record Range(String path, double min, double max, Number def) {}
+
+    private static final double INF = Double.MAX_VALUE;
+
+    private static final List<Range> RANGES = List.of(
+            // General / database
+            new Range("anticheat.lag_exempt_tps", 0, 20, 18.0),
+            new Range("anticheat.transaction_interval_ticks", 1, 200, Constants.TRANSACTION_INTERVAL_TICKS),
+            new Range("anticheat.legacy_protocol_threshold", 1, INF, 767),
+            new Range("database.pool.max_pool_size", 1, 100, Constants.DB_DEFAULT_POOL_SIZE),
+            new Range("database.pool.minimum_idle", 0, 100, Constants.DB_DEFAULT_MIN_IDLE),
+            // HikariCP rejects connection timeouts below 250 ms.
+            new Range("database.pool.connection_timeout_ms", 250, INF, Constants.DB_DEFAULT_CONNECTION_TIMEOUT_MS),
+            // 0 keeps logs forever (auto-cleanup off).
+            new Range("database.retention_days", 0, INF, 30),
+            // Packet
+            new Range("anticheat.packetflood_max_per_second", 1, INF, 500),
+            new Range("anticheat.packetflood_windows", 1, INF, Constants.PACKETFLOOD_WINDOWS),
+            // Streak counts: 0 would flag on every single sample.
+            new Range("anticheat.thresholds.groundspoof_violations", 1, INF, Constants.GROUNDSPOOF_VIOLATIONS),
+            new Range("anticheat.thresholds.noslow_violations", 1, INF, Constants.NOSLOW_VIOLATIONS),
+            new Range("anticheat.thresholds.jesus_violations", 1, INF, Constants.JESUS_VIOLATIONS),
+            new Range("anticheat.thresholds.spider_violations", 1, INF, Constants.SPIDER_VIOLATIONS),
+            new Range("anticheat.thresholds.step_violations", 1, INF, Constants.STEP_VIOLATIONS),
+            new Range("anticheat.thresholds.sustained_ascent_violations", 1, INF, Constants.SUSTAINED_ASCENT_VIOLATIONS),
+            new Range("anticheat.thresholds.elytra_violations", 1, INF, Constants.ELYTRA_VIOLATIONS),
+            new Range("anticheat.thresholds.scaffold_violations", 1, INF, Constants.SCAFFOLD_VIOLATIONS),
+            new Range("anticheat.thresholds.nuker_violations", 1, INF, 3),
+            new Range("anticheat.thresholds.fastplace_violations", 1, INF, 3),
+            new Range("anticheat.thresholds.killaura_multi_violations", 1, INF, 2),
+            new Range("anticheat.thresholds.boatfly_violations", 1, INF, Constants.BOATFLY_VIOLATIONS),
+            new Range("anticheat.thresholds.vehicle_speed_violations", 1, INF, Constants.VEHICLE_SPEED_VIOLATIONS),
+            new Range("anticheat.thresholds.reach_violations", 1, INF, Constants.REACH_VIOLATIONS),
+            new Range("anticheat.thresholds.killaura_angle_violations", 1, INF, Constants.KILLAURA_ANGLE_VIOLATIONS),
+            new Range("anticheat.thresholds.criticals_violations", 1, INF, Constants.CRITICALS_VIOLATIONS),
+            new Range("anticheat.thresholds.autoblock_violations", 1, INF, Constants.AUTOBLOCK_VIOLATIONS),
+            new Range("anticheat.thresholds.velocity_violations", 1, INF, Constants.VELOCITY_VIOLATIONS),
+            new Range("anticheat.thresholds.fastbreak_violations", 1, INF, Constants.FASTBREAK_VIOLATIONS),
+            new Range("anticheat.thresholds.inventorymove_violations", 1, INF, Constants.INVENTORYMOVE_VIOLATIONS),
+            new Range("anticheat.thresholds.cheststealer_min_clicks", 1, INF, Constants.CHESTSTEALER_MIN_CLICKS),
+            new Range("anticheat.thresholds.fastuse_violations", 1, INF, Constants.FASTUSE_VIOLATIONS),
+            new Range("anticheat.thresholds.bowspam_violations", 1, INF, Constants.BOWSPAM_VIOLATIONS),
+            // Threshold factors and distances
+            new Range("anticheat.thresholds.noslow_speed_multiplier", 0.01, INF, Constants.NOSLOW_SPEED_MULTIPLIER),
+            new Range("anticheat.thresholds.step_max_height", 0.01, INF, Constants.STEP_MAX_HEIGHT),
+            new Range("anticheat.thresholds.sustained_ascent_min_decay", 0, INF, Constants.SUSTAINED_ASCENT_MIN_DECAY),
+            new Range("anticheat.thresholds.reach_max_latency_blocks", 0, INF, Constants.REACH_MAX_LATENCY_BLOCKS),
+            new Range("anticheat.thresholds.reach_max_ping_ms", 1, INF, Constants.REACH_MAX_PING_MS),
+            new Range("anticheat.thresholds.velocity_min_apply_ratio", 0.01, 1, Constants.VELOCITY_MIN_APPLY_RATIO),
+            new Range("anticheat.thresholds.fly_hover_max_drop", 0, INF, Constants.FLY_HOVER_MAX_DROP),
+            new Range("anticheat.thresholds.fastbreak_tolerance", 0.01, 1, Constants.FASTBREAK_TOLERANCE),
+            new Range("anticheat.thresholds.inventorymove_min_speed", 0.01, INF, Constants.INVENTORYMOVE_MIN_SPEED),
+            new Range("anticheat.thresholds.cheststealer_max_interval_ms", 1, INF, Constants.CHESTSTEALER_MAX_INTERVAL_MS),
+            new Range("anticheat.thresholds.cheststealer_min_interval_ms", 0, INF, Constants.CHESTSTEALER_MIN_INTERVAL_MS),
+            new Range("anticheat.thresholds.fastuse_min_interval_ms", 1, INF, Constants.FASTUSE_MIN_INTERVAL_MS),
+            new Range("anticheat.thresholds.bowspam_min_interval_ms", 1, INF, Constants.BOWSPAM_MIN_INTERVAL_MS),
+            new Range("anticheat.thresholds.bowspam_min_force", 0, 1, 0.9),
+            new Range("anticheat.thresholds.autototem_max_reaction_ms", 1, INF, Constants.AUTOTOTEM_MAX_REACTION_MS),
+            // Combat. Below vanilla survival reach (3.0) every ordinary hit is flagged.
+            new Range("anticheat.reach_distance", 3.0, INF, 4.0),
+            new Range("anticheat.killaura_max_angle", 1, 180, 75.0),
+            // One target is every hit; "multi" needs at least two.
+            new Range("anticheat.killaura_multi_targets", 2, INF, 3),
+            new Range("anticheat.killaura_rotation_samples", 2, INF, 20),
+            new Range("anticheat.killaura_rotation_min_gcd", 0, INF, 8000L),
+            // World
+            new Range("anticheat.nuker_max_breaks_per_second", 1, INF, 25),
+            new Range("anticheat.fastplace_max_per_second", 1, INF, 12),
+            new Range("anticheat.scaffold_max_angle", 1, 180, 80.0),
+            // Packet-level
+            new Range("anticheat.autoclicker_max_cps", 1, INF, 25),
+            new Range("anticheat.autoclicker_min_samples", 2, INF, 15),
+            new Range("anticheat.autoclicker_min_cps", 0, INF, 2),
+            new Range("anticheat.autoclicker_max_deviation_ms", 0, INF, 30),
+            new Range("anticheat.autoclicker_max_cv", 0, INF, 0.30),
+            new Range("anticheat.autoclicker_max_outlier_ratio", 0, 1, 0.06),
+            new Range("anticheat.autoclicker_min_signals", 1, 3, 3),
+            new Range("anticheat.timer_max_balance_ms", 1, INF, 200L),
+            new Range("anticheat.timer_sustained_ms", 0, INF, Constants.TIMER_SUSTAINED_MS),
+            new Range("anticheat.timer_min_growth_ms", 0, INF, Constants.TIMER_MIN_GROWTH_MS),
+            new Range("anticheat.timer_max_rtt_compensation_ms", 0, INF, Constants.TIMER_MAX_RTT_COMPENSATION_MS),
+            new Range("anticheat.aimsnap_min_angle", 1, 180, 40.0),
+            new Range("anticheat.aimsnap_return_angle", 0, 180, 15.0),
+            new Range("anticheat.aimsnap_window_ms", 1, INF, 3000L),
+            new Range("anticheat.aimsnap_threshold", 1, INF, 3),
+            // XRay
+            new Range("anticheat.xray_timewindow_seconds", 1, INF, 60),
+            new Range("anticheat.xray_min_veins", 1, INF, 3),
+            new Range("anticheat.xray_max_count_per_vein", 1, INF, Constants.XRAY_MAX_COUNT_PER_VEIN),
+            new Range("anticheat.xray_stone_window_seconds", 1, INF, Constants.XRAY_STONE_WINDOW_SECONDS),
+            new Range("anticheat.xray_min_stone_for_ratio", 1, INF, Constants.XRAY_MIN_STONE_FOR_RATIO_CHECK),
+            new Range("anticheat.xray_profile_window_seconds", 1, INF, Constants.XRAY_PROFILE_WINDOW_SECONDS),
+            new Range("anticheat.xray_profile_min_sample", 1, INF, Constants.XRAY_PROFILE_MIN_SAMPLE),
+            new Range("anticheat.xray_profile_max_y_stddev", 0.01, INF, Constants.XRAY_PROFILE_MAX_Y_STDDEV),
+            new Range("anticheat.xray_profile_min_corridor", 0, 1, Constants.XRAY_PROFILE_MIN_CORRIDOR),
+            new Range("anticheat.xray_profile_ore_band", 0, INF, Constants.XRAY_PROFILE_ORE_BAND),
+            new Range("anticheat.xray_stone_ore_ratio", 0, 1, 0.15),
+            new Range("anticheat.xray_rare_combined_threshold", 1, INF, Constants.XRAY_RARE_COMBINED_THRESHOLD),
+            // Movement speeds
+            new Range("anticheat.speed_thresholds.walk", 0.01, INF, 0.4),
+            new Range("anticheat.speed_thresholds.sprint", 0.01, INF, 0.6),
+            new Range("anticheat.speed_thresholds.fly", 0.01, INF, 1.5),
+            new Range("anticheat.speed_thresholds.vertical", 0.01, INF, 3.5),
+            new Range("anticheat.speed_thresholds.teleport", 0.01, INF, 15.0),
+            new Range("anticheat.speed_thresholds.violations_before_alert", 1, INF, 5),
+            new Range("anticheat.speed_thresholds.fly_violations_before_alert", 1, INF, 10),
+            new Range("anticheat.speed_thresholds.elytra_bps", 1, INF, Constants.ELYTRA_MAX_SPEED),
+            new Range("anticheat.speed_thresholds.riptide_bps", 1, INF, Constants.RIPTIDE_MAX_SPEED));
+
+    /**
+     * Replace out-of-range values by their default, one warning each.
+     *
+     * @return true when a value was repaired, i.e. the file needs writing
+     */
+    private boolean validateConfig(FileConfiguration cfg) {
         boolean hasErrors = false;
 
-        double ratio = cfg.getDouble("anticheat.xray_stone_ore_ratio", 0.15);
-        if (ratio < 0.0 || ratio > 1.0) {
-            plugin.getLogger().warning("[Config] Invalid xray_stone_ore_ratio: " + ratio + ". Using 0.15");
-            cfg.set("anticheat.xray_stone_ore_ratio", 0.15);
+        for (Range range : RANGES) {
+            hasErrors |= repairIfOutOfRange(cfg, range);
+        }
+
+        // Per-ore thresholds: admin-defined keys, so each present value is checked.
+        ConfigurationSection ores = cfg.getConfigurationSection("anticheat.xray_thresholds");
+        if (ores != null) {
+            for (String ore : ores.getKeys(false)) {
+                hasErrors |= repairIfOutOfRange(cfg, new Range("anticheat.xray_thresholds." + ore, 1, INF,
+                        ore.equals("ancient_debris") ? 3 : 10));
+            }
+        }
+
+        // Pool: minimum_idle above max_pool_size makes HikariCP refuse to start.
+        int poolMax = cfg.getInt("database.pool.max_pool_size", Constants.DB_DEFAULT_POOL_SIZE);
+        if (cfg.getInt("database.pool.minimum_idle", Constants.DB_DEFAULT_MIN_IDLE) > poolMax) {
+            plugin.getLogger().warning("[Config] database.pool.minimum_idle is larger than max_pool_size ("
+                    + poolMax + "). Using " + poolMax);
+            cfg.set("database.pool.minimum_idle", poolMax);
             hasErrors = true;
         }
 
-        double walkSpeed = cfg.getDouble("anticheat.speed_thresholds.walk", 0.4);
-        if (walkSpeed <= 0) {
-            plugin.getLogger().warning("[Config] Invalid speed_thresholds.walk: " + walkSpeed + ". Using 0.4");
-            cfg.set("anticheat.speed_thresholds.walk", 0.4);
+        // decay_seconds: 0 is a valid choice (decay off) but means violation levels never
+        // go down, so every false positive counts towards a punishment for the whole uptime.
+        int decay = cfg.getInt("anticheat.punishments.decay_seconds", 300);
+        if (decay < 0) {
+            plugin.getLogger().warning("[Config] Invalid anticheat.punishments.decay_seconds: " + decay
+                    + " (must be 0 or more). Using 300");
+            cfg.set("anticheat.punishments.decay_seconds", 300);
             hasErrors = true;
-        }
-
-        double sprintSpeed = cfg.getDouble("anticheat.speed_thresholds.sprint", 0.6);
-        if (sprintSpeed <= 0) {
-            plugin.getLogger().warning("[Config] Invalid speed_thresholds.sprint: " + sprintSpeed + ". Using 0.6");
-            cfg.set("anticheat.speed_thresholds.sprint", 0.6);
-            hasErrors = true;
+        } else if (decay == 0 && cfg.getBoolean("anticheat.punishments.enabled", false)) {
+            plugin.getLogger().warning("[Config] anticheat.punishments.decay_seconds is 0: violation levels"
+                    + " never decay, so false positives add up until the next restart.");
         }
 
         // Not repaired, only reported: an existing value is the admin's decision and the
         // merge above only ever ADDS keys, so a default that changes after release never
-        // reaches a server that already has the key. This one changed for a measured reason
-        // (97 alerts, 0 real findings — see config.yml), and silently flipping it would be
-        // the plugin overruling a choice somebody may have made deliberately.
+        // reaches a server that already has the key. This default changed because the check
+        // misreads vanilla shift-drag (see config.yml); silently flipping an existing value
+        // would overrule a choice somebody may have made deliberately.
         if (cfg.getBoolean("anticheat.cheststealer_detection", false)) {
             plugin.getLogger().warning("[Config] cheststealer_detection is ON. It ships OFF"
                     + " since 1.0.6: the check reads vanilla shift-drag as inhuman clicking"
-                    + " and has produced 97 alerts and 0 real findings. Set it to false in"
+                    + " and produces false alerts. Set it to false in"
                     + " config.yml unless you know why you want it.");
         }
 
-        if (hasErrors) {
-            pluginModified.set(true);
-            asyncSaver.saveAsync();
+        return hasErrors;
+    }
+
+    /** Validate one numeric setting; absent keys are left to the getter's default. */
+    private boolean repairIfOutOfRange(FileConfiguration cfg, Range range) {
+        if (!cfg.contains(range.path(), true)) return false;
+        Object raw = cfg.get(range.path());
+        if (raw instanceof Number n) {
+            double v = n.doubleValue();
+            if (!Double.isNaN(v) && v >= range.min() && v <= range.max()) return false;
         }
+        String bounds = range.max() == INF
+                ? "at least " + formatBound(range.min())
+                : formatBound(range.min()) + " to " + formatBound(range.max());
+        plugin.getLogger().warning("[Config] Invalid " + range.path() + ": " + raw
+                + " (allowed: " + bounds + "). Using " + range.def());
+        cfg.set(range.path(), range.def());
+        return true;
+    }
+
+    private static String formatBound(double v) {
+        return v == Math.rint(v) ? String.valueOf((long) v) : String.valueOf(v);
     }
 
     // Language
@@ -242,10 +471,9 @@ public class PluginConfig {
     public boolean jesusDetectionEnabled() { return cfg.getBoolean("anticheat.jesus_detection", false); }
     public boolean spiderDetectionEnabled() { return cfg.getBoolean("anticheat.spider_detection", false); }
     public boolean stepDetectionEnabled() { return cfg.getBoolean("anticheat.step_detection", false); }
-    // Off by default: a heuristic that has never seen live data from the server it runs on.
-    // It watches for a climb that does not decay the way gravity requires — see
-    // MovementChecker#checkSustainedAscent — and closes the gap left by the hover check no
-    // longer counting ascent. Calibrate with debug_mode before switching it on.
+    // Off by default: an uncalibrated heuristic. It watches for a climb that does not decay
+    // the way gravity requires — see MovementChecker#checkSustainedAscent — and covers the
+    // ascent the hover check does not count. Calibrate with debug_mode before enabling it.
     public boolean sustainedAscentDetectionEnabled() { return cfg.getBoolean("anticheat.sustained_ascent_detection", false); }
     public int sustainedAscentViolations() { return cfg.getInt("anticheat.thresholds.sustained_ascent_violations", Constants.SUSTAINED_ASCENT_VIOLATIONS); }
     /** Vertical speed a climbing player must shed per tick to read as thrown rather than flown. */
@@ -423,7 +651,12 @@ public class PluginConfig {
     // Whitelist
     public boolean opsBypass() { return cfg.getBoolean("anticheat.ops_bypass", false); }
     public List<String> anticheatWhitelistPlayers() { return cfg.getStringList("anticheat.whitelist_players"); }
-    public List<String> anticheatWhitelistGroups() { return cfg.getStringList("anticheat.whitelist_groups"); }
+    /**
+     * Whitelisted LuckPerms groups. Immutable and cached: read on every exemption check. The
+     * same instance is returned until the list changes, so callers may cache results
+     * against its identity.
+     */
+    public List<String> anticheatWhitelistGroups() { return whitelistGroupsList; }
     /** Hot path (every movement, hit and block break) — backed by the cached set. */
     public boolean isWhitelistedPlayer(java.util.UUID playerId) {
         return whitelistPlayersSet.contains(playerId.toString());
@@ -470,29 +703,34 @@ public class PluginConfig {
 
     // Whitelist management
     public void addWhitelistPlayer(String uuid) {
-        List<String> list = new ArrayList<>(anticheatWhitelistPlayers());
-        if (!list.contains(uuid)) { list.add(uuid); cfg.set("anticheat.whitelist_players", list); rebuildCaches(); markAndSave(); }
+        mutateList("anticheat.whitelist_players", list -> !list.contains(uuid) && list.add(uuid));
     }
-    public void removeWhitelistPlayer(String uuid) {
-        List<String> list = new ArrayList<>(anticheatWhitelistPlayers());
-        if (list.remove(uuid)) { cfg.set("anticheat.whitelist_players", list); rebuildCaches(); markAndSave(); }
+    /**
+     * Remove a whitelist entry exactly as it is stored (case-insensitive, so a UUID typed in
+     * upper case still matches). Needs no name lookup, so it also works for players the
+     * server no longer has in its user cache.
+     *
+     * @return true when an entry was removed
+     */
+    public boolean removeWhitelistPlayer(String entry) {
+        boolean present = anticheatWhitelistPlayers().stream().anyMatch(e -> e.equalsIgnoreCase(entry));
+        if (!present) return false;
+        mutateList("anticheat.whitelist_players", list -> list.removeIf(e -> e.equalsIgnoreCase(entry)));
+        return true;
     }
     public void addWhitelistGroup(String group) {
-        List<String> list = new ArrayList<>(anticheatWhitelistGroups());
-        if (!list.contains(group)) { list.add(group); cfg.set("anticheat.whitelist_groups", list); markAndSave(); }
+        mutateList("anticheat.whitelist_groups", list -> !list.contains(group) && list.add(group));
     }
     public void removeWhitelistGroup(String group) {
-        List<String> list = new ArrayList<>(anticheatWhitelistGroups());
-        if (list.remove(group)) { cfg.set("anticheat.whitelist_groups", list); markAndSave(); }
+        mutateList("anticheat.whitelist_groups", list -> list.remove(group));
     }
     public void addExcludedOre(String ore) {
-        List<String> list = new ArrayList<>(xrayExcludedOres());
         String upper = ore.toUpperCase();
-        if (!list.contains(upper)) { list.add(upper); cfg.set("anticheat.xray_excluded_ores", list); markAndSave(); }
+        mutateList("anticheat.xray_excluded_ores", list -> !list.contains(upper) && list.add(upper));
     }
     public void removeExcludedOre(String ore) {
-        List<String> list = new ArrayList<>(xrayExcludedOres());
-        if (list.remove(ore.toUpperCase())) { cfg.set("anticheat.xray_excluded_ores", list); markAndSave(); }
+        String upper = ore.toUpperCase();
+        mutateList("anticheat.xray_excluded_ores", list -> list.remove(upper));
     }
 
     // Discord
@@ -502,7 +740,13 @@ public class PluginConfig {
 
     // Silent players
     public List<String> silentPlayers() { return cfg.getStringList("alerts.silent_players"); }
-    public void setSilentPlayers(List<String> players) { cfg.set("alerts.silent_players", players); markAndSave(); }
+    public void setSilentPlayers(List<String> players) {
+        List<String> copy = new ArrayList<>(players);
+        mutate(c -> {
+            c.set("alerts.silent_players", copy);
+            return true;
+        });
+    }
 
     // Save
 

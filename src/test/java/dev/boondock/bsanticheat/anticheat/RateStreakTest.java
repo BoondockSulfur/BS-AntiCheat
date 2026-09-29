@@ -43,6 +43,17 @@ class RateStreakTest {
     }
 
     @Test
+    @DisplayName("Exceedances inside one second are one burst")
+    void sameBurstCountsOnce() {
+        // The window is cleared on every exceedance, so the rest of one burst refills it
+        // straight away; those refills must not count as further windows.
+        assertEquals(1, bump(1_000));
+        assertEquals(1, bump(1_000), "same tick");
+        assertEquals(1, bump(1_500), "same second");
+        assertEquals(2, bump(2_000), "a second later is the next window");
+    }
+
+    @Test
     @DisplayName("A window past the lapse restarts the count")
     void lapsedStreakRestarts() {
         assertEquals(1, bump(1_000));

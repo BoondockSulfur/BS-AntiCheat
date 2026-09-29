@@ -24,11 +24,19 @@ class CheckMathTest {
     }
 
     @Test
-    @DisplayName("Documented scaling points hold: 200ms → +10%, 500ms → +20%, 1000ms → +30%")
+    @DisplayName("Documented scaling points hold: 200ms → +10%, 500ms → +20%")
     void documentedScaling() {
         assertEquals(1.10, CheckMath.pingSlack(200), 0.001);
         assertEquals(1.20, CheckMath.pingSlack(500), 0.001);
-        assertEquals(1.30, CheckMath.pingSlack(1000), 0.001);
+    }
+
+    @Test
+    @DisplayName("Holding pongs buys no slack beyond the cap")
+    void slackIsCapped() {
+        double cap = CheckMath.pingSlack(CheckMath.MAX_SLACK_PING_MS);
+        assertEquals(cap, CheckMath.pingSlack(1000), 1e-9);
+        assertEquals(cap, CheckMath.pingSlack(3000), 1e-9);
+        assertEquals(cap, CheckMath.pingSlack(Integer.MAX_VALUE), 1e-9);
     }
 
     @Test
@@ -43,5 +51,21 @@ class CheckMathTest {
         // Even an absurd ping must not hand out a multiple of the limit.
         assertTrue(CheckMath.pingSlack(10_000) < 2.0,
                 "a 10s ping must not double every threshold");
+    }
+
+    @Test
+    @DisplayName("Free-fall closed form matches tick-by-tick vanilla physics")
+    void ballisticRiseMatchesIteration() {
+        double[][] cases = {{0.42, 0.08, 0.98}, {0.0, 0.08, 0.98}, {1.5, 0.04, 0.98}, {0.1, 0.04, 1.0}};
+        for (double[] c : cases) {
+            double y = 0, v = c[0];
+            for (int t = 1; t <= 60; t++) {
+                y += v;
+                v = (v - c[1]) * c[2];
+                assertEquals(y, CheckMath.ballisticRise(c[0], c[1], c[2], t), 1e-9,
+                        "v0=" + c[0] + " g=" + c[1] + " drag=" + c[2] + " t=" + t);
+            }
+        }
+        assertEquals(0.0, CheckMath.ballisticRise(0.42, 0.08, 0.98, 0));
     }
 }

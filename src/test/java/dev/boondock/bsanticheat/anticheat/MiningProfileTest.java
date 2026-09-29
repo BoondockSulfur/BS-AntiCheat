@@ -10,9 +10,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The shape vetoes, exercised against the profiles measured on this server's block log.
+ * The shape vetoes, exercised against reference mining profiles.
  *
- * <p>The reference values come from 4.5 months of real mining (see {@link MiningProfile}):
+ * <p>The reference values are documented in {@link MiningProfile}:
  * honest strip miners hold one Y level to a standard deviation of 1.1-1.2, run 75-89% of
  * their digging as straight corridors, and take their ore out of a 3.0-3.6 block band around
  * those corridors. The cases below pin both directions: those profiles must be recognised,
@@ -50,7 +50,7 @@ class MiningProfileTest {
     @Test
     @DisplayName("Digging that wanders in Y is not strip mining")
     void wanderingIsNotStripMining() {
-        // The measured counter-profile: Y standard deviation 6.7 to 15.3, ore spread over
+        // The counter-profile: Y standard deviation 6.7 to 15.3, ore spread over
         // 15 levels. Equally a cave explorer or an X-Ray user — either way the veto has
         // nothing to say and must stand down.
         List<MiningProfile.StoneBreak> stone = new ArrayList<>();

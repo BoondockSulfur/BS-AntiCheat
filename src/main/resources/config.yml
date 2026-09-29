@@ -11,6 +11,7 @@ database:
     max_pool_size: 5
     minimum_idle: 1
     connection_timeout_ms: 10000
+  # Days to keep log entries; 0 keeps them forever.
   retention_days: 30
   fallback_file_logging: true
   fallback_log_file: "plugins/BSAntiCheat/fallback.log"
@@ -99,10 +100,8 @@ anticheat:
   # It judges the INTERVAL between container clicks, and vanilla shift-drag — hold shift,
   # hold the left button, sweep across slots — fires one InventoryClickEvent per slot crossed,
   # at 10-40ms spacing. That is the exact band the check watches, so one hand movement reads
-  # as a burst of inhuman clicking. Measured on this server 2026-08-26: a player sorting
-  # storage for two hours produced 96 alerts; of their fast clicks, 88% landed on a slot
-  # ADJACENT to the previous one, i.e. a mouse path, not a click rate. Running total of the
-  # check's life: 97 alerts, 0 real findings.
+  # as a burst of inhuman clicking: the fast clicks land on ADJACENT slots, i.e. a mouse
+  # path, not a click rate. Sorting storage by hand therefore raises alerts.
   #
   # No threshold fixes that — widen the floor past 40ms and the check is dead, keep it below
   # and it keeps catching sweeps. A ChestStealer's actual signature is a container standing
@@ -126,7 +125,7 @@ anticheat:
   packetflood_max_per_second: 500
   # How many consecutive one-second windows must exceed the limit. A connection that
   # stalled and then flushes its queue floods exactly ONE window — a real attack floods
-  # every window it lasts. 1 restores the old (false-positive-prone) behaviour.
+  # every window it lasts. 1 flags on a single window (prone to false positives).
   packetflood_windows: 2
 
   # Calibration thresholds. Each value is the default; lower a *_violations count for
@@ -162,13 +161,11 @@ anticheat:
     reach_violations: 3
     # Latency handling for reach. What lag costs this check is not a percentage but a
     # DISTANCE: the target keeps moving while the hit is in flight, so the error is
-    # speed x time. Measured here 2026-08-27 in a four-way PvP session at 373-1519ms round
-    # trips — a sprinting pair separates by 4.2 to 17.0 blocks in one round trip, the alerts
-    # ran to 14.61, and the old percentage model allowed only 4.7-5.5. Hence an additive
-    # allowance, capped, plus a ceiling above which the check simply stands down: past that
-    # the server cannot tell where either player was, and compensating further would only
-    # build a hole that grows with latency — which a cheat can fake by answering transaction
-    # pings late. NOTE: both numbers are derived from one session and want review against more.
+    # speed x time; at high round trips a sprinting pair separates by many blocks. Hence an
+    # additive allowance, capped, plus a ceiling above which the check simply stands down:
+    # past that the server cannot tell where either player was, and compensating further
+    # would only build a hole that grows with latency — which a cheat can fake by answering
+    # transaction pings late.
     reach_max_latency_blocks: 3.0
     reach_max_ping_ms: 400
     killaura_angle_violations: 3
@@ -179,9 +176,7 @@ anticheat:
     # How much vertical speed a hover run may LOSE before it is read as falling rather than
     # hovering. The hover check counts any sample whose |dy| stays inside a +-0.08 band, and
     # the apex of a slow arc sits in that band for many samples in a row — so a player simply
-    # being thrown upwards and coming back down accumulated the full count. Live alert
-    # 2026-08-26 on NewBeginnings: dy ran +0.067 -> -0.051 monotonically over all ten samples,
-    # with no potion, no gravity modifier and no teleport behind it. A hover HOLDS its
+    # being thrown upwards and coming back down would accumulate the full count. A hover HOLDS its
     # vertical speed; gravity keeps taking it away. 0.05 is well under one tick of vanilla
     # gravity (0.08), so real falling is excluded and a held altitude still flags.
     fly_hover_max_drop: 0.05
@@ -234,11 +229,9 @@ anticheat:
   scaffold_max_angle: 80.0
 
   # Packet-level: max clicks per second from arm-swings (mining swings are excluded).
-  # Skilled humans reach ~17-21 by jitter clicking and 20-25 by butterfly clicking, so 22
-  # sat inside what a hand can do. Note the count comes from a sliding window over packet
-  # ARRIVAL times, which network jitter can lift a little above what was actually clicked.
+  # Skilled humans reach ~17-21 by jitter clicking and 20-25 by butterfly clicking.
   # Raw click rate, taken from the typical interval between arm-swings (not from how many
-  # packets arrive in a second — the network decides those, and bundling used to inflate them).
+  # packets arrive in a second — the network decides those, and bundling inflates them).
   # NOTE: the client sends at most one swing per server tick, so the measured rate cannot
   # exceed ~20 and any cap above that is unreachable by design. The raw-rate signal is
   # therefore near-inert; real autoclicker detection is autoclicker_consistency below.
@@ -266,7 +259,7 @@ anticheat:
   # tick with no real time to subtract, so the balance jumps by exactly 5x50ms and crosses
   # any limit instantly. The gap that always follows such a bundle pulls it straight back
   # down, while a real timer hack holds it up for as long as it runs. Set to 0 to flag on
-  # the first crossing (the old behaviour — expect false alerts on poor connections).
+  # the first crossing (expect false alerts on poor connections).
   timer_sustained_ms: 1000
   # Two guards against punishing a bad connection. A link recovering from a stall delivers its
   # backlog over roughly one round trip, and every packet in that burst credits a full tick
@@ -319,13 +312,12 @@ anticheat:
   xray_min_stone_for_ratio: 60
   # SHAPE VETOES. These can only ever SUPPRESS an alert, never raise one, so they cannot
   # introduce a false positive. That is deliberate: the counting checks cannot tell a lucky
-  # miner from someone who knew where to walk, and the incriminating side of that has no
-  # confirmed X-Ray sample on this server to calibrate against — the exonerating side does.
+  # miner from someone who knew where to walk, and there is no confirmed X-Ray sample to
+  # calibrate an incriminating signal against.
   #
-  # Strip mining is unmistakable in the shape of the digging. Measured over 4.5 months of
-  # this server's block log (three honest strip miners): 84-91% of their stone within one
-  # block of a single Y level, Y standard deviation 1.1-1.2, 75-89% of it in straight
-  # corridors, and their ore inside a 3.0-3.6 block Y band around those corridors.
+  # Strip mining is unmistakable in the shape of the digging: almost all stone within one
+  # block of a single Y level, a small Y standard deviation, most of it in straight
+  # corridors, and the ore inside a narrow Y band around those corridors.
   # All four must hold, and the ore must lie in the band — otherwise a player could strip-mine
   # honestly for ten minutes and have the veto cover the detours that were worth hiding.
   xray_profile_window_seconds: 300
@@ -357,7 +349,7 @@ anticheat:
   # Per-Ore Thresholds (ores mined per time window). Coal/iron/copper allow for the
   # 1.18+ giant ore veins and large mountain seams; redstone/lapis/diamond/gold allow
   # for beacon (Haste II) + Efficiency V deepslate branch mining, which legitimately
-  # clears the old lower limits (confirmed via live alert data).
+  # clears lower limits.
   xray_thresholds:
     coal: 30
     iron: 25

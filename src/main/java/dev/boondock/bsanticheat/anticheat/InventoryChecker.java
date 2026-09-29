@@ -62,9 +62,14 @@ public class InventoryChecker implements Listener {
     // InventoryMove: players with an open container GUI + consecutive fast moves
     private final Map<UUID, Long> containerOpenSince = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> consecutiveInvMove = new ConcurrentHashMap<>();
-    // ChestStealer: consecutive container clicks with inhuman intervals
-    private final Map<UUID, Long> lastContainerClick = new ConcurrentHashMap<>();
+    // ChestStealer: consecutive container clicks with inhuman intervals.
+    // lastContainerClick: {timeMs, slot}; streakHasJump: the current fast streak contains at
+    // least one step a mouse drag cannot produce (see isDragStep).
+    private final Map<UUID, long[]> lastContainerClick = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> fastClickStreak = new ConcurrentHashMap<>();
+    private final Map<UUID, Boolean> streakHasJump = new ConcurrentHashMap<>();
+    // Clock for ChestStealer intervals; replaceable so tests can step time.
+    java.util.function.LongSupplier clock = System::currentTimeMillis;
     // FastUse: last consume timestamp + consecutive too-fast consumes
     private final Map<UUID, Long> lastConsume = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> consecutiveFastUse = new ConcurrentHashMap<>();
@@ -75,14 +80,12 @@ public class InventoryChecker implements Listener {
     private final Map<UUID, Long> lastTotemPop = new ConcurrentHashMap<>();
     // Knockback grace: any server-applied velocity moves a player who has a GUI open
     // without any key input (arrow/trident hits, wind charges, explosions, jump pads).
-    // MovementChecker has always had this; InventoryMove was missing it.
     private final Map<UUID, Long> recentKnockback = new ConcurrentHashMap<>();
     private static final long KNOCKBACK_GRACE_MS = 2000;
     // Momentum carries a player for a moment after the GUI opens: vanilla friction needs
     // several ticks to bring a sprint (0.28 blocks/tick) below the 0.15 threshold, and the
-    // player is not steering during them. With inventorymove_violations at 8 that window
-    // alone could reach the alert — live data showed exactly that, three alerts measuring
-    // 0.150 / 0.165 / 0.278, all sitting on the threshold.
+    // player is not steering during them, and that window alone could reach the violation
+    // count with speeds just above the threshold.
     private static final long OPEN_GRACE_MS = 1000;
     private PistonTracker pistons;
 
@@ -133,6 +136,7 @@ public class InventoryChecker implements Listener {
         consecutiveInvMove.remove(id);
         lastContainerClick.remove(id);
         fastClickStreak.remove(id);
+        streakHasJump.remove(id);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -149,7 +153,7 @@ public class InventoryChecker implements Listener {
         UUID id = player.getUniqueId();
         Long openedAt = containerOpenSince.get(id);
         if (openedAt == null) return;
-        if (ServerLoad.isLagging(config)) return;
+        if (ServerLoad.isLagging(config, player)) return;
         // Let the momentum the player arrived with die down before judging them.
         if (System.currentTimeMillis() - openedAt < OPEN_GRACE_MS) return;
 
@@ -162,17 +166,19 @@ public class InventoryChecker implements Listener {
         // isFlying covers survival flight granted by another plugin (EssentialsX /fly):
         // those players drift with a GUI open and are not in creative gamemode, so the
         // gamemode exemption further down would never catch them.
-        // Airborne movement needs no key input either: a player who walks off a ledge or
-        // jumps before opening the container keeps their horizontal momentum the whole way
-        // down, and the vanilla client cannot steer it with a GUI open any more than it can
-        // start it. This trusts the client's on-ground flag, which a cheat could lie about to
-        // buy itself the exemption — that specific lie is what the GROUNDSPOOF check exists
-        // to catch, and it stays armed regardless of what any inventory is doing.
         if (player.isInsideVehicle() || player.isGliding() || player.isInWater()
-                || player.isFlying() || player.getAllowFlight() || !player.isOnGround()) {
+                || player.isFlying() || player.getAllowFlight()) {
             consecutiveInvMove.remove(id);
             return;
         }
+        // Airborne movement needs no key input either: a player who walks off a ledge or
+        // jumps before opening the container keeps their horizontal momentum the whole way
+        // down, and the vanilla client cannot steer it with a GUI open any more than it can
+        // start it. Airborne is decided from the blocks under the player's bounding box, not
+        // the client's on-ground flag, which a cheat can simply report as false. Such samples
+        // are skipped without resetting the count, so hopping does not wipe the evidence
+        // gathered on the ground in between.
+        if (!hasSupportBelow(to)) return;
 
         Long kb = recentKnockback.get(id);
         if (kb != null && System.currentTimeMillis() - kb < KNOCKBACK_GRACE_MS) {
@@ -209,6 +215,38 @@ public class InventoryChecker implements Listener {
         }
     }
 
+    /**
+     * Server-side ground test: a supporting block just under any corner of the player's
+     * footprint. Players standing on entities or fence tops read as airborne and are
+     * skipped, which only costs detection, never a false flag.
+     */
+    private static boolean hasSupportBelow(Location to) {
+        if (to.getWorld() == null) return true;
+        double y = to.getY() - GROUND_PROBE;
+        int by = (int) Math.floor(y);
+        for (double ox : FOOT_OFFSETS) {
+            for (double oz : FOOT_OFFSETS) {
+                org.bukkit.block.Block b = to.getWorld().getBlockAt(
+                        (int) Math.floor(to.getX() + ox), by, (int) Math.floor(to.getZ() + oz));
+                if (isSupport(b)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static final double GROUND_PROBE = 0.05;
+    // Corners of a player's 0.6-wide footprint.
+    private static final double[] FOOT_OFFSETS = {-0.3, 0.3};
+
+    private static boolean isSupport(org.bukkit.block.Block block) {
+        Material m = block.getType();
+        if (m == Material.AIR || m == Material.CAVE_AIR || m == Material.VOID_AIR) return false;
+        if (m.isSolid()) return true;
+        if (m == Material.WATER || m == Material.LAVA || m == Material.POWDER_SNOW
+                || m == Material.SCAFFOLDING || m == Material.COBWEB) return true;
+        return !block.isPassable();
+    }
+
     /** True when ice below could carry sliding momentum (shared scan). */
     private boolean isOnIce(Player player) {
         return CheckMath.iceMultiplierBelow(player.getLocation(),
@@ -235,7 +273,7 @@ public class InventoryChecker implements Listener {
         if (!config.inventoryChecksEnabled()) return;
         if (!(event.getWhoClicked() instanceof Player player)) return;
         // Queued clicks arriving in one tick after a lag spike look like 0ms intervals.
-        if (ServerLoad.isLagging(config)) return;
+        if (ServerLoad.isLagging(config, player)) return;
         UUID id = player.getUniqueId();
 
         // --- AutoTotem: a totem lands in the offhand via inventory click within an
@@ -266,19 +304,20 @@ public class InventoryChecker implements Listener {
         if (click != ClickType.LEFT && click != ClickType.RIGHT && click != ClickType.SHIFT_LEFT) return;
         if (event.getCurrentItem() == null || event.getCurrentItem().getType() == Material.AIR) return;
 
-        long now = System.currentTimeMillis();
-        Long last = lastContainerClick.put(id, now);
-        if (last == null) return;
-        long interval = now - last;
+        long now = clock.getAsLong();
+        int slot = event.getSlot();
+        long[] prev = lastContainerClick.put(id, new long[]{now, slot});
+        if (prev == null) return;
+        long interval = now - prev[0];
+        boolean dragStep = isDragStep((int) prev[1], slot, gridWidth(top));
 
-        // The check had no diagnostic output at all, which made a live alert — seven clicks
-        // at 33 ms — impossible to judge after the fact: nothing recorded whether those were
-        // real clicks or arrivals the network had bundled, nor which kind of click they were.
-        // Logged before the floor test below, so the ignored pairs are visible too.
+        // Debug output records interval, slot and click type, so an alert can be told apart
+        // from network-bundled arrivals afterwards. Logged before the floor test below, so
+        // the ignored pairs are visible too.
         if (config.debugMode()) {
             plugin.getLogger().info(String.format(java.util.Locale.ROOT,
-                    "[CHEST-DEBUG] %s interval=%dms click=%s slot=%d streak=%d (floor %d, window %d, needs %d)",
-                    player.getName(), interval, click.name(), event.getSlot(),
+                    "[CHEST-DEBUG] %s interval=%dms click=%s slot=%d drag=%b streak=%d (floor %d, window %d, needs %d)",
+                    player.getName(), interval, click.name(), event.getSlot(), dragStep,
                     fastClickStreak.getOrDefault(id, 0),
                     config.chestStealerMinIntervalMs(), config.chestStealerMaxIntervalMs(),
                     config.chestStealerMinClicks()));
@@ -300,14 +339,43 @@ public class InventoryChecker implements Listener {
         if (interval < config.chestStealerMinIntervalMs()) return;
         if (interval <= config.chestStealerMaxIntervalMs()) {
             int streak = fastClickStreak.merge(id, 1, Integer::sum);
-            if (streak >= config.chestStealerMinClicks() && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
+            if (!dragStep) streakHasJump.put(id, Boolean.TRUE);
+            // A mouse drag (Mouse Tweaks shift-/LMB-drag) clicks slot after slot along a
+            // continuous path, at mouse speed — as fast as a stealer. What a drag cannot do
+            // is jump: a stealer walking the slots by index wraps from the end of one row to
+            // the start of the next. A streak made only of drag steps is not judged.
+            if (streak >= config.chestStealerMinClicks() && streakHasJump.getOrDefault(id, false)
+                    && !Exemptions.isExempt(player, config, luckPerms, geyser)) {
                 handleViolation(player, "CHESTSTEALER",
                         lang.format("alert.cheststealer", streak + 1, interval), streak, player.getLocation());
                 fastClickStreak.put(id, 0);
+                streakHasJump.remove(id);
             }
         } else {
             fastClickStreak.remove(id);
+            streakHasJump.remove(id);
         }
+    }
+
+    /**
+     * Whether a mouse dragged across the slot grid can move from one slot to the next: the
+     * neighbouring slot, or one further when a fast movement skipped a slot between two
+     * frames. Package-private and free of server state for testing.
+     */
+    static boolean isDragStep(int fromSlot, int toSlot, int width) {
+        if (width <= 0) return true;
+        int dRow = Math.abs(fromSlot / width - toSlot / width);
+        int dCol = Math.abs(fromSlot % width - toSlot % width);
+        return Math.max(dRow, dCol) <= 2;
+    }
+
+    /** Slots per row of a container screen. */
+    private static int gridWidth(InventoryType type) {
+        return switch (type) {
+            case DISPENSER, DROPPER, CRAFTER -> 3;
+            case HOPPER -> 5;
+            default -> 9;
+        };
     }
 
     /** True when this click puts a totem into the offhand slot. */
@@ -336,8 +404,8 @@ public class InventoryChecker implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onItemConsume(PlayerItemConsumeEvent event) {
         if (!config.inventoryChecksEnabled() || !config.fastUseDetectionEnabled()) return;
-        if (ServerLoad.isLagging(config)) return;
         Player player = event.getPlayer();
+        if (ServerLoad.isLagging(config, player)) return;
         UUID id = player.getUniqueId();
 
         long now = System.currentTimeMillis();
@@ -386,8 +454,8 @@ public class InventoryChecker implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onShootBow(EntityShootBowEvent event) {
         if (!config.inventoryChecksEnabled() || !config.bowSpamDetectionEnabled()) return;
-        if (ServerLoad.isLagging(config)) return;
         if (!(event.getEntity() instanceof Player player)) return;
+        if (ServerLoad.isLagging(config, player)) return;
         // Crossbows are pre-charged and legitimately fire instantly — bows only
         if (event.getBow() == null || event.getBow().getType() != Material.BOW) return;
         // Only full-charge shots: a full draw takes 1s, so full shots can't come faster
@@ -413,7 +481,7 @@ public class InventoryChecker implements Listener {
 
     private void handleViolation(Player player, String type, String details, double value, Location location) {
         if (database != null) {
-            database.logAsync("anticheat_" + type.toLowerCase(), value,
+            database.logAsync(player.getUniqueId(), "anticheat_" + type.toLowerCase(), value,
                     player.getName() + ": " + details + " @ " + CheckMath.formatLocation(location));
         }
         if (alertManager != null) {
@@ -431,6 +499,7 @@ public class InventoryChecker implements Listener {
         consecutiveInvMove.remove(playerId);
         lastContainerClick.remove(playerId);
         fastClickStreak.remove(playerId);
+        streakHasJump.remove(playerId);
         lastConsume.remove(playerId);
         consecutiveFastUse.remove(playerId);
         lastFullShot.remove(playerId);
