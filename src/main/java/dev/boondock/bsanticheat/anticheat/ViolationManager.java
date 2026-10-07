@@ -100,7 +100,7 @@ public class ViolationManager {
             collectTiers(steps, player, checkType, before, after);
         } else if (config.debugMode() && config.punishmentsEnabled()) {
             plugin.getLogger().info("[PUNISH-DEBUG] " + player.getName() + " " + checkType
-                    + " VL " + before + " -> " + after + ", keine Stufe erreicht");
+                    + " VL " + before + " -> " + after + ", no tier reached");
         }
         runChain(player, steps, 0);
 

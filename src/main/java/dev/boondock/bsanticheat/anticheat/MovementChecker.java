@@ -7,6 +7,7 @@ import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.CheckMath;
 import dev.boondock.bsanticheat.util.Constants;
+import dev.boondock.bsanticheat.util.GameCompat;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -46,6 +47,9 @@ public class MovementChecker implements Listener {
     private ViolationManager violationManager;
     private TransactionManager transactionManager;
     private PistonTracker pistons;
+    private LungeTracker lungeTracker;
+    // Server-measured fall distance, shared with the mace check in CombatChecker.
+    private FallTracker fallTracker = new FallTracker();
 
     // Last position seen, and when. Every move event updates these.
     private final Map<UUID, Location> lastLocations = new ConcurrentHashMap<>();
@@ -139,6 +143,10 @@ public class MovementChecker implements Listener {
     private final Map<UUID, Location> elytraSampleFrom = new ConcurrentHashMap<>();
     private final Map<UUID, Long> elytraSampleAt = new ConcurrentHashMap<>();
     private static final long ELYTRA_SAMPLE_WINDOW_MS = 250;
+    // Last moment the server reported the player riptiding. A riptide launch while gliding
+    // adds its impulse on top of the glide, so for as long as that impulse lasts
+    // (RIPTIDE_GRACE_MS) the elytra ceiling is raised by the riptide ceiling.
+    private final Map<UUID, Long> lastRiptide = new ConcurrentHashMap<>();
 
     // Knockback immunity tracking
     private final Map<UUID, Long> recentKnockback = new ConcurrentHashMap<>();
@@ -182,6 +190,46 @@ public class MovementChecker implements Listener {
     // the player can see, so the launch moment is remembered instead.
     private final Map<UUID, Long> recentSlime = new ConcurrentHashMap<>();
     private static final long SLIME_GRACE_MS = 3000;
+    // Bed / shelf-mushroom bounce grace: like the slime grace, but only after an observed
+    // bounce and only for the vertical checks — these blocks do not throw a player sideways.
+    private final Map<UUID, Long> recentBounce = new ConcurrentHashMap<>();
+    // Last sample that descended faster than BOUNCE_MIN_IMPACT, for recognising a bounce.
+    private final Map<UUID, Long> lastFastDescent = new ConcurrentHashMap<>();
+    // Descent per tick a landing needs before its rebound can exceed an ordinary jump: beds
+    // return 75% of the impact speed, and a jump starts at 0.42. Also above the landing speed
+    // of an ordinary jump (~0.45 in the last tick, less averaged over a sample).
+    static final double BOUNCE_MIN_IMPACT = 0.5;
+    // How soon after that descent the rise must follow to count as its rebound.
+    static final long BOUNCE_REVERSAL_MS = 300L;
+    // Deepest scan below the feet for a potent-sulfur geyser: its push reaches up to five
+    // times the height of a water column that is at most four blocks tall.
+    private static final int GEYSER_SCAN_DEPTH = 24;
+
+    // Lunge credit for the speed budget: [0] = blocks remaining, [1] = expiry (ms),
+    // [2] = time of the stab it was granted for, so each stab is credited once, [3] = the
+    // latest stab seen in the same burst.
+    private final Map<UUID, double[]> lungeCredit = new ConcurrentHashMap<>();
+    private static final long LUNGE_CREDIT_MS = 3000;
+
+    // NoFall: a landing waiting for its fall damage event, and when fall damage last arrived.
+    private record PendingLanding(double distance, long at, Location where) {}
+    private final Map<UUID, PendingLanding> pendingLandings = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> lastFallDamage = new ConcurrentHashMap<>();
+    // Suspicious falls within the streak window: [0] = count, [1] = time of the last one.
+    private final Map<UUID, long[]> noFallStreak = new ConcurrentHashMap<>();
+    private static final long NOFALL_STREAK_WINDOW_MS = 60_000;
+    // Mid-air samples whose vanilla fall distance lags behind the measured one.
+    private final Map<UUID, Integer> noFallSpoofSamples = new ConcurrentHashMap<>();
+    // Falls already counted as suspicious, so one fall never counts twice.
+    private final java.util.Set<UUID> noFallCounted = ConcurrentHashMap.newKeySet();
+
+    // Sprint rules: since when a sprint vanilla would have ended has been kept up, and the
+    // omni-sprint streak.
+    private final Map<UUID, Long> sprintHungerSince = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> sprintBlindSince = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> consecutiveOmniSprint = new ConcurrentHashMap<>();
+    // First protocol whose client ends a running sprint on low food or Blindness (1.21.2).
+    private static final int PROTOCOL_SPRINT_STOP_RULES = 768;
 
     // Ice-momentum memory: [0]=timestamp(ms), [1]=ice speed multiplier. Sprint-jumping on
     // ice roads has no ice directly below mid-jump while the momentum persists.
@@ -242,6 +290,19 @@ public class MovementChecker implements Listener {
         this.pistons = pistons;
     }
 
+    /** Spear lunges recorded by the packet layer; without it no lunge allowance is granted. */
+    public void setLungeTracker(LungeTracker lungeTracker) {
+        this.lungeTracker = lungeTracker;
+    }
+
+    public void setFallTracker(FallTracker fallTracker) {
+        if (fallTracker != null) this.fallTracker = fallTracker;
+    }
+
+    public FallTracker fallTracker() {
+        return fallTracker;
+    }
+
     /**
      * True when a recent sideways piston push nearby can account for this horizontal speed:
      * a push adds at most {@link PistonTracker#MAX_PUSH_PER_TICK} on top of what the player
@@ -280,7 +341,8 @@ public class MovementChecker implements Listener {
         Entity vehicle = player.getVehicle();
         if (vehicle != null) {
             // Rideable animals
-            if (vehicle instanceof Horse) {
+            // Zombie and skeleton horses are AbstractHorse, not Horse, but ride like one.
+            if (vehicle instanceof Horse || vehicle instanceof ZombieHorse || vehicle instanceof SkeletonHorse) {
                 return MovementType.RIDING_HORSE;
             }
             if (vehicle instanceof Donkey || vehicle instanceof Mule) {
@@ -289,6 +351,7 @@ public class MovementChecker implements Listener {
             if (vehicle instanceof Llama) {
                 return MovementType.RIDING_LLAMA;
             }
+            // Covers the camel husk too, which the API models as a Camel.
             if (vehicle instanceof Camel) {
                 return MovementType.RIDING_CAMEL;
             }
@@ -305,7 +368,9 @@ public class MovementChecker implements Listener {
             if (vehicle instanceof Minecart) {
                 return MovementType.MINECART;
             }
-            // Fallback for any other vehicle
+            // Everything else: happy ghast (flying), nautilus, and seats such as the cushion,
+            // which has no collision and moves the player only with itself. None of them is
+            // on-foot movement; ridden mounts are judged by VehicleChecker.
             return MovementType.OTHER_VEHICLE;
         }
 
@@ -492,14 +557,56 @@ public class MovementChecker implements Listener {
         // Track explosion knockback
         if (event.getCause() == org.bukkit.event.entity.EntityDamageEvent.DamageCause.ENTITY_EXPLOSION ||
             event.getCause() == org.bukkit.event.entity.EntityDamageEvent.DamageCause.BLOCK_EXPLOSION) {
-            recentKnockback.put(playerId, System.currentTimeMillis());
+            noteKnockback(playerId, System.currentTimeMillis());
         }
 
         // Track entity attacks (knockback)
         if (event.getCause() == org.bukkit.event.entity.EntityDamageEvent.DamageCause.ENTITY_ATTACK ||
             event.getCause() == org.bukkit.event.entity.EntityDamageEvent.DamageCause.ENTITY_SWEEP_ATTACK) {
-            recentKnockback.put(playerId, System.currentTimeMillis());
+            noteKnockback(playerId, System.currentTimeMillis());
         }
+    }
+
+    /**
+     * Knockback of any cause, including explosions that deal no damage. A wind charge
+     * launching its own thrower is such an explosion: it pushes the player without a damage
+     * event and, depending on the server version, without a velocity event either.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onEntityKnockback(io.papermc.paper.event.entity.EntityKnockbackEvent event) {
+        if (event.getEntity() instanceof Player player) {
+            noteKnockback(player.getUniqueId(), System.currentTimeMillis());
+        }
+    }
+
+    /** Knockback grace, and the fall measurement no longer describes the player's descent. */
+    private void noteKnockback(UUID playerId, long now) {
+        recentKnockback.put(playerId, now);
+        fallTracker.disturb(playerId, now);
+    }
+
+    /**
+     * Fall damage, also when another plugin cancelled it: for NoFall the question is only
+     * whether the server computed any, not whether it was dealt.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onFallDamage(org.bukkit.event.entity.EntityDamageEvent event) {
+        if (event.getCause() != org.bukkit.event.entity.EntityDamageEvent.DamageCause.FALL) return;
+        if (!(event.getEntity() instanceof Player player)) return;
+        UUID id = player.getUniqueId();
+        lastFallDamage.put(id, System.currentTimeMillis());
+        pendingLandings.remove(id);
+    }
+
+    /**
+     * A mace smash resets the attacker's fall distance, so the landing after it deals no
+     * damage. Runs after CombatChecker (HIGH), which compares the distance first.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onMaceHit(org.bukkit.event.entity.EntityDamageByEntityEvent event) {
+        if (!(event.getDamager() instanceof Player attacker)) return;
+        if (attacker.getInventory().getItemInMainHand().getType() != Material.MACE) return;
+        fallTracker.disturb(attacker.getUniqueId(), System.currentTimeMillis());
     }
 
     /**
@@ -511,7 +618,7 @@ public class MovementChecker implements Listener {
      */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerVelocity(org.bukkit.event.player.PlayerVelocityEvent event) {
-        recentKnockback.put(event.getPlayer().getUniqueId(), System.currentTimeMillis());
+        noteKnockback(event.getPlayer().getUniqueId(), System.currentTimeMillis());
     }
 
     /**
@@ -545,6 +652,7 @@ public class MovementChecker implements Listener {
 
         // Mark this player as recently teleported
         recentTeleport.put(playerId, System.currentTimeMillis());
+        pendingLandings.remove(playerId);
 
         // Reset location tracking to the teleport destination so the next
         // movement check uses the correct baseline position
@@ -737,12 +845,16 @@ public class MovementChecker implements Listener {
         // Elytra/Riptide get their own speed-ceiling check — vanilla physics allow far
         // higher speeds than ground movement, so the ground checks below don't apply.
         if (moveType == MovementType.ELYTRA || moveType == MovementType.RIPTIDE) {
+            // Gliding takes precedence in getMovementType, so a riptide during a glide only
+            // shows here.
+            boolean riptiding = player.isRiptiding();
+            if (riptiding) lastRiptide.put(playerId, now);
             boolean setBack = false;
             if (config.elytraDetectionEnabled() && !ServerLoad.isLagging(config, player)) {
                 setBack = checkElytraSpeed(player, playerId, moveType, from, to);
             }
             // Landing grace, measured from now — riptide's impulse outlives its animation.
-            long graceMs = moveType == MovementType.RIPTIDE ? RIPTIDE_GRACE_MS : GLIDE_GRACE_MS;
+            long graceMs = riptiding || moveType == MovementType.RIPTIDE ? RIPTIDE_GRACE_MS : GLIDE_GRACE_MS;
             extendMomentumGrace(playerId, now + graceMs);
             // After a setback the teleport handler owns the baseline; the illegal position
             // must not overwrite it. A glide with an over-speed streak running is not a
@@ -797,6 +909,12 @@ public class MovementChecker implements Listener {
             rebaseline(playerId, to);
             return;
         }
+
+        // Fall measurement runs on every event, including the ones folded into a sample below:
+        // the descent has to be summed packet by packet to match what vanilla counts.
+        // Geyser lookup for this event, shared by the fall measurement and the sample checks.
+        GeyserProbe geyserProbe = new GeyserProbe(to, to.getY() > from.getY());
+        trackFall(player, playerId, from, to, now, geyserProbe);
 
         // Moves are judged as SAMPLES: the displacement from the start of the sample to this
         // event. Events arriving within MOVEMENT_MIN_TIME_DELTA of the sample start are too
@@ -886,19 +1004,46 @@ public class MovementChecker implements Listener {
 
             // Block lookups reused by several checks below — this runs on every movement
             // packet of every player, so each scan is done once and shared.
-            boolean nearSlime = isNearSlimeBlock(to);
-            boolean nearBubble = isNearBubbleColumn(to);
+            // Bounce blocks (slime, beds, shelf mushroom) and a sulfur cube underfoot throw a
+            // landing player back up; a bubble column or a potent-sulfur geyser pushes them.
+            // Slime keeps its full grace. Beds and the shelf mushroom only count once they have
+            // actually thrown the player back up — a fast descent onto them followed by a rise —
+            // so standing or walking on them changes nothing.
+            boolean nearSlimeBlock = isNearSlimeBlock(to);
+            boolean bouncyEntity = movement.getY() > 0.1 && isOnBouncyEntity(player);
+            boolean bedBounce = !nearSlimeBlock && movement.getY() > 0
+                    && isBounce(lastFastDescent.get(playerId), now)
+                    && (isNearBedBounceBlock(from) || isNearBedBounceBlock(to));
+            if (movement.getY() < -BOUNCE_MIN_IMPACT) lastFastDescent.put(playerId, now);
+            boolean nearSlime = nearSlimeBlock || bouncyEntity || bedBounce;
+            boolean nearGeyser = geyserProbe.get();
+            boolean nearBubble = nearGeyser || isNearBubbleColumn(to);
 
-            // Slime block / bubble column allow faster vertical movement
+            // Bounce blocks / pushing columns allow faster vertical movement
             if (nearSlime || nearBubble) {
                 maxVerticalSpeed *= 2.0; // Double vertical speed allowance
             }
 
             // Slime launchers throw a player sideways as readily as upwards, and the bounce
             // itself needs no key input. Computed here so the horizontal checks see it too.
-            if (nearSlime) recentSlime.put(playerId, now);
+            // A geyser throws a player up to twenty blocks high, far beyond what the scans
+            // can follow, so it is remembered the same way. A bed or shelf-mushroom bounce is
+            // remembered for the vertical checks only.
+            if (nearSlimeBlock || bouncyEntity || nearGeyser) recentSlime.put(playerId, now);
+            if (bedBounce) recentBounce.put(playerId, now);
             Long slimeTs = recentSlime.get(playerId);
             boolean slimeGrace = slimeTs != null && (now - slimeTs) < SLIME_GRACE_MS;
+            Long bounceTs = recentBounce.get(playerId);
+            boolean bounceGrace = slimeGrace || (bounceTs != null && (now - bounceTs) < SLIME_GRACE_MS);
+
+            // Air drag, friction or bounciness changed by an attribute (26.2): neither the
+            // speed caps nor the gravity model describe this player's motion any more.
+            boolean modifiedPhysics = CheckMath.hasModifiedPhysics(player);
+            boolean speedGrace = slimeGrace || modifiedPhysics;
+
+            // A spear lunge throws the player forwards without any velocity packet.
+            double lungeAllowance = lungeAllowance(player, playerId, now);
+            double speedCap = maxSpeed + lungeAllowance;
 
             // On-foot states (vertical and item-use checks use their own physics)
             boolean groundType = moveType == MovementType.WALKING
@@ -908,7 +1053,7 @@ public class MovementChecker implements Listener {
             // Check horizontal speed (if enabled)
             // This ensures we catch both walking and sprinting violations
             boolean speedFlagged = false;
-            if (config.speedDetectionEnabled() && horizontalDist > maxSpeed) {
+            if (config.speedDetectionEnabled() && horizontalDist > speedCap) {
                 suspect = true;
                 int consecutive = consecutiveSpeedViolations.merge(playerId, 1, Integer::sum);
 
@@ -917,15 +1062,15 @@ public class MovementChecker implements Listener {
                     // Checked here rather than at the top: both are displacement the player
                     // never asked for, and the piston lookup should only be paid for on the
                     // would-flag path.
-                    if (!slimeGrace && !pistonExplainsHorizontal(to, horizontalDist, maxSpeed)) {
+                    if (!speedGrace && !pistonExplainsHorizontal(to, horizontalDist, speedCap)) {
                         setBack |= handleViolation(player, "SPEED",
-                            lang.format("alert.speed", typeName(moveType), horizontalDist, maxSpeed),
+                            lang.format("alert.speed", typeName(moveType), horizontalDist, speedCap),
                             horizontalDist, to);
                         speedFlagged = true;
                     }
                     consecutiveSpeedViolations.put(playerId, 0);
                 }
-            } else if (horizontalDist < maxSpeed * 0.7) {
+            } else if (horizontalDist < speedCap * 0.7) {
                 // Only reset if speed is significantly below threshold (70%)
                 // This prevents a single valid move from washing out violations too quickly
                 consecutiveSpeedViolations.compute(playerId, (k, v) -> {
@@ -939,7 +1084,7 @@ public class MovementChecker implements Listener {
             // builds a streak while averaging well over the cap. See checkSpeedBudget.
             if (config.speedDetectionEnabled()) {
                 int budget = checkSpeedBudget(player, playerId, moveType, rawHorizontal, elapsedTicks,
-                        maxSpeed, slimeGrace, speedFlagged, to);
+                        maxSpeed, speedGrace, speedFlagged, to, now);
                 if (budget != BUDGET_OK) suspect = true;
                 if (budget == BUDGET_SETBACK) setBack = true;
             }
@@ -947,7 +1092,7 @@ public class MovementChecker implements Listener {
             // NoSlow: moving too fast while using an item (eating, drawing a bow,
             // blocking with a shield, charging a trident…) which vanilla slows down.
             // isHandRaised() reflects the (client-influenced) item-use state.
-            if (config.noSlowDetectionEnabled() && groundType && player.isHandRaised()) {
+            if (config.noSlowDetectionEnabled() && groundType && player.isHandRaised() && !modifiedPhysics) {
                 double noSlowCap = getMaxSpeed(MovementType.WALKING, player) * config.noSlowSpeedMultiplier();
                 if (horizontalDist > noSlowCap) {
                     suspect = true;
@@ -962,6 +1107,14 @@ public class MovementChecker implements Listener {
                 }
             } else {
                 consecutiveNoSlow.remove(playerId);
+            }
+
+            // Sprinting that a vanilla client would have ended by itself.
+            if (groundType) {
+                suspect |= checkSprintRules(player, playerId, movement, horizontalDist, now,
+                        speedGrace || lungeAllowance > 0, to);
+            } else {
+                clearSprintState(playerId);
             }
 
             // Every check below reads blocks, and several of them read the player's
@@ -979,8 +1132,8 @@ public class MovementChecker implements Listener {
             // Vertical/fly checks only apply to on-foot movement. Swimming and
             // climbing have their own vertical physics and would false-positive.
             if (groundType && chunkKnown) {
-                // (slimeGrace is computed above, where the horizontal checks can see it too —
-                // a bounce launches far higher and further than the 2-block scan can follow.)
+                // (bounceGrace is computed above, where the horizontal checks can see the slime
+                // part too — a bounce launches far higher than the 2-block scan can follow.)
 
                 // Towering up: the player is building the ground they stand on, one block per
                 // jump. Applied to the hover check only — the vertical-burst and GroundSpoof
@@ -997,8 +1150,9 @@ public class MovementChecker implements Listener {
                         // Reduced gravity means hanging in the air without descending is
                         // legitimate — which is precisely what the hover check looks for.
                         || CheckMath.hasReducedGravity(player)
+                        || modifiedPhysics
                         || isInFallSlowingBlock(player)
-                        || isNearLiquid(player) || slimeGrace || nearBubble;
+                        || isNearLiquid(player) || bounceGrace || nearBubble;
 
                 // One ground scan answers both vertical checks: "clearly airborne" (hover)
                 // and "high above ground" (GroundSpoof) differ only in the depth they
@@ -1071,7 +1225,7 @@ public class MovementChecker implements Listener {
                             // far below the feet, -1 = nothing within reach.
                             if (config.debugMode()) {
                                 plugin.getLogger().info(String.format(java.util.Locale.ROOT,
-                                        "[HOVER-DEBUG] %s y=%.2f dy=%.3f abfall=%.3f (max %.3f) "
+                                        "[HOVER-DEBUG] %s y=%.2f dy=%.3f drop=%.3f (max %.3f) "
                                                 + "support=%d onGround=%b pillarGrace=%b ticks=%.1f (%d/%d)",
                                         player.getName(), to.getY(), movement.getY(), drop,
                                         config.flyHoverMaxDrop(), support,
@@ -1293,7 +1447,7 @@ public class MovementChecker implements Listener {
      */
     private int checkSpeedBudget(Player player, UUID playerId, MovementType moveType, double distance,
                                  double elapsedTicks, double maxSpeed, boolean slimeGrace,
-                                 boolean alreadyFlagged, Location to) {
+                                 boolean alreadyFlagged, Location to, long now) {
         double capacity = maxSpeed * SPEED_BUDGET_TICKS;
         double[] b = speedBudget.computeIfAbsent(playerId, k -> new double[]{capacity, 0.0, 0.0});
         double available = Math.min(b[0] + maxSpeed * elapsedTicks, capacity);
@@ -1304,6 +1458,16 @@ public class MovementChecker implements Listener {
         b[0] = available - distance;
         b[1] += distance;
         b[2] += elapsedTicks;
+        // A lunge's travel is paid from its own one-off credit, outside the capacity cap.
+        if (b[0] < 0) {
+            double[] credit = lungeCredit.get(playerId);
+            if (credit != null && now <= credit[1] && credit[0] > 0) {
+                double take = Math.min(-b[0], credit[0]);
+                credit[0] -= take;
+                b[0] += take;
+                b[1] -= take;
+            }
+        }
         if (b[0] >= 0) return BUDGET_OK;
         if (alreadyFlagged) {
             // The per-sample check has just reported this stretch; don't report it twice.
@@ -1375,6 +1539,384 @@ public class MovementChecker implements Listener {
         return handleViolation(player, "FLY", details, rise, to) ? GRAVITY_SETBACK : GRAVITY_SUSPECT;
     }
 
+    // ==================== Spear lunge ====================
+
+    /**
+     * Extra horizontal speed per tick a recent lunge accounts for, 0 when there is none.
+     *
+     * <p>The impulse is 0.458 blocks per tick per Lunge level and stronger airborne; the
+     * airborne factor is always applied, since whether the stab was made in the air is not
+     * known here. Vanilla applies no lunge while riding, gliding or in water. Each lunge also
+     * earns a one-off credit for the speed budget covering the distance the impulse carries
+     * before drag eats it; a newer lunge replaces the credit rather than adding to it, so
+     * stabbing repeatedly never buys more than one lunge's worth of travel at a time.
+     */
+    double lungeAllowance(Player player, UUID playerId, long now) {
+        if (lungeTracker == null) return 0.0;
+        LungeTracker.Lunge lunge = lungeTracker.lastLunge(playerId);
+        if (lunge == null) return 0.0;
+        if (player.isInsideVehicle() || player.isGliding() || player.isInWater()) return 0.0;
+        double impulse = Constants.LUNGE_IMPULSE_PER_LEVEL * lunge.level() * Constants.LUNGE_AIR_FACTOR;
+        // A stab following the previous one within the spacing belongs to the same lunge: a
+        // burst of STAB packets must not keep restarting the window.
+        double[] credit = lungeCredit.get(playerId);
+        long stab = lunge.timeMs();
+        if (credit == null || stab - (long) credit[3] >= Constants.LUNGE_MIN_SPACING_MS) {
+            if (now - stab >= 0 && now - stab <= LUNGE_CREDIT_MS) {
+                double remaining = credit != null && now <= credit[1] ? credit[0] : 0.0;
+                lungeCredit.put(playerId, new double[]{
+                        Math.max(remaining, impulse * Constants.LUNGE_BUDGET_TICKS), stab + LUNGE_CREDIT_MS,
+                        stab, stab});
+            }
+        } else {
+            if (stab > (long) credit[3]) credit[3] = stab;
+            stab = (long) credit[2];
+        }
+        long age = now - stab;
+        return age >= 0 && age <= Constants.LUNGE_WINDOW_MS ? impulse : 0.0;
+    }
+
+    // ==================== Fall measurement / NoFall ====================
+
+    /**
+     * Follow the player's descent as the server sees it (see {@link FallTracker}) and judge
+     * landings. Runs for NoFall and for the mace check, which reads the measured distance.
+     */
+    private void trackFall(Player player, UUID id, Location from, Location to, long now, GeyserProbe geyserProbe) {
+        boolean noFall = config.noFallDetectionEnabled();
+        if (!noFall && !config.maceDetectionEnabled()) return;
+        resolvePendingLanding(player, now);
+        if (!neighbourhoodLoaded(to)) {
+            disturbFall(id, now);
+            return;
+        }
+        // Places where vanilla resets the fall distance itself: water, climbables, webs…
+        if (resetsFall(player, to)) {
+            landFall(id, now);
+            return;
+        }
+        // …and everything whose effect on the fall the measurement does not model.
+        if (disturbsFall(player, id, to, now, geyserProbe)) {
+            disturbFall(id, now);
+            return;
+        }
+        double dy = to.getY() - from.getY();
+        if (dy < 0) fallTracker.addDescent(id, -dy, now);
+
+        if (dy <= 1.0e-9 && isLandedAt(player, to)) {
+            FallTracker.State fall = fallTracker.state(id);
+            boolean counted = noFallCounted.contains(id);
+            landFall(id, now);
+            if (noFall && fall.reliable() && !counted && fall.distance() > 0) {
+                checkLanding(player, id, fall.distance(), to, now);
+            }
+            return;
+        }
+        if (Math.abs(dy) < 1.0e-4) {
+            // Not descending and no block underneath: standing on an entity (boat, another
+            // player). Vanilla resets on it too.
+            fallTracker.resetKeepingTrust(id, now);
+            noFallSpoofSamples.remove(id);
+            return;
+        }
+        if (noFall && dy < 0) checkMidAirReset(player, id, to);
+    }
+
+    private void landFall(UUID id, long now) {
+        fallTracker.land(id, now);
+        noFallSpoofSamples.remove(id);
+        noFallCounted.remove(id);
+    }
+
+    private void disturbFall(UUID id, long now) {
+        fallTracker.disturb(id, now);
+        noFallSpoofSamples.remove(id);
+        noFallCounted.remove(id);
+    }
+
+    /** True where vanilla resets fall distance: liquids, climbables, webs, powder snow, honey walls. */
+    private boolean resetsFall(Player player, Location to) {
+        if (player.isInWater() || player.isSwimming() || player.isClimbing()) return true;
+        if (isInFallSlowingBlock(to)) return true;
+        org.bukkit.block.Block feet = to.getBlock();
+        return resetsFallAt(feet) || resetsFallAt(feet.getRelative(0, 1, 0));
+    }
+
+    private static boolean resetsFallAt(org.bukkit.block.Block block) {
+        Material m = block.getType();
+        if (m.isAir()) return false;
+        if (m == Material.WATER || m == Material.LAVA || m == Material.BUBBLE_COLUMN
+                || m == Material.COBWEB || m == Material.POWDER_SNOW || m == Material.SCAFFOLDING
+                || m == Material.SWEET_BERRY_BUSH) return true;
+        if (isClimbableMaterial(m)) return true;
+        if (m.isBlock() && org.bukkit.Tag.FALL_DAMAGE_RESETTING.isTagged(m)) return true;
+        return block.getBlockData() instanceof org.bukkit.block.data.Waterlogged w && w.isWaterlogged();
+    }
+
+    /** True when something acts on the fall that the measurement does not model. */
+    private boolean disturbsFall(Player player, UUID id, Location to, long now, GeyserProbe geyserProbe) {
+        if (player.hasPotionEffect(PotionEffectType.SLOW_FALLING)
+                || player.hasPotionEffect(PotionEffectType.LEVITATION)) return true;
+        if (player.getAllowFlight() || player.isFlying() || player.isGliding() || player.isRiptiding()
+                || player.isInsideVehicle()) return true;
+        if (CheckMath.hasReducedGravity(player) || CheckMath.hasModifiedPhysics(player)) return true;
+        Long bounce = recentSlime.get(id);
+        if (bounce != null && now - bounce < SLIME_GRACE_MS) return true;
+        Long bedBounce = recentBounce.get(id);
+        if (bedBounce != null && now - bedBounce < SLIME_GRACE_MS) return true;
+        // Slime changes the fall near it. Beds and the shelf mushroom do not while the player
+        // merely stands or walks on them: landing on them is an ordinary landing (the landing
+        // judgement excuses them as fall-cushioning blocks), and an actual bounce is covered by
+        // the bounce grace above.
+        if (isNearSlimeBlock(to) || isNearBubbleColumn(to) || geyserProbe.get()) return true;
+        return pistonHoldsUp(to);
+    }
+
+    /**
+     * True when the player's feet rest exactly on the collision top of a block under their
+     * footprint: the feet block (slabs, beds, snow layers) or the one below.
+     */
+    private boolean isLandedAt(Player player, Location to) {
+        double feetY = to.getY();
+        int base = (int) Math.floor(feetY);
+        double half = 0.3 * CheckMath.scale(player);
+        double[] dx = {0, half, -half, half, -half};
+        double[] dz = {0, half, half, -half, -half};
+        for (int i = 0; i < dx.length; i++) {
+            int bx = (int) Math.floor(to.getX() + dx[i]);
+            int bz = (int) Math.floor(to.getZ() + dz[i]);
+            for (int k = 0; k <= 1; k++) {
+                if (landsOn(to.getWorld().getBlockAt(bx, base - k, bz), feetY)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean landsOn(org.bukkit.block.Block block, double feetY) {
+        Material m = block.getType();
+        if (m.isAir()) return false;
+        try {
+            if (block.isPassable()) return false;
+            org.bukkit.util.BoundingBox box = block.getBoundingBox();
+            return box.getVolume() > 0 && Math.abs(box.getMaxY() - feetY) < 0.01;
+        } catch (Throwable t) {
+            // Collision shape unavailable: judge full blocks by their top face.
+            return m.isSolid() && Math.abs(block.getY() + 1 - feetY) < 0.01;
+        }
+    }
+
+    /**
+     * A measured fall well past the safe distance ended on ordinary ground. Whether fall
+     * damage followed is only known a little later — the server applies it after the move
+     * event — so the landing is parked and resolved by {@link #resolvePendingLanding}.
+     */
+    private void checkLanding(Player player, UUID id, double fallen, Location to, long now) {
+        double safe = CheckMath.safeFallDistance(player);
+        var jump = player.getPotionEffect(PotionEffectType.JUMP_BOOST);
+        if (jump != null) safe += jump.getAmplifier() + 1;
+        double multiplier = CheckMath.fallDamageMultiplier(player);
+        if (multiplier <= 0) return;
+        // Feather Falling lowers the damage; each level is treated as one more safe block.
+        var boots = player.getInventory().getBoots();
+        int feather = boots == null ? 0 : boots.getEnchantmentLevel(org.bukkit.enchantments.Enchantment.FEATHER_FALLING);
+        double excess = (fallen - safe) * Math.min(multiplier, 1.0);
+        if (excess < config.noFallMinExtraDistance() + feather) return;
+        if (player.isInvulnerable() || player.getNoDamageTicks() > 0) return;
+        if (!fallDamageRuleOn(player)) return;
+        if (landingSoftened(player, to)) return;
+        Long damage = lastFallDamage.get(id);
+        if (damage != null && damage >= now - 1000) return; // already arrived
+        pendingLandings.put(id, new PendingLanding(fallen, now, to.clone()));
+        try {
+            dev.boondock.bsanticheat.util.Scheduler.runForEntityLater(plugin, player,
+                    () -> resolvePendingLanding(player, System.currentTimeMillis()),
+                    Constants.NOFALL_RESOLVE_MS / 50 + 2);
+        } catch (Throwable ignored) {
+            // no entity scheduler: resolved on the next move instead
+        }
+    }
+
+    private static boolean fallDamageRuleOn(Player player) {
+        try {
+            Boolean rule = player.getWorld().getGameRuleValue(org.bukkit.GameRule.FALL_DAMAGE);
+            return rule == null || rule;
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    /**
+     * Landing blocks that reduce or cancel fall damage — hay, honey, beds, slime, the other
+     * bounce blocks — or reset it, under any footprint corner at the feet or just below.
+     */
+    private boolean landingSoftened(Player player, Location to) {
+        int base = (int) Math.floor(to.getY());
+        double half = 0.3 * CheckMath.scale(player);
+        double[] dx = {0, half, -half, half, -half};
+        double[] dz = {0, half, half, -half, -half};
+        for (int i = 0; i < dx.length; i++) {
+            int bx = (int) Math.floor(to.getX() + dx[i]);
+            int bz = (int) Math.floor(to.getZ() + dz[i]);
+            for (int k = 0; k <= 1; k++) {
+                org.bukkit.block.Block b = to.getWorld().getBlockAt(bx, base - k, bz);
+                Material m = b.getType();
+                if (m == Material.HAY_BLOCK || m == Material.HONEY_BLOCK
+                        || GameCompat.isBounceBlock(m) || resetsFallAt(b)) return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Settle a parked landing once the fall damage event has had time to arrive. No damage by
+     * then counts as one suspicious fall. Package-private so tests can drive the clock.
+     */
+    void resolvePendingLanding(Player player, long now) {
+        UUID id = player.getUniqueId();
+        PendingLanding landing = pendingLandings.get(id);
+        if (landing == null || now - landing.at() < Constants.NOFALL_RESOLVE_MS) return;
+        if (!pendingLandings.remove(id, landing)) return;
+        Long damage = lastFallDamage.get(id);
+        if (damage != null && damage >= landing.at() - 1000) return;
+        if (player.isDead() || !player.isOnline()) return;
+        noteNoFall(player, lang.format("alert.nofall_landing", landing.distance()),
+                landing.distance(), landing.where(), now);
+    }
+
+    /**
+     * Vanilla's fall distance fell far behind the measured one while the server finds nothing
+     * underneath: the client claimed ground contact in mid-air, which resets it.
+     */
+    private void checkMidAirReset(Player player, UUID id, Location to) {
+        FallTracker.State fall = fallTracker.state(id);
+        double threshold = CheckMath.safeFallDistance(player) + config.noFallMinExtraDistance();
+        if (!fall.reliable() || fall.distance() < threshold || noFallCounted.contains(id)) {
+            noFallSpoofSamples.remove(id);
+            return;
+        }
+        double claimed = player.getFallDistance();
+        if (claimed + Math.max(2.0, fall.distance() * 0.5) >= fall.distance()) {
+            noFallSpoofSamples.remove(id);
+            return;
+        }
+        if (supportDepth(player, GROUNDSPOOF_SCAN_DEPTH) >= 0 || hasEntitySupport(player)) {
+            noFallSpoofSamples.remove(id);
+            return;
+        }
+        int c = noFallSpoofSamples.merge(id, 1, Integer::sum);
+        if (c < Constants.NOFALL_SPOOF_SAMPLES) return;
+        noFallSpoofSamples.remove(id);
+        noteNoFall(player, lang.format("alert.nofall_spoof", fall.distance(), claimed),
+                fall.distance(), to, System.currentTimeMillis());
+    }
+
+    /** One suspicious fall; flags once the streak within the window reaches the threshold. */
+    private void noteNoFall(Player player, String details, double value, Location where, long now) {
+        UUID id = player.getUniqueId();
+        noFallCounted.add(id);
+        long[] st = noFallStreak.compute(id, (k, v) -> {
+            if (v == null || now - v[1] > NOFALL_STREAK_WINDOW_MS) return new long[]{1, now};
+            v[0]++;
+            v[1] = now;
+            return v;
+        });
+        if (config.debugMode()) {
+            plugin.getLogger().info("[NOFALL-DEBUG] " + player.getName() + ": " + details
+                    + " (" + st[0] + "/" + config.noFallViolations() + ")");
+        }
+        if (st[0] < config.noFallViolations()) return;
+        noFallStreak.remove(id);
+        handleViolation(player, "NOFALL", details, value, where, false);
+    }
+
+    // ==================== Sprint rules ====================
+
+    /**
+     * Sprinting a 1.21.2+ client ends by itself: with a food level of 6 or less (unless it
+     * may fly) and under Blindness. Kept up for longer than {@code sprint_min_duration_ms}
+     * — which absorbs the latency before the client learns of the change — it is not vanilla.
+     * Omni-sprint (opt-in): sprinting on the ground while moving well away from the view.
+     *
+     * @return true while a streak is building (the position is then no setback target)
+     */
+    private boolean checkSprintRules(Player player, UUID id, Vector movement, double horizontalDist,
+                                     long now, boolean momentumGrace, Location to) {
+        boolean sprinting = player.isSprinting();
+        boolean suspect = false;
+        if (config.sprintDetectionEnabled() && sprinting && !player.getAllowFlight() && knowsSprintStopRules(player)) {
+            if (player.getFoodLevel() <= 6) {
+                suspect |= sustained(player, id, sprintHungerSince, now,
+                        lang.format("alert.sprint_hunger", player.getFoodLevel()), to);
+            } else {
+                sprintHungerSince.remove(id);
+            }
+            if (player.hasPotionEffect(PotionEffectType.BLINDNESS)) {
+                suspect |= sustained(player, id, sprintBlindSince, now, lang.get("alert.sprint_blind"), to);
+            } else {
+                sprintBlindSince.remove(id);
+            }
+        } else {
+            sprintHungerSince.remove(id);
+            sprintBlindSince.remove(id);
+        }
+
+        if (config.sprintOmniDetectionEnabled() && sprinting && player.isOnGround()
+                && horizontalDist > 0.15 && !momentumGrace && !player.isInWater() && !iceMomentum(id, now)) {
+            double angle = angleFromView(movement, to.getYaw());
+            if (angle > config.sprintOmniMaxAngle()) {
+                suspect = true;
+                int c = consecutiveOmniSprint.merge(id, 1, Integer::sum);
+                if (c >= config.sprintOmniViolations()) {
+                    consecutiveOmniSprint.remove(id);
+                    handleViolation(player, "SPRINT", lang.format("alert.sprint_omni", angle), angle, to, false);
+                }
+            } else {
+                consecutiveOmniSprint.remove(id);
+            }
+        } else {
+            consecutiveOmniSprint.remove(id);
+        }
+        return suspect;
+    }
+
+    /** Time a condition from its first sample; flags once it lasted the minimum duration. */
+    private boolean sustained(Player player, UUID id, Map<UUID, Long> since, long now, String details, Location to) {
+        long start = since.computeIfAbsent(id, k -> now);
+        long held = now - start;
+        if (held < config.sprintMinDurationMs()) return true;
+        since.put(id, now); // next report only after another full duration
+        handleViolation(player, "SPRINT", details, held, to, false);
+        return true;
+    }
+
+    /** Older clients (via ViaVersion) keep a running sprint on low food and Blindness. */
+    private static boolean knowsSprintStopRules(Player player) {
+        int protocol = Exemptions.clientProtocol(player);
+        return protocol < 0 || protocol >= PROTOCOL_SPRINT_STOP_RULES;
+    }
+
+    private boolean iceMomentum(UUID id, long now) {
+        double[] ice = recentIce.get(id);
+        return ice != null && now - (long) ice[0] < ICE_MOMENTUM_GRACE_MS;
+    }
+
+    /** Angle in degrees between horizontal movement and the view direction (yaw). */
+    static double angleFromView(Vector movement, float yaw) {
+        double len = Math.hypot(movement.getX(), movement.getZ());
+        if (len < 1.0e-9) return 0.0;
+        double rad = Math.toRadians(yaw);
+        double lookX = -Math.sin(rad);
+        double lookZ = Math.cos(rad);
+        double cos = (movement.getX() * lookX + movement.getZ() * lookZ) / len;
+        return Math.toDegrees(Math.acos(Math.max(-1.0, Math.min(1.0, cos))));
+    }
+
+    private void clearSprintState(UUID id) {
+        sprintHungerSince.remove(id);
+        sprintBlindSince.remove(id);
+        consecutiveOmniSprint.remove(id);
+    }
+
     /** Record a position as the new baseline without judging the move that led to it. */
     private void rebaseline(UUID playerId, Location to) {
         rebaseline(playerId, to, true, true);
@@ -1399,6 +1941,12 @@ public class MovementChecker implements Listener {
         airWindows.remove(playerId);
         if (resetBudget) speedBudget.remove(playerId);
         if (legit) lastLegitLocations.put(playerId, to.clone());
+        // Whatever made this move unjudgeable (grace, exemption, gap, vehicle, flight) also
+        // breaks the fall measurement and the sprint timers.
+        fallTracker.disturb(playerId, now);
+        noFallSpoofSamples.remove(playerId);
+        noFallCounted.remove(playerId);
+        clearSprintState(playerId);
     }
 
     /**
@@ -1480,6 +2028,10 @@ public class MovementChecker implements Listener {
         elytraSampleAt.put(playerId, now);
 
         double max = moveType == MovementType.ELYTRA ? config.elytraMaxSpeed() : config.riptideMaxSpeed();
+        Long riptideAt = lastRiptide.get(playerId);
+        if (moveType == MovementType.ELYTRA && riptideAt != null && now - riptideAt < RIPTIDE_GRACE_MS) {
+            max += config.riptideMaxSpeed();
+        }
         max *= CheckMath.pingSlack(effectivePing(player));
 
         if (bps > max) {
@@ -1505,6 +2057,15 @@ public class MovementChecker implements Listener {
      *         the last-known position with the illegal location
      */
     private boolean handleViolation(Player player, String type, String details, double value, Location location) {
+        return handleViolation(player, type, details, value, location, true);
+    }
+
+    /**
+     * @param allowSetback false for checks whose evidence is already in the past (a landing,
+     *                     a sprint), where teleporting the player back undoes nothing
+     */
+    private boolean handleViolation(Player player, String type, String details, double value, Location location,
+                                    boolean allowSetback) {
         // Log to database
         if (database != null) {
             database.logAsync(player.getUniqueId(), "anticheat_" + type.toLowerCase(), value,
@@ -1531,7 +2092,7 @@ public class MovementChecker implements Listener {
         // teleportAsync (not teleport): a synchronous teleport is unsupported on Folia's
         // region threads, and this runs inside a PlayerMoveEvent handler. The pending mark is
         // set first because the teleport event may fire before teleportAsync returns.
-        if (config.punishmentsSetback()) {
+        if (allowSetback && config.punishmentsSetback()) {
             UUID id = player.getUniqueId();
             Location back = lastLegitLocations.get(id);
             if (back == null) back = lastLocations.get(id);
@@ -1760,14 +2321,122 @@ public class MovementChecker implements Listener {
                 loc, Constants.ICE_SPEED_MULTIPLIER, Constants.BLUE_ICE_SPEED_MULTIPLIER);
     }
 
+    /** Whether a rise now is the rebound of the fast descent recorded at {@code descentAt}. */
+    static boolean isBounce(Long descentAt, long now) {
+        return descentAt != null && now - descentAt >= 0 && now - descentAt <= BOUNCE_REVERSAL_MS;
+    }
+
+    /** True when a slime block is at the feet or up to two blocks below. */
+    static boolean isNearSlimeBlock(Location loc) {
+        org.bukkit.block.Block feet = loc.getBlock();
+        return feet.getType() == Material.SLIME_BLOCK
+                || feet.getRelative(0, -1, 0).getType() == Material.SLIME_BLOCK
+                || feet.getRelative(0, -2, 0).getType() == Material.SLIME_BLOCK;
+    }
+
     /**
-     * Check if player is near a slime block (allows high bounces).
+     * True when a bed or shelf mushroom is at the feet or up to two blocks below. The feet
+     * block matters: both are lower than a full cube, so a player standing on one has it in
+     * their own block position.
      */
-    private boolean isNearSlimeBlock(Location loc) {
-        // Check 2 blocks below for slime blocks
-        Material below1 = loc.getBlock().getRelative(0, -1, 0).getType();
-        Material below2 = loc.getBlock().getRelative(0, -2, 0).getType();
-        return below1 == Material.SLIME_BLOCK || below2 == Material.SLIME_BLOCK;
+    static boolean isNearBedBounceBlock(Location loc) {
+        org.bukkit.block.Block feet = loc.getBlock();
+        return GameCompat.isBedLikeBounceBlock(feet.getType())
+                || GameCompat.isBedLikeBounceBlock(feet.getRelative(0, -1, 0).getType())
+                || GameCompat.isBedLikeBounceBlock(feet.getRelative(0, -2, 0).getType());
+    }
+
+    /**
+     * True when a sulfur cube (26.2, a bouncy mob) is just below the player. Only asked while
+     * rising, which is when a bounce shows, and only on servers that have the mob.
+     */
+    private boolean isOnBouncyEntity(Player player) {
+        if (!SULFUR_CUBE_EXISTS) return false;
+        double feetY = player.getLocation().getY();
+        for (Entity e : player.getNearbyEntities(1.0, 2.5, 1.0)) {
+            if (!GameCompat.isType(e, GameCompat.SULFUR_CUBE)) continue;
+            double top = e.getBoundingBox().getMaxY();
+            if (top <= feetY + 0.5 && top >= feetY - 2.5) return true;
+        }
+        return false;
+    }
+
+    private static final boolean SULFUR_CUBE_EXISTS = entityTypeExists(GameCompat.SULFUR_CUBE);
+
+    private static boolean entityTypeExists(String name) {
+        try {
+            for (EntityType t : EntityType.values()) {
+                if (t.name().equals(name)) return true;
+            }
+        } catch (Throwable ignored) {
+            // type listing unavailable
+        }
+        return false;
+    }
+
+    /**
+     * True when the player is inside or above a potent-sulfur geyser (26.2): a water column
+     * standing on potent sulfur pushes everything above it upwards, up to about twenty blocks
+     * high. Scans down through air and water only, so on ordinary ground it stops at the
+     * first block below the feet.
+     */
+    static boolean isInGeyser(Location loc) {
+        return isInGeyser(loc, true);
+    }
+
+    /**
+     * {@link #isInGeyser(Location)} with a cheap pre-filter: the scan down only runs on servers
+     * that have potent sulfur, and only while the player rises or has water at or directly
+     * below the feet — a geyser pushes upwards, and its column is water.
+     */
+    static boolean isInGeyser(Location loc, boolean rising) {
+        if (GameCompat.POTENT_SULFUR == null) return false;
+        if (!geyserScanWorthwhile(loc, rising)) return false;
+        return scanGeyser(loc);
+    }
+
+    /** The pre-filter of {@link #isInGeyser(Location, boolean)}, independent of the server version. */
+    static boolean geyserScanWorthwhile(Location loc, boolean rising) {
+        if (rising) return true;
+        org.bukkit.block.Block feet = loc.getBlock();
+        return isWaterColumn(feet.getType()) || isWaterColumn(feet.getRelative(0, -1, 0).getType());
+    }
+
+    private static boolean isWaterColumn(Material m) {
+        return m == Material.WATER || m == Material.BUBBLE_COLUMN;
+    }
+
+    /** One move event's geyser lookup, computed at most once and only when asked. */
+    static final class GeyserProbe {
+        private final Location to;
+        private final boolean rising;
+        private int state; // 0 not computed, 1 no, 2 yes
+
+        GeyserProbe(Location to, boolean rising) {
+            this.to = to;
+            this.rising = rising;
+        }
+
+        boolean get() {
+            if (state == 0) state = isInGeyser(to, rising) ? 2 : 1;
+            return state == 2;
+        }
+    }
+
+    private static boolean scanGeyser(Location loc) {
+        org.bukkit.block.Block b = loc.getBlock();
+        int water = 0;
+        for (int i = 0; i <= GEYSER_SCAN_DEPTH; i++) {
+            Material m = b.getRelative(0, -i, 0).getType();
+            if (m == Material.WATER || m == Material.BUBBLE_COLUMN) {
+                water++;
+            } else if (m == GameCompat.POTENT_SULFUR) {
+                return water > 0;
+            } else if (!m.isAir()) {
+                return false;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1811,6 +2480,7 @@ public class MovementChecker implements Listener {
         consecutiveElytra.remove(playerId);
         elytraSampleFrom.remove(playerId);
         elytraSampleAt.remove(playerId);
+        lastRiptide.remove(playerId);
         lastAscentDy.remove(playerId);
         consecutiveAscent.remove(playerId);
         recentKnockback.remove(playerId);
@@ -1818,8 +2488,18 @@ public class MovementChecker implements Listener {
         recentJoin.remove(playerId);
         momentumGraceUntil.remove(playerId);
         recentSlime.remove(playerId);
+        recentBounce.remove(playerId);
+        lastFastDescent.remove(playerId);
         recentPillar.remove(playerId);
         recentIce.remove(playerId);
+        lungeCredit.remove(playerId);
+        pendingLandings.remove(playerId);
+        lastFallDamage.remove(playerId);
+        noFallStreak.remove(playerId);
+        noFallSpoofSamples.remove(playerId);
+        noFallCounted.remove(playerId);
+        clearSprintState(playerId);
+        fallTracker.cleanup(playerId);
     }
 
     /**

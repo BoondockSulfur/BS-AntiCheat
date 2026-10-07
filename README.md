@@ -1,6 +1,6 @@
 # BSAntiCheat
 
-A lightweight, false-positive-conscious anti-cheat for **Paper 1.21.10+** — with full **Folia**
+A lightweight, false-positive-conscious anti-cheat for **Paper 1.21.10 – 26.3** — with full **Folia**
 support. It covers movement, combat, world-interaction, inventory and packet-level cheats,
 logs everything to SQLite, and can act through a configurable violation-level punishment
 system. Built to be calibrated for *your* server rather than flag your legit players.
@@ -14,7 +14,10 @@ system. Built to be calibrated for *your* server rather than flag your legit pla
 ## Features
 
 **Movement**
-- Speed, Fly (vertical burst + sustained hover), Teleport, GroundSpoof, Elytra/Riptide speed
+- Speed (per sample and as a real-time distance budget), Fly (vertical burst, hover, free-fall
+  gravity model), Teleport, GroundSpoof, Elytra/Riptide speed, Sprint rules (hunger, blindness)
+- 26.x mechanics: spear Lunge, wind charges, beds/shelf mushrooms/sulfur geysers, new mounts
+  and the physics attributes (bounciness, friction, air drag)
 - Server-authoritative on-ground check (not the spoofable client flag)
 - Lag compensation via a real **transaction-latency** system (ping/pong), not the coarse `getPing()`
 - Grace windows for teleport, knockback, join/respawn/world-change, elytra landings and
@@ -28,13 +31,14 @@ system. Built to be calibrated for *your* server rather than flag your legit pla
   knockback grace, so it is not counted
 - Speed and vertical deltas are judged **per tick, not per packet** — a move event is not
   reliably one tick, and a slow connection delivers several ticks of travel in one event.
-  The catch-up move after a packet gap (>400 ms of silence) is skipped entirely
+  Sub-tick events are accumulated rather than skipped
 - Block-reading checks stand down where the surrounding chunks are not in memory, rather than
   reading "no block found" as "nothing below the player"
 
 **Combat**
-- Reach (measured to the hitbox surface, honours the interaction-range attribute),
-  KillAura (aim angle + multi-target), AimSnap (robotic snap-back rotation)
+- Reach (measured to the hitbox surface against the target's position history, honours the
+  interaction-range attribute and the spear's attack range), KillAura (aim angle + multi-target),
+  AimSnap (robotic snap-back rotation)
 
 **World**
 - Nuker, FastPlace, Scaffold (blind placement), FastBreak (per-block dig time vs. expected)
@@ -49,7 +53,8 @@ system. Built to be calibrated for *your* server rather than flag your legit pla
   ordinary mining or swinging over the limit. The flip side is a blind spot the check cannot
   close: an autoclicker running at ~20 CPS produces the packet stream a held button produces,
   because that *is* one swing per tick. Above that rate the cadence separates them again
-- BadPackets, Timer, crash protection (oversized book/sign packets), packet-flood
+- BadPackets, Timer (client tick-end packet), crash protection (oversized book/sign packets),
+  packet-flood
 
 **Vehicle** — Boat-Fly and per-type vehicle speed (via `VehicleMoveEvent`)
 
@@ -69,7 +74,8 @@ player-placed-ore exclusion. Three things keep honest miners out of it:
 **Inventory** — InventoryMove, ChestStealer, FastUse, BowSpam, AutoTotem
 
 > **Opt-in / off by default** (enable in `config.yml` if you want them): NoSlow, Jesus,
-> Spider, Step, AutoBlock, Velocity/AntiKnockback, sustained ascent (a climb that does not
+> Spider, Step, AutoBlock, Velocity/AntiKnockback, NoFall, omni-sprint, Mace smash,
+> CrystalAura/AnchorAura, PingSpoof, sustained ascent (a climb that does not
 > decay the way gravity requires — the counterpart to hover only counting genuine hanging),
 > the KillAura rotation-GCD check and the AutoClicker consistency analysis. These are inherently false-positive-prone — calibrate
 > them with `debug_mode` before switching them on.
@@ -93,8 +99,8 @@ player-placed-ore exclusion. Three things keep honest miners out of it:
 
 | | |
 |---|---|
-| **Server** | Paper 1.21.10+ (or Folia). Built against the 1.21.10 API; running in production on Paper 26.1.2 |
-| **Required for packet checks** | [PacketEvents](https://modrinth.com/plugin/packetevents) (install as a plugin) |
+| **Server** | Paper 1.21.10 – 26.3 (or Folia). Built against the 1.21.10 API; newer API is used when present |
+| **Required for packet checks** | [PacketEvents](https://modrinth.com/plugin/packetevents) (install as a plugin; 2.14.0+ for Minecraft 26.3) |
 | **Optional** | LuckPerms (group whitelist), PlaceholderAPI, Geyser/Floodgate (Bedrock exemption), ViaVersion (legacy-client exemption) |
 
 Without PacketEvents the plugin still runs — the packet-level checks (AutoClicker, BadPackets,
@@ -106,7 +112,7 @@ asserted: until 1.0.3 a missing PacketEvents actually prevented the plugin from 
 
 ## Installation
 
-1. Drop `BSAntiCheat-1.0.7.jar` into `plugins/`.
+1. Drop `BSAntiCheat-1.1.0.jar` into `plugins/`.
 2. (Recommended) Install **PacketEvents** for the packet-level checks.
 3. Start the server, then edit `plugins/BSAntiCheat/config.yml` and run `/bsac reload`.
 
@@ -187,7 +193,7 @@ back to what the player was actually doing. If you find one, the alert text and
 ## Building
 
 ```bash
-mvn clean package    # → target/BSAntiCheat-1.0.7.jar
+mvn clean package    # → target/BSAntiCheat-1.1.0.jar
 mvn test             # 182 tests
 ```
 

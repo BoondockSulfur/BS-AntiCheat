@@ -72,4 +72,53 @@ class ElytraSpeedTest extends ScenarioBase {
         assertEquals(0, violations.count("ELYTRA"), "the boost is not the player's doing");
     }
 
+    /** A gliding player whose riptide state the test controls (MockBukkit has none). */
+    private static final class RiptidePlayer extends PlayerMock {
+        boolean riptiding;
+
+        RiptidePlayer(org.mockbukkit.mockbukkit.ServerMock server) {
+            super(server, "Riptider", java.util.UUID.randomUUID());
+        }
+
+        @Override
+        public boolean isRiptiding() {
+            return riptiding;
+        }
+    }
+
+    private RiptidePlayer glidingRiptidePlayer() {
+        RiptidePlayer player = new RiptidePlayer(server);
+        server.addPlayer(player);
+        player.setGameMode(org.bukkit.GameMode.SURVIVAL);
+        player.setOp(false);
+        player.teleport(loc(0.5, 120.0, 0.5));
+        player.setGliding(true);
+        return player;
+    }
+
+    @Test
+    @DisplayName("A riptide launch while gliding raises the ceiling by the riptide ceiling")
+    void riptideWhileGlidingIsQuiet() throws Exception {
+        RiptidePlayer player = glidingRiptidePlayer();
+        clearGrace();
+        player.riptiding = true;
+        fly(player, loc(0.5, 120.0, 0.5), 1.0, 2, 12);
+        player.riptiding = false; // the animation ends, the impulse carries on
+        // About 165 b/s: over the elytra ceiling alone, under elytra + riptide.
+        fly(player, loc(2.5, 120.0, 0.5), 2.0, 70, 12);
+        assertEquals(0, violations.count("ELYTRA"));
+    }
+
+    @Test
+    @DisplayName("The riptide allowance ends with the riptide impulse")
+    void riptideAllowanceExpires() throws Exception {
+        RiptidePlayer player = glidingRiptidePlayer();
+        clearGrace();
+        player.riptiding = true;
+        fly(player, loc(0.5, 120.0, 0.5), 1.0, 2, 12);
+        player.riptiding = false;
+        Thread.sleep(3100);
+        fly(player, loc(2.5, 120.0, 0.5), 2.0, 80, 12);
+        assertTrue(violations.count("ELYTRA") > 0, "a riptide three seconds ago explains nothing now");
+    }
 }

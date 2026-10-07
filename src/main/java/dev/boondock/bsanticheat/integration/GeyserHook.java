@@ -51,9 +51,9 @@ public class GeyserHook {
                 || Bukkit.getPluginManager().getPlugin("Geyser-Spigot") != null
                 || Bukkit.getPluginManager().getPlugin("Geyser") != null;
         if (present) {
-            plugin.getLogger().info("Geyser/Floodgate erkannt - Bedrock-Spieler werden von Bewegungs-Checks ausgenommen.");
+            plugin.getLogger().info("Geyser/Floodgate found - Bedrock players are exempt from movement checks.");
         } else {
-            plugin.getLogger().info("Kein Geyser/Floodgate gefunden - Bedrock-Ausnahme inaktiv.");
+            plugin.getLogger().info("Geyser/Floodgate not found - Bedrock exemption inactive.");
         }
         return new GeyserHook(plugin, present);
     }

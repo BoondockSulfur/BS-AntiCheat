@@ -144,6 +144,33 @@ public final class CheckMath {
     }
 
     /**
+     * True when air drag, friction or bounciness (26.2 attributes) differ from their default
+     * for this player. Each of them changes how far a player glides, slides or rebounds, so
+     * the gravity model and the speed caps no longer describe the player's motion.
+     */
+    public static boolean hasModifiedPhysics(Player player) {
+        for (Attribute a : GameCompat.physicsAttributes()) {
+            try {
+                AttributeInstance inst = player.getAttribute(a);
+                if (inst != null && Math.abs(inst.getValue() - inst.getDefaultValue()) > 1.0e-6) return true;
+            } catch (Throwable ignored) {
+                // attribute not applicable to players on this server
+            }
+        }
+        return false;
+    }
+
+    /** Distance a player may fall without damage ({@code safe_fall_distance}, vanilla 3). */
+    public static double safeFallDistance(Player player) {
+        return attribute(player, Attribute.SAFE_FALL_DISTANCE, 3.0);
+    }
+
+    /** Fall damage multiplier attribute (vanilla 1; 0 = no fall damage at all). */
+    public static double fallDamageMultiplier(Player player) {
+        return attribute(player, Attribute.FALL_DAMAGE_MULTIPLIER, 1.0);
+    }
+
+    /**
      * Swim-speed multiplier from {@code water_movement_efficiency} (0 = vanilla drag,
      * 1 = none). This is the attribute vanilla maps Depth Strider onto, so reading it
      * also covers boots and plugins that grant the same effect without the enchantment.

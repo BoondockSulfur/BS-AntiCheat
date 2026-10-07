@@ -40,7 +40,7 @@ public class LuckPermsHook {
 
     public static LuckPermsHook tryHook(Plugin plugin) {
         if (Bukkit.getPluginManager().getPlugin("LuckPerms") == null) {
-            plugin.getLogger().info("LuckPerms nicht gefunden - Gruppen-Whitelist deaktiviert.");
+            plugin.getLogger().info("LuckPerms not found - group whitelist disabled.");
             return null;
         }
 
@@ -48,11 +48,11 @@ public class LuckPermsHook {
         if (provider != null) {
             LuckPermsHook hook = new LuckPermsHook(plugin, provider.getProvider());
             hook.subscribeInvalidation();
-            plugin.getLogger().info("LuckPerms Hook aktiviert - Gruppen-Whitelist verfügbar.");
+            plugin.getLogger().info("LuckPerms hooked - group whitelist available.");
             return hook;
         }
 
-        plugin.getLogger().warning("LuckPerms gefunden aber API nicht verfügbar!");
+        plugin.getLogger().warning("LuckPerms found, but its API is not available.");
         return null;
     }
 

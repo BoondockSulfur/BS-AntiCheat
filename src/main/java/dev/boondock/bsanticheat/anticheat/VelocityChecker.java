@@ -53,6 +53,14 @@ public class VelocityChecker implements Listener {
     // Last teleport / respawn / world change per player (ms). A relocation inside the
     // evaluation window makes the measured displacement meaningless.
     private final Map<UUID, Long> relocated = new ConcurrentHashMap<>();
+    // Knockback events per player: [0] = last one of any cause, [1] = last explosion (ms).
+    // A second push inside the evaluation window — a wind charge, an explosion, another
+    // hit — replaces the displacement the expectation was built for.
+    private final Map<UUID, long[]> knockbacks = new ConcurrentHashMap<>();
+    // The hit's own knockback event fires in the same tick as its velocity event.
+    private static final long SAME_TICK_MS = 25L;
+    // Explosion knockback reaches the client with the explosion, not as a velocity event.
+    private static final long EXPLOSION_OVERLAP_MS = 150L;
 
     public VelocityChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -124,6 +132,7 @@ public class VelocityChecker implements Listener {
         // A teleport, respawn or world change inside the window replaces the knockback's
         // displacement with an arbitrary one — in either direction.
         if (relocatedSince(id, startMs)) return;
+        if (pushedAgain(id, startMs)) return;
         if (ServerLoad.isLagging(config, player)) return;
 
         // The state that legitimately eats a knockback was only sampled when the velocity was
@@ -219,6 +228,38 @@ public class VelocityChecker implements Listener {
         relocated.put(event.getPlayer().getUniqueId(), System.currentTimeMillis());
     }
 
+    /**
+     * Every knockback, including explosions that deal no damage — a wind charge launching its
+     * own thrower is one, and it may arrive with no velocity event at all.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onKnockback(io.papermc.paper.event.entity.EntityKnockbackEvent event) {
+        if (!(event.getEntity() instanceof Player player)) return;
+        noteKnockback(player.getUniqueId(),
+                event.getCause() == io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.EXPLOSION,
+                System.currentTimeMillis());
+    }
+
+    void noteKnockback(UUID id, boolean explosion, long now) {
+        knockbacks.compute(id, (k, v) -> {
+            long[] r = v == null ? new long[]{0L, 0L} : v;
+            r[0] = now;
+            if (explosion) r[1] = now;
+            return r;
+        });
+    }
+
+    /**
+     * True when another push overlaps the window that started at {@code startMs}: any
+     * knockback after the tick of the evaluated one, or an explosion around it.
+     */
+    boolean pushedAgain(UUID id, long startMs) {
+        long[] k = knockbacks.get(id);
+        if (k == null) return false;
+        if (k[0] > startMs + SAME_TICK_MS) return true;
+        return k[1] != 0L && Math.abs(k[1] - startMs) <= EXPLOSION_OVERLAP_MS;
+    }
+
     /** True when the player was relocated at or after {@code sinceMs}. */
     private boolean relocatedSince(UUID id, long sinceMs) {
         Long at = relocated.get(id);
@@ -260,5 +301,6 @@ public class VelocityChecker implements Listener {
     public void cleanup(UUID playerId) {
         consecutive.remove(playerId);
         relocated.remove(playerId);
+        knockbacks.remove(playerId);
     }
 }

@@ -385,12 +385,12 @@ public class XRayDetector implements Listener {
                     built.add(deepslate);
                 } catch (IllegalArgumentException ignored) {}
             } catch (IllegalArgumentException e) {
-                plugin.getLogger().warning("[XRay] Unbekanntes Erz in Ausnahmeliste: " + oreName);
+                plugin.getLogger().warning("[XRay] Unknown ore in exclusion list: " + oreName);
             }
         }
         excludedOres = Set.copyOf(built);
         if (!built.isEmpty() && config.debugMode()) {
-            plugin.getLogger().info("[XRay] Ausgenommene Erze: " + built);
+            plugin.getLogger().info("[XRay] Excluded ores: " + built);
         }
     }
 
@@ -469,7 +469,7 @@ public class XRayDetector implements Listener {
     public void onBlockBreak(BlockBreakEvent event) {
         if (!config.xrayDetectionEnabled()) {
             if (config.debugMode()) {
-                plugin.getLogger().info("[XRay] Detection deaktiviert, ignoriere Event");
+                plugin.getLogger().info("[XRay] Detection disabled, ignoring event");
             }
             return;
         }
@@ -495,7 +495,7 @@ public class XRayDetector implements Listener {
         // Skip whitelisted players
         if (isPlayerWhitelisted(player)) {
             if (config.debugMode()) {
-                plugin.getLogger().info("[XRay] Spieler " + player.getName() + " ist whitelisted/bypass, ignoriere");
+                plugin.getLogger().info("[XRay] Player " + player.getName() + " is whitelisted/bypassed, ignoring");
             }
             return;
         }
@@ -795,7 +795,7 @@ public class XRayDetector implements Listener {
             resetEvidence(playerId);
             return;
         } else if (config.debugMode()) {
-            plugin.getLogger().info("[XRay] " + player.getName() + " - Kein Schwellenwert ueberschritten. Breakdown: " + oreBreakdown);
+            plugin.getLogger().info("[XRay] " + player.getName() + " - no threshold exceeded. Breakdown: " + oreBreakdown);
         }
 
         // Check 2: Ore-to-stone ratio — the check that judges a searching player, by how
@@ -910,9 +910,9 @@ public class XRayDetector implements Listener {
         if (stripMining && config.debugMode()) {
             plugin.getLogger().info("[XRay] " + player.getName()
                     + " Veto: stripMining"
-                    + " (profil=" + profile.size() + " Bloecke, yStdAbw="
+                    + " (profile=" + profile.size() + " blocks, yStdDev="
                     + String.format(java.util.Locale.ROOT, "%.2f", MiningProfile.yStdDev(profile))
-                    + ", korridor=" + String.format(java.util.Locale.ROOT, "%.2f",
+                    + ", corridor=" + String.format(java.util.Locale.ROOT, "%.2f",
                             MiningProfile.corridorFraction(profile)) + ")");
         }
         return stripMining;
@@ -1118,38 +1118,38 @@ public class XRayDetector implements Listener {
 
         // Bedrock (Geyser/Floodgate) players use different mining timing/instamine
         if (Exemptions.isBedrockExempt(player, config, geyser)) {
-            if (debug) plugin.getLogger().info("[XRay] " + name + " ist Bedrock (Geyser) -> übersprungen");
+            if (debug) plugin.getLogger().info("[XRay] " + name + " is Bedrock (Geyser) -> skipped");
             return true;
         }
         if (Exemptions.isLegacyExempt(player, config)) {
-            if (debug) plugin.getLogger().info("[XRay] " + name + " ist Legacy-Client (ViaVersion) -> übersprungen");
+            if (debug) plugin.getLogger().info("[XRay] " + name + " is a legacy client (ViaVersion) -> skipped");
             return true;
         }
 
         // Check UUID whitelist
         if (config.isWhitelistedPlayer(player.getUniqueId())) {
-            if (debug) plugin.getLogger().info("[XRay] " + name + " ist whitelisted (UUID in Liste)");
+            if (debug) plugin.getLogger().info("[XRay] " + name + " is whitelisted (UUID in list)");
             return true;
         }
 
         // Check if OPs should bypass (configurable!)
         if (player.isOp()) {
             if (config.opsBypass()) {
-                if (debug) plugin.getLogger().info("[XRay] " + name + " ist OP und ops_bypass=true -> übersprungen");
+                if (debug) plugin.getLogger().info("[XRay] " + name + " is OP and ops_bypass=true -> skipped");
                 return true;
             } else {
                 // Once per player per session, not once per block broken: this fired on every
                 // single break and put 2843 identical lines into one debug session's log,
                 // burying what the mode was turned on for.
                 if (debug && opNoticeLogged.add(player.getUniqueId())) {
-                    plugin.getLogger().info("[XRay] " + name + " ist OP aber ops_bypass=false -> wird geprüft!");
+                    plugin.getLogger().info("[XRay] " + name + " is OP but ops_bypass=false -> checked");
                 }
             }
         }
 
         // Check explicit bypass permission (defaults to false, so OPs never get it implicitly)
         if (player.hasPermission("bsanticheat.bypass")) {
-            if (debug) plugin.getLogger().info("[XRay] " + name + " hat bypass Permission -> übersprungen");
+            if (debug) plugin.getLogger().info("[XRay] " + name + " has the bypass permission -> skipped");
             return true;
         }
 
@@ -1157,7 +1157,7 @@ public class XRayDetector implements Listener {
         if (luckPerms != null) {
             List<String> whitelistGroups = config.anticheatWhitelistGroups();
             if (luckPerms.isPlayerInWhitelistedGroup(player, whitelistGroups)) {
-                if (debug) plugin.getLogger().info("[XRay] " + name + " ist in LuckPerms whitelist Gruppe -> übersprungen");
+                if (debug) plugin.getLogger().info("[XRay] " + name + " is in a whitelisted LuckPerms group -> skipped");
                 return true;
             }
         }

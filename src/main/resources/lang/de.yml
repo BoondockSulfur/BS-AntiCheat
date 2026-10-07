@@ -116,6 +116,10 @@ acsilent:
   list_muted: "&7Stummgeschaltet: &f%categories%"
   list_none: "&7Keine Kategorien stummgeschaltet."
   usage: "&eVerwendung: &f/acsilent [all|xray|movement|list]"
+  category:
+    all: "Alle Alarme"
+    xray: "XRay-Erkennung"
+    movement: "Bewegungs-Checks"
 
 # Bewegungstyp-Namen (in Speed-Warnungen verwendet)
 movetype:
@@ -170,6 +174,23 @@ alert:
   autoclicker_pattern: "AutoClicker: zu gleichmäßig (Streuung %.1fms, %d CPS)"
   badpackets: "BadPackets: ungültige Rotation (Pitch %.1f)"
   timer: "Timer: Pakete schneller als Echtzeit (Balance %dms)"
+  badpackets_slot: "BadPackets: ungültiger Hotbar-Slot %d"
+  badpackets_self_attack: "BadPackets: hat die eigene Entity angegriffen"
+  badpackets_duplicate_slot: "BadPackets: derselbe Hotbar-Slot %d-mal hintereinander gesendet"
+  badpackets_abilities: "BadPackets: Flug beansprucht ohne Flugerlaubnis (%d-mal)"
+  pingspoof_order: "PingSpoof: Antwort hat %d ältere Pings übersprungen"
+  pingspoof_stall: "PingSpoof: %d Pings zurückgehalten, spätere Keep-Alives beantwortet"
+  pingspoof_divergence: "PingSpoof: Transaktions-Laufzeit %.0fms über Keep-Alive"
+  crystalaura_fast: "CrystalAura: Kristall %dms nach dem Erscheinen zerstört"
+  crystalaura_rate: "CrystalAura: %d Kristalle pro Sekunde zerstört (Max: %d)"
+  crystalaura_angle: "CrystalAura: Kristall %.0f Grad neben Blickrichtung zerstört"
+  anchoraura: "AnchorAura: Anker %dms nach dem Aufladen gezündet"
+  nofall_landing: "NoFall: nach %.1f Blöcken ohne Fallschaden gelandet"
+  nofall_spoof: "NoFall: Fallhöhe in der Luft zurückgesetzt (gemessener Fall %.1f, gemeldete Fallhöhe %.1f)"
+  sprint_hunger: "Sprint: sprintet mit Hungerwert %d"
+  sprint_blind: "Sprint: sprintet trotz Blindheit"
+  sprint_omni: "Sprint: sprintet %.0f Grad abseits der Blickrichtung"
+  mace: "Streitkolben: Schmetterschlag aus Fallhöhe %.1f, gemessen %.1f"
   # XRay-Detektor Meldungen
   xray_threshold: "[XRay?] %s: Schwellenwert überschritten in %ds - %s"
   xray_ratio: "[XRay?] %s: Verdächtiges Erz/Stein-Verhältnis: %.2f%% (%d wertvolle Erze, %d Steine) Schwellwert: %.2f%% - %s"

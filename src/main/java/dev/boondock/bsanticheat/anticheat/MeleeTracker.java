@@ -19,8 +19,9 @@ import java.util.concurrent.ConcurrentLinkedDeque;
  * <p>Such abilities (beams, projectiles, smites triggered by right-click) can reach well
  * beyond melee range, so judging them as melee hits produces false REACH alerts.
  *
- * <p>What separates the two is the client: a real melee hit is preceded by an
- * {@code INTERACT_ENTITY} packet with action ATTACK. Ability damage has none, because the
+ * <p>What separates the two is the client: a real melee hit is preceded by an attack packet
+ * ({@code INTERACT_ENTITY} with action ATTACK up to MC 26.0, the dedicated {@code ATTACK}
+ * packet from 26.1). Ability damage has none, because the
  * player never attacked anything — they right-clicked. This class carries that one fact from
  * the packet layer to the combat checks, together with the entity the attack targeted.
  *

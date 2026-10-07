@@ -43,6 +43,12 @@ public final class Exemptions {
         return geyser != null && config.exemptBedrockPlayers() && geyser.isBedrock(p);
     }
 
+    /** The player's client protocol as reported by ViaVersion, or -1 without it. */
+    static int clientProtocol(Player p) {
+        ViaVersionHook hook = via;
+        return hook == null ? -1 : hook.protocolVersion(p);
+    }
+
     /** True when the player is on a legacy client (via ViaVersion) and the exemption is on. */
     static boolean isLegacyExempt(Player p, PluginConfig config) {
         return via != null && config.exemptLegacyClients() && via.isLegacy(p, config.legacyProtocolThreshold());

@@ -2,23 +2,32 @@ package dev.boondock.bsanticheat.anticheat;
 
 import com.github.retrooper.packetevents.event.PacketListener;
 import com.github.retrooper.packetevents.event.PacketReceiveEvent;
+import com.github.retrooper.packetevents.event.PacketSendEvent;
 import com.github.retrooper.packetevents.protocol.packettype.PacketType;
 import com.github.retrooper.packetevents.protocol.packettype.PacketTypeCommon;
 import com.github.retrooper.packetevents.protocol.player.DiggingAction;
 import com.github.retrooper.packetevents.protocol.player.User;
 import com.github.retrooper.packetevents.protocol.world.Location;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientEditBook;
+import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientHeldItemChange;
+import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientKeepAlive;
+import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerAbilities;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientInteractEntity;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerDigging;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerFlying;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPong;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientUpdateSign;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerHeldItemChange;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerKeepAlive;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerPing;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerPlayerAbilities;
 import dev.boondock.bsanticheat.config.PluginConfig;
 import dev.boondock.bsanticheat.db.DatabaseManager;
 import dev.boondock.bsanticheat.integration.GeyserHook;
 import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.Constants;
+import dev.boondock.bsanticheat.util.ItemCompat;
 import dev.boondock.bsanticheat.util.Scheduler;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -35,10 +44,11 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 /**
  * Packet-level checks (via PacketEvents).
  * <ul>
- *   <li>AutoClicker — from arm-swing (ANIMATION) packets, using two signals: raw clicks
+ *   <li>AutoClicker — from arm-swing packets (ANIMATION, or PUNCH on MC 26.3+), using two signals: raw clicks
  *       per second, and click-interval consistency (low standard deviation = metronomic =
  *       autoclicker, which also catches slow-but-perfectly-regular clickers).</li>
- *   <li>BadPackets — impossible rotation values.</li>
+ *   <li>BadPackets — impossible rotation values, plus the extended protocol rules
+ *       (hotbar slot range, duplicate slot changes, self-attack, flight claims).</li>
  * </ul>
  *
  * <p>Runs on Netty threads, so all Bukkit access (alerts) is hopped back to the main
@@ -68,6 +78,21 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     private ViolationManager violationManager;
     private TransactionManager transactionManager;
     private MeleeTracker meleeTracker;
+    private LungeTracker lungeTracker;
+
+    // Hotbar slot the client last selected, as seen in the packet stream (client changes and
+    // server-set slots). Used to read the item a STAB was made with, rather than whatever the
+    // player holds by the time a region thread gets to look.
+    private final Map<UUID, Integer> clientSlot = new ConcurrentHashMap<>();
+    // BadPackets (extended): consecutive identical hotbar changes, see noteHeldSlotPacket.
+    private final Map<UUID, DuplicateSlotState> duplicateSlots = new ConcurrentHashMap<>();
+    // BadPackets (extended): flight claims while flight is not allowed, as timestamps.
+    private final Map<UUID, Deque<Long>> abilityClaims = new ConcurrentHashMap<>();
+    // BadPackets (extended): the flight permission the CLIENT was last told (outgoing
+    // PLAYER_ABILITIES) and the last PlayerToggleFlightEvent, see judgeFlightClaim.
+    private final Map<UUID, FlightAbilityState> flightAbilities = new ConcurrentHashMap<>();
+    // Vanilla hotbar size: the client only ever selects slots 0-8.
+    private static final int HOTBAR_SIZE = 9;
 
     private final Map<UUID, ConcurrentLinkedDeque<Long>> clicks = new ConcurrentHashMap<>();
     // Timer accounting per player, see TimerState.
@@ -183,6 +208,10 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         this.meleeTracker = meleeTracker;
     }
 
+    public void setLungeTracker(LungeTracker lungeTracker) {
+        this.lungeTracker = lungeTracker;
+    }
+
     // ---- Bukkit events that make a client stall and then burst ----
 
     @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.MONITOR, ignoreCancelled = true)
@@ -225,6 +254,16 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         };
     }
 
+    /**
+     * The server processed a flight toggle while it allowed flight. Recorded whether or not
+     * a plugin cancelled it: double-jump plugins cancel it and revoke flight right away,
+     * after the client legitimately claimed flight.
+     */
+    @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.MONITOR)
+    public void onToggleFlight(org.bukkit.event.player.PlayerToggleFlightEvent event) {
+        noteToggleFlight(event.getPlayer().getUniqueId(), System.currentTimeMillis());
+    }
+
     @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.MONITOR)
     public void onJoin(org.bukkit.event.player.PlayerJoinEvent event) {
         grant(event.getPlayer().getUniqueId());
@@ -242,6 +281,8 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
 
     private void grant(UUID id) {
         graceUntil.put(id, System.currentTimeMillis() + Constants.PACKET_GRACE_MS);
+        // A new session or respawn starts a new hotbar history.
+        duplicateSlots.remove(id);
         // The accumulated balance is meaningless across a teleport — start clean.
         timerState.remove(id);
         packetCounts.remove(id);
@@ -251,6 +292,35 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     private boolean inGrace(UUID id) {
         Long until = graceUntil.get(id);
         return until != null && System.currentTimeMillis() < until;
+    }
+
+    /**
+     * Outbound side: where our transaction pings and the server's keep-alives sit in the
+     * stream (ping-spoof analysis), and hotbar slots the server sets.
+     */
+    @Override
+    public void onPacketSend(PacketSendEvent event) {
+        PacketTypeCommon type = event.getPacketType();
+        if (type != PacketType.Play.Server.PING && type != PacketType.Play.Server.KEEP_ALIVE
+                && type != PacketType.Play.Server.HELD_ITEM_CHANGE
+                && type != PacketType.Play.Server.PLAYER_ABILITIES) {
+            return;
+        }
+        User u = event.getUser();
+        if (u == null || u.getUUID() == null) return;
+        UUID id = u.getUUID();
+        if (type == PacketType.Play.Server.HELD_ITEM_CHANGE) {
+            noteServerSlot(id, new WrapperPlayServerHeldItemChange(event).getSlot());
+        } else if (type == PacketType.Play.Server.PLAYER_ABILITIES) {
+            noteAbilitiesSent(id, new WrapperPlayServerPlayerAbilities(event).isFlightAllowed(),
+                    System.currentTimeMillis());
+        } else if (transactionManager != null) {
+            if (type == PacketType.Play.Server.PING) {
+                transactionManager.onPingWritten(id, new WrapperPlayServerPing(event).getId());
+            } else {
+                transactionManager.onKeepAliveWritten(id, new WrapperPlayServerKeepAlive(event).getId(), System.nanoTime());
+            }
+        }
     }
 
     @Override
@@ -268,28 +338,63 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
             }
             return;
         }
+        if (type == PacketType.Play.Client.KEEP_ALIVE) {
+            if (transactionManager != null) {
+                User u = event.getUser();
+                if (u != null && u.getUUID() != null) {
+                    transactionManager.onKeepAliveReply(u.getUUID(), new WrapperPlayClientKeepAlive(event).getId(),
+                            System.nanoTime(), u.getName());
+                }
+            }
+            return;
+        }
+
+        User user = event.getUser();
+        UUID uid = user != null ? user.getUUID() : null;
 
         // A real melee hit is announced by the client. Recorded before the packet_checks
         // toggle and regardless of lag or grace: the combat checks read its absence as
         // "plugin damage", so a gap here — or a tracker left active while nothing feeds it —
-        // would silently switch Reach/KillAura off.
-        if (type == PacketType.Play.Client.INTERACT_ENTITY && meleeTracker != null) {
-            User attacker = event.getUser();
-            if (attacker != null && attacker.getUUID() != null) {
+        // would silently switch Reach/KillAura off. Up to MC 26.0 it is INTERACT_ENTITY with
+        // action ATTACK; from 26.1 a dedicated ATTACK packet (PacketEvents then reports
+        // INTERACT_ENTITY as INTERACT_AT, so the two never double-count).
+        if (uid != null) {
+            if (type == PacketType.Play.Client.INTERACT_ENTITY) {
                 WrapperPlayClientInteractEntity interact = new WrapperPlayClientInteractEntity(event);
                 if (interact.getAction() == WrapperPlayClientInteractEntity.InteractAction.ATTACK) {
-                    long now = System.currentTimeMillis();
-                    meleeTracker.noteAttack(attacker.getUUID(), interact.getEntityId(), now);
-                    // Vanilla aborts any dig before attacking, so an attack ends the mining window.
-                    noteEntityAttack(attacker.getUUID());
+                    onAttackPacket(uid, user.getName(), interact.getEntityId(), user.getEntityId(),
+                            System.currentTimeMillis());
+                }
+            } else if (PacketCompat.isAttack(type)) {
+                int target = PacketCompat.attackTarget(event);
+                if (target >= 0) {
+                    onAttackPacket(uid, user.getName(), target, user.getEntityId(), System.currentTimeMillis());
                 }
             }
         }
 
+        // Impulse and hotbar bookkeeping for the movement checks (LungeTracker) and the item
+        // lookups below. Like the attack record, it must not depend on packet_checks: the
+        // movement side reads its absence as "no lunge happened".
+        WrapperPlayClientPlayerDigging digging = null;
+        if (uid != null && type == PacketType.Play.Client.PLAYER_DIGGING) {
+            digging = new WrapperPlayClientPlayerDigging(event);
+            if (PacketCompat.isStab(digging.getAction())) handleStab(uid, System.currentTimeMillis());
+        }
+        int heldSlotVerdict = SLOT_OK;
+        int heldSlot = -1;
+        if (uid != null && type == PacketType.Play.Client.HELD_ITEM_CHANGE) {
+            heldSlot = new WrapperPlayClientHeldItemChange(event).getSlot();
+            heldSlotVerdict = noteHeldSlotPacket(uid, heldSlot, System.currentTimeMillis());
+        }
+        boolean tickPacket = WrapperPlayClientPlayerFlying.isFlying(type) || type == PacketType.Play.Client.CLIENT_TICK_END;
+        if (uid != null && tickPacket && transactionManager != null) {
+            transactionManager.onClientTick(uid);
+        }
+
         if (!config.packetChecksEnabled()) return;
 
-        User u = event.getUser();
-        boolean grace = u != null && u.getUUID() != null && inGrace(u.getUUID());
+        boolean grace = uid != null && inGrace(uid);
 
         // Crash protection runs even under lag and even in grace — it CANCELS malicious
         // packets, so suspending it would open exactly the hole it exists to close.
@@ -301,31 +406,348 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         }
 
         // Track mining so held-to-mine swings don't count as AutoClicker clicks.
-        if (type == PacketType.Play.Client.PLAYER_DIGGING) {
-            handleDigging(event);
+        if (digging != null) {
+            handleDigging(uid, digging);
         }
 
-        if (grace || ServerLoad.isLagging(config, u != null ? u.getUUID() : null)) return;
-        if (type == PacketType.Play.Client.ANIMATION) {
-            handleSwing(event);
+        // Deterministic protocol rules: a verdict does not depend on timing, so neither lag
+        // nor grace suspends them.
+        if (uid != null && extendedBadPackets()) {
+            if (heldSlotVerdict == SLOT_OUT_OF_RANGE) {
+                int slot = heldSlot;
+                flagProtocol(uid, "BADPACKETS", lang.format("alert.badpackets_slot", slot), slot);
+            } else if (heldSlotVerdict == SLOT_DUPLICATE_STREAK) {
+                int n = Constants.BADPACKETS_DUPLICATE_SLOT_COUNT;
+                flagProtocol(uid, "BADPACKETS", lang.format("alert.badpackets_duplicate_slot", n), n);
+            }
+            if (type == PacketType.Play.Client.PLAYER_ABILITIES
+                    && new WrapperPlayClientPlayerAbilities(event).isFlying()) {
+                onFlightClaim(uid, System.currentTimeMillis());
+            }
+        }
+
+        if (grace || ServerLoad.isLagging(config, uid)) return;
+        if (PacketCompat.isSwing(type)) {
+            handleSwing(user);
         } else if (WrapperPlayClientPlayerFlying.isFlying(type)) {
             handleFlying(event);
-            handleTimer(event.getUser(), false);
+            handleTimer(user, false);
         } else if (type == PacketType.Play.Client.CLIENT_TICK_END) {
-            handleTimer(event.getUser(), true);
+            handleTimer(user, true);
         }
+    }
+
+    // ---- Attacks, spear jabs, hotbar ----
+
+    /**
+     * One client attack on {@code target}, from either attack packet. Feeds the melee record,
+     * ends the mining window (vanilla aborts digging before attacking) and applies the
+     * self-attack rule. Package-private so both packet paths can be tested without a packet.
+     */
+    void onAttackPacket(UUID id, String name, int target, int selfEntityId, long now) {
+        if (meleeTracker != null) meleeTracker.noteAttack(id, target, now);
+        noteEntityAttack(id);
+        // Self-attack: the vanilla client's crosshair never picks its own entity, and the
+        // server rejects such a packet. Deterministic, so a single one is enough.
+        if (selfEntityId > 0 && target == selfEntityId && config.packetChecksEnabled() && extendedBadPackets()) {
+            flagProtocol(id, "BADPACKETS", lang.get("alert.badpackets_self_attack"), target);
+        }
+    }
+
+    private boolean extendedBadPackets() {
+        return config.badPacketsDetectionEnabled() && config.badPacketsExtendedEnabled();
+    }
+
+    static final int SLOT_OK = 0;
+    static final int SLOT_OUT_OF_RANGE = 1;
+    static final int SLOT_DUPLICATE_STREAK = 2;
+
+    /**
+     * A hotbar change from the client. Records the slot, tells the lunge tracker, and returns
+     * a BadPackets verdict:
+     * <ul>
+     *   <li>out of range: the vanilla client selects 0-8 only;</li>
+     *   <li>duplicate streak: the vanilla client sends a change only when the slot differs
+     *       from the one it last SENT, so two identical ones in a row cannot happen — not even
+     *       around a server-set slot, because that updates the selection but not the client's
+     *       record of what it sent (the baseline is reset below for that reason). Several
+     *       within a short window are required anyway, for proxies that might re-send one.</li>
+     * </ul>
+     * Package-private and clock-free for tests.
+     */
+    int noteHeldSlotPacket(UUID id, int slot, long now) {
+        if (lungeTracker != null) lungeTracker.noteHeldSlotChange(id, now);
+        if (slot < 0 || slot >= HOTBAR_SIZE) return SLOT_OUT_OF_RANGE;
+        clientSlot.put(id, slot);
+        DuplicateSlotState st = duplicateSlots.computeIfAbsent(id, k -> new DuplicateSlotState());
+        synchronized (st) {
+            if (slot != st.lastSlot) {
+                st.lastSlot = slot;
+                st.duplicates = 0;
+                return SLOT_OK;
+            }
+            if (st.duplicates == 0 || now - st.firstDuplicate > Constants.BADPACKETS_DUPLICATE_SLOT_WINDOW_MS) {
+                st.duplicates = 1;
+                st.firstDuplicate = now;
+            } else {
+                st.duplicates++;
+            }
+            if (st.duplicates >= Constants.BADPACKETS_DUPLICATE_SLOT_COUNT) {
+                st.duplicates = 0;
+                return SLOT_DUPLICATE_STREAK;
+            }
+            return SLOT_OK;
+        }
+    }
+
+    /** The server set the hotbar slot. The client may now send that slot without it being a repeat. */
+    void noteServerSlot(UUID id, int slot) {
+        if (slot >= 0 && slot < HOTBAR_SIZE) clientSlot.put(id, slot);
+        DuplicateSlotState st = duplicateSlots.get(id);
+        if (st != null) {
+            synchronized (st) {
+                st.lastSlot = -1;
+                st.duplicates = 0;
+            }
+        }
+    }
+
+    /** Hotbar slot last seen in the packet stream, or -1. */
+    int clientSlot(UUID id) {
+        Integer s = clientSlot.get(id);
+        return s == null ? -1 : s;
+    }
+
+    private static final class DuplicateSlotState {
+        int lastSlot = -1;
+        int duplicates;
+        long firstDuplicate;
+    }
+
+    /**
+     * A spear jab (STAB). Recorded at once; whether it carried Lunge is read on the region
+     * thread from the slot the client had selected when it sent the jab, so a swap sent right
+     * after it cannot hide the spear.
+     */
+    private void handleStab(UUID id, long now) {
+        if (lungeTracker == null) return;
+        lungeTracker.noteStab(id, now);
+        int slot = clientSlot(id);
+        Player player = Bukkit.getPlayer(id);
+        if (player == null) return;
+        try {
+            Scheduler.runForEntity(plugin, player, () -> resolveLunge(player, slot, now));
+        } catch (RuntimeException e) {
+            // Scheduler refused (plugin disabling, entity removed): nothing to record.
+        }
+    }
+
+    /**
+     * Region thread: read the jab's item and, if it is a spear with Lunge, register a lunge
+     * candidate. It only becomes a lunge with the server's evidence (see LungeTracker).
+     */
+    void resolveLunge(Player player, int slot, long stabTime) {
+        if (lungeTracker == null || !player.isOnline()) return;
+        org.bukkit.inventory.ItemStack item = slot >= 0 && slot < HOTBAR_SIZE
+                ? player.getInventory().getItem(slot)
+                : player.getInventory().getItemInMainHand();
+        if (!ItemCompat.isSpear(item)) return;
+        int level = ItemCompat.lungeLevel(item);
+        if (level > 0) {
+            lungeTracker.noteLungeCandidate(player.getUniqueId(), stabTime, level,
+                    attackCooldownMs(player), System.currentTimeMillis());
+        }
+    }
+
+    /**
+     * The player's attack cooldown in ms (1 / attack speed, which includes the held item's
+     * modifier), or 0 when not readable. Spears need a full charge to jab.
+     */
+    static long attackCooldownMs(Player player) {
+        try {
+            org.bukkit.attribute.AttributeInstance speed = player.getAttribute(org.bukkit.attribute.Attribute.ATTACK_SPEED);
+            if (speed == null) return 0L;
+            double perSecond = speed.getValue();
+            if (!(perSecond > 0) || !Double.isFinite(perSecond)) return 0L;
+            return (long) (1000.0 / perSecond);
+        } catch (RuntimeException e) {
+            return 0L;
+        }
+    }
+
+    /**
+     * Exhaustion applied to a player. The Lunge effect's exhaustion is the server's evidence
+     * that a jab really lunged; recorded even when another plugin cancelled the exhaustion,
+     * since the impulse is applied regardless.
+     */
+    @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.MONITOR)
+    public void onExhaustion(org.bukkit.event.entity.EntityExhaustionEvent event) {
+        if (lungeTracker == null || !(event.getEntity() instanceof Player player)) return;
+        if (event.getExhaustionReason() != org.bukkit.event.entity.EntityExhaustionEvent.ExhaustionReason.UNKNOWN) return;
+        lungeTracker.noteExhaustion(player.getUniqueId(), event.getExhaustion(), System.currentTimeMillis());
+    }
+
+    static final int CLAIM_ALLOWED = 0;
+    static final int CLAIM_IN_FLIGHT = 1;
+    static final int CLAIM_DISALLOWED = 2;
+    static final int CLAIM_UNKNOWN = 3;
+
+    /** What the client was last told about flight, and the last server-side toggle. */
+    private static final class FlightAbilityState {
+        int lastSentMayfly = -1;  // -1 unknown, 0 not allowed, 1 allowed
+        long lastSentAt;
+        long lastToggleAt = Long.MIN_VALUE;
+    }
+
+    /** The server wrote PLAYER_ABILITIES to this client (Netty thread). */
+    void noteAbilitiesSent(UUID id, boolean mayfly, long now) {
+        FlightAbilityState st = flightAbilities.computeIfAbsent(id, k -> new FlightAbilityState());
+        synchronized (st) {
+            st.lastSentMayfly = mayfly ? 1 : 0;
+            st.lastSentAt = now;
+        }
+    }
+
+    /** A PlayerToggleFlightEvent fired for this player (cancelled or not). */
+    void noteToggleFlight(UUID id, long now) {
+        FlightAbilityState st = flightAbilities.computeIfAbsent(id, k -> new FlightAbilityState());
+        synchronized (st) {
+            st.lastToggleAt = now;
+        }
+    }
+
+    /**
+     * Judge a flight claim against the permission the CLIENT had when it sent it, not against
+     * the server state when a task gets to look — a plugin may revoke flight in between (a
+     * double-jump plugin cancels the toggle and calls setAllowFlight(false) at once).
+     * <ul>
+     *   <li>allowed: the last abilities written to the client allowed flight;</li>
+     *   <li>in flight: they revoked it, but so recently (round trip plus margin) that the
+     *       client may not have received them before sending the claim;</li>
+     *   <li>disallowed: they revoked it long enough ago;</li>
+     *   <li>unknown: no abilities seen yet for this connection.</li>
+     * </ul>
+     * Package-private and clock-free for tests.
+     */
+    int judgeFlightClaim(UUID id, long now, double rttMs) {
+        FlightAbilityState st = flightAbilities.get(id);
+        if (st == null) return CLAIM_UNKNOWN;
+        synchronized (st) {
+            if (st.lastSentMayfly < 0) return CLAIM_UNKNOWN;
+            if (st.lastSentMayfly == 1) return CLAIM_ALLOWED;
+            long rtt = (long) Math.min(Constants.BADPACKETS_ABILITIES_MAX_RTT_MS, Math.max(0.0, rttMs));
+            if (now - st.lastSentAt <= rtt + Constants.BADPACKETS_ABILITIES_MARGIN_MS) return CLAIM_IN_FLIGHT;
+            return CLAIM_DISALLOWED;
+        }
+    }
+
+    /** Whether a claim with this verdict has to be checked against the server state. */
+    static boolean needsConfirmation(int verdict) {
+        return verdict == CLAIM_DISALLOWED || verdict == CLAIM_UNKNOWN;
+    }
+
+    /** Whether a flight toggle event fired within the correlation window of this claim. */
+    boolean claimMatchesToggle(UUID id, long claimTime) {
+        FlightAbilityState st = flightAbilities.get(id);
+        if (st == null) return false;
+        synchronized (st) {
+            if (st.lastToggleAt == Long.MIN_VALUE) return false;
+            return Math.abs(st.lastToggleAt - claimTime) <= Constants.BADPACKETS_ABILITIES_TOGGLE_WINDOW_MS;
+        }
+    }
+
+    /**
+     * A PLAYER_ABILITIES packet claiming flight (Netty thread). The vanilla client only
+     * toggles flight while its local abilities allow it, and those come from the server — so
+     * a claim is judged against the abilities last written to the client. A claim that
+     * crossed a revocation in flight is ignored; the remaining ones are confirmed on the
+     * player's thread two ticks later: flight still disallowed, not creative or
+     * spectator, and no toggle event around the claim (the event only fires while the server
+     * allows flight). Several within the window are still required.
+     */
+    void onFlightClaim(UUID id, long now) {
+        Player player = Bukkit.getPlayer(id);
+        if (player == null) return;
+        double rtt = transactionManager != null ? transactionManager.roundTripMs(id) : -1;
+        if (rtt < 0) rtt = player.getPing();
+        if (!needsConfirmation(judgeFlightClaim(id, now, rtt))) return;
+        try {
+            // Delayed so the server has handled the claim packet, and fired its toggle event
+            // if flight was allowed, before the check looks.
+            Scheduler.runForEntityLater(plugin, player, () -> confirmFlightClaim(player, now),
+                    Constants.BADPACKETS_ABILITIES_CHECK_DELAY_TICKS);
+        } catch (RuntimeException e) {
+            // Scheduler refused: skip this sample.
+        }
+    }
+
+    /** Player thread: confirm a claim against the server state and count it. Package-private for tests. */
+    void confirmFlightClaim(Player player, long claimTime) {
+        if (!player.isOnline() || player.getAllowFlight()) return;
+        if (player.getGameMode() == org.bukkit.GameMode.CREATIVE
+                || player.getGameMode() == org.bukkit.GameMode.SPECTATOR) return;
+        UUID id = player.getUniqueId();
+        if (claimMatchesToggle(id, claimTime)) return;
+        int n = noteFlightClaim(id, claimTime);
+        if (n > 0) {
+            flagOnMainProtocol(id, "BADPACKETS", lang.format("alert.badpackets_abilities", n), n);
+        }
+    }
+
+    /**
+     * Count one disallowed flight claim; returns the count when it reaches the threshold
+     * inside the window (and resets), else 0. Package-private for tests.
+     */
+    int noteFlightClaim(UUID id, long now) {
+        Deque<Long> dq = abilityClaims.computeIfAbsent(id, k -> new ConcurrentLinkedDeque<>());
+        dq.addLast(now);
+        Long head;
+        while ((head = dq.peekFirst()) != null && head < now - Constants.BADPACKETS_ABILITIES_WINDOW_MS) dq.pollFirst();
+        int n = dq.size();
+        if (n >= Constants.BADPACKETS_ABILITIES_COUNT) {
+            dq.clear();
+            return n;
+        }
+        return 0;
+    }
+
+    /** Verdict from the transaction manager's ping-spoof analysis (Netty thread). */
+    void onSpoof(UUID id, String name, String kind, double value) {
+        String details = "divergence".equals(kind)
+                ? lang.format("alert.pingspoof_divergence", value)
+                : lang.format("alert.pingspoof_" + kind, (int) value);
+        Scheduler.runForPlayer(plugin, id, () -> {
+            Player player = Bukkit.getPlayer(id);
+            if (player == null) return;
+            // Clients older than 1.17 have no ping packet; a proxy translating it for them
+            // cannot keep its ids intact, so their replies say nothing about the player.
+            int protocol = Exemptions.clientProtocol(player);
+            if (protocol > 0 && protocol < Constants.PROTOCOL_1_17) return;
+            flagOnMainProtocol(id, "PINGSPOOF", details, value);
+        });
+    }
+
+    /**
+     * Flag path for the protocol rules: Bedrock players never, whatever the exemption setting,
+     * because their packets are produced by the translating proxy, not by their client.
+     */
+    private void flagProtocol(UUID id, String type, String details, double value) {
+        Scheduler.runForPlayer(plugin, id, () -> flagOnMainProtocol(id, type, details, value));
+    }
+
+    private void flagOnMainProtocol(UUID id, String type, String details, double value) {
+        Player player = Bukkit.getPlayer(id);
+        if (player == null) return;
+        if (geyser != null && geyser.isBedrock(player)) return;
+        flagOnMain(id, type, details, value);
     }
 
     /**
      * Track block-mining state from PLAYER_DIGGING so held-to-mine arm swings are not
      * counted as AutoClicker clicks (they fire once per tick while breaking a block).
      */
-    private void handleDigging(PacketReceiveEvent event) {
-        User user = event.getUser();
-        if (user == null || user.getUUID() == null) return;
-        WrapperPlayClientPlayerDigging wrapper = new WrapperPlayClientPlayerDigging(event);
+    private void handleDigging(UUID id, WrapperPlayClientPlayerDigging wrapper) {
         DiggingAction action = wrapper.getAction();
-        UUID id = user.getUUID();
         long seq = noteDigging(id, action, System.currentTimeMillis());
         if (seq > 0L && wrapper.getBlockPosition() != null) {
             var pos = wrapper.getBlockPosition();
@@ -648,8 +1070,8 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         } else if (verdict == TimerState.PLATEAU && config.debugMode()) {
             // Over the limit for the whole window but no longer gaining: a catch-up, not a hack.
             plugin.getLogger().info(String.format(java.util.Locale.ROOT,
-                    "[TIMER-DEBUG] %s Ausschlag %dms lang, Balance %dms, Zuwachs %dms "
-                            + "(<%dms) rtt=%.0fms -> kein Alarm, Leitung holt auf",
+                    "[TIMER-DEBUG] %s spike %dms long, balance %dms, gain %dms "
+                            + "(<%dms) rtt=%.0fms -> no alert, connection is catching up",
                     user.getName(), now - start, balance / 100L, growth / 100L,
                     config.timerMinGrowthMs(), Math.max(rtt, 0)));
         }
@@ -791,8 +1213,8 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     }
 
     /**
-     * AutoClicker, from arm-swing (ANIMATION) packets — covers clicking on air, blocks or
-     * entities. Two independent signals:
+     * AutoClicker, from arm-swing packets (ANIMATION; PUNCH from MC 26.3, which has no hand
+     * field and is always the main hand) — covers clicking on air, blocks or entities. Two independent signals:
      * <ol>
      *   <li>raw clicks per second above {@code autoclicker_max_cps};</li>
      *   <li>interval consistency ({@code autoclicker_consistency}, opt-in): three "robotic"
@@ -803,9 +1225,8 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
      * jitter); that "held button" signature is excluded from both signals so normal
      * mining/holding doesn't false-flag.
      */
-    private void handleSwing(PacketReceiveEvent event) {
+    private void handleSwing(User user) {
         if (!config.autoClickerDetectionEnabled()) return;
-        User user = event.getUser();
         if (user == null || user.getUUID() == null) return;
         UUID id = user.getUUID();
 
@@ -874,7 +1295,7 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
                     sd < 0 ? "n/a" : String.format(java.util.Locale.ROOT, "%.1f", sd),
                     sd < 0 || mean <= 0 ? "n/a" : String.format(java.util.Locale.ROOT, "%.2f", sd / mean),
                     intervals.length == 0 ? "n/a" : String.format(java.util.Locale.ROOT, "%.2f", outlierRatio(intervals)),
-                    heldButton, maxCps) + " pakete/s=" + currentPacketRate(id));
+                    heldButton, maxCps) + " packets/s=" + currentPacketRate(id));
         }
 
         // (a) Raw click rate
@@ -1186,5 +1607,9 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         yawDeltas.remove(playerId);
         recentDirs.remove(playerId);
         snapTimes.remove(playerId);
+        clientSlot.remove(playerId);
+        duplicateSlots.remove(playerId);
+        abilityClaims.remove(playerId);
+        flightAbilities.remove(playerId);
     }
 }

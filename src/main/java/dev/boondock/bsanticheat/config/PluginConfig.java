@@ -319,6 +319,24 @@ public class PluginConfig {
             new Range("anticheat.aimsnap_return_angle", 0, 180, 15.0),
             new Range("anticheat.aimsnap_window_ms", 1, INF, 3000L),
             new Range("anticheat.aimsnap_threshold", 1, INF, 3),
+            new Range("anticheat.thresholds.pingspoof_violations", 1, INF, Constants.PINGSPOOF_VIOLATIONS),
+            // Below one client frame at low frame rates the comparison is noise.
+            new Range("anticheat.thresholds.pingspoof_divergence_ms", 100, INF, Constants.PINGSPOOF_DIVERGENCE_MS),
+            // Crystal / anchor aura
+            new Range("anticheat.thresholds.crystalaura_min_break_ms", 0, INF, Constants.CRYSTALAURA_MIN_BREAK_MS),
+            new Range("anticheat.thresholds.crystalaura_max_breaks_per_second", 1, INF, Constants.CRYSTALAURA_MAX_BREAKS_PER_SECOND),
+            new Range("anticheat.thresholds.crystalaura_max_angle", 1, 180, Constants.CRYSTALAURA_MAX_ANGLE),
+            new Range("anticheat.thresholds.crystalaura_violations", 1, INF, Constants.CRYSTALAURA_VIOLATIONS),
+            new Range("anticheat.thresholds.anchoraura_min_interval_ms", 0, INF, Constants.ANCHORAURA_MIN_INTERVAL_MS),
+            new Range("anticheat.thresholds.anchoraura_violations", 1, INF, Constants.ANCHORAURA_VIOLATIONS),
+            // NoFall / Sprint / Mace
+            new Range("anticheat.thresholds.nofall_violations", 1, INF, Constants.NOFALL_VIOLATIONS),
+            new Range("anticheat.thresholds.nofall_min_extra_distance", 1, INF, Constants.NOFALL_MIN_EXTRA_DISTANCE),
+            new Range("anticheat.thresholds.sprint_min_duration_ms", 250, INF, Constants.SPRINT_MIN_DURATION_MS),
+            new Range("anticheat.thresholds.sprint_omni_max_angle", 60, 180, Constants.SPRINT_OMNI_MAX_ANGLE),
+            new Range("anticheat.thresholds.sprint_omni_violations", 1, INF, Constants.SPRINT_OMNI_VIOLATIONS),
+            new Range("anticheat.thresholds.mace_violations", 1, INF, Constants.MACE_VIOLATIONS),
+            new Range("anticheat.thresholds.mace_min_excess", 1, INF, Constants.MACE_MIN_EXCESS),
             // XRay
             new Range("anticheat.xray_timewindow_seconds", 1, INF, 60),
             new Range("anticheat.xray_min_veins", 1, INF, 3),
@@ -600,6 +618,38 @@ public class PluginConfig {
     public double autoClickerMaxOutlierRatio() { return cfg.getDouble("anticheat.autoclicker_max_outlier_ratio", 0.06); }
     public int autoClickerMinSignals() { return cfg.getInt("anticheat.autoclicker_min_signals", 3); }
     public boolean badPacketsDetectionEnabled() { return cfg.getBoolean("anticheat.badpackets_detection", true); }
+    /** Deterministic protocol violations beyond rotation (see PacketChecker); needs badpackets_detection. */
+    public boolean badPacketsExtendedEnabled() { return cfg.getBoolean("anticheat.badpackets_extended_detection", true); }
+    // PingSpoof: off by default — a heuristic around transaction replies, see TransactionManager.
+    public boolean pingSpoofDetectionEnabled() { return cfg.getBoolean("anticheat.pingspoof_detection", false); }
+    public int pingSpoofViolations() { return cfg.getInt("anticheat.thresholds.pingspoof_violations", Constants.PINGSPOOF_VIOLATIONS); }
+    public long pingSpoofDivergenceMs() { return cfg.getLong("anticheat.thresholds.pingspoof_divergence_ms", Constants.PINGSPOOF_DIVERGENCE_MS); }
+    // CrystalAura / AnchorAura: off by default — uncalibrated heuristics, see CrystalChecker.
+    public boolean crystalAuraDetectionEnabled() { return cfg.getBoolean("anticheat.crystalaura_detection", false); }
+    public boolean anchorAuraDetectionEnabled() { return cfg.getBoolean("anticheat.anchoraura_detection", false); }
+    public long crystalAuraMinBreakMs() { return cfg.getLong("anticheat.thresholds.crystalaura_min_break_ms", Constants.CRYSTALAURA_MIN_BREAK_MS); }
+    public int crystalAuraMaxBreaksPerSecond() { return cfg.getInt("anticheat.thresholds.crystalaura_max_breaks_per_second", Constants.CRYSTALAURA_MAX_BREAKS_PER_SECOND); }
+    public double crystalAuraMaxAngle() { return cfg.getDouble("anticheat.thresholds.crystalaura_max_angle", Constants.CRYSTALAURA_MAX_ANGLE); }
+    public int crystalAuraViolations() { return cfg.getInt("anticheat.thresholds.crystalaura_violations", Constants.CRYSTALAURA_VIOLATIONS); }
+    public long anchorAuraMinIntervalMs() { return cfg.getLong("anticheat.thresholds.anchoraura_min_interval_ms", Constants.ANCHORAURA_MIN_INTERVAL_MS); }
+    public int anchorAuraViolations() { return cfg.getInt("anticheat.thresholds.anchoraura_violations", Constants.ANCHORAURA_VIOLATIONS); }
+    // NoFall: off by default — a heuristic around the server's own landing detection, see
+    // MovementChecker#checkLanding. Calibrate with debug_mode before enabling it.
+    public boolean noFallDetectionEnabled() { return cfg.getBoolean("anticheat.nofall_detection", false); }
+    public int noFallViolations() { return cfg.getInt("anticheat.thresholds.nofall_violations", Constants.NOFALL_VIOLATIONS); }
+    public double noFallMinExtraDistance() { return cfg.getDouble("anticheat.thresholds.nofall_min_extra_distance", Constants.NOFALL_MIN_EXTRA_DISTANCE); }
+    // Sprint: sprinting that a 1.21.2+ client ends by itself (food level 6 or less, blindness).
+    public boolean sprintDetectionEnabled() { return cfg.getBoolean("anticheat.sprint_detection", true); }
+    // Omni-sprint: off by default — momentum on ice and sharp turns point motion away from the view.
+    public boolean sprintOmniDetectionEnabled() { return cfg.getBoolean("anticheat.sprint_omni_detection", false); }
+    public long sprintMinDurationMs() { return cfg.getLong("anticheat.thresholds.sprint_min_duration_ms", Constants.SPRINT_MIN_DURATION_MS); }
+    public double sprintOmniMaxAngle() { return cfg.getDouble("anticheat.thresholds.sprint_omni_max_angle", Constants.SPRINT_OMNI_MAX_ANGLE); }
+    public int sprintOmniViolations() { return cfg.getInt("anticheat.thresholds.sprint_omni_violations", Constants.SPRINT_OMNI_VIOLATIONS); }
+    // Mace: off by default — compares the fall distance a smash is computed from with the
+    // measured descent, see CombatChecker#checkMaceSmash.
+    public boolean maceDetectionEnabled() { return cfg.getBoolean("anticheat.mace_detection", false); }
+    public int maceViolations() { return cfg.getInt("anticheat.thresholds.mace_violations", Constants.MACE_VIOLATIONS); }
+    public double maceMinExcess() { return cfg.getDouble("anticheat.thresholds.mace_min_excess", Constants.MACE_MIN_EXCESS); }
     public boolean timerDetectionEnabled() { return cfg.getBoolean("anticheat.timer_detection", true); }
     public long timerMaxBalanceMs() { return cfg.getLong("anticheat.timer_max_balance_ms", 200L); }
     /** Ceiling on the reach check's latency allowance, in blocks. */

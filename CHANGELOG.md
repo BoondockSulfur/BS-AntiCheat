@@ -4,11 +4,15 @@ All notable changes to BSAntiCheat are documented in this file.
 
 ---
 
-## [1.0.7] - 2026-09-29
+## [1.1.0] - 2026-10-07
+
+### Added
+- Minecraft 26.1–26.3 support: new attack and punch packets (PacketEvents 2.14), spear reach, Lunge, wind charges, bouncy blocks and geysers, new mounts and physics attributes.
+- New checks: NoFall, Sprint (hunger/blindness/omni-sprint), Mace smash, CrystalAura/AnchorAura, PingSpoof and extended BadPackets.
 
 ### Fixed
 - Closed detection bypasses: ender pearl/chorus teleport grace, Timer pauses, packet bundling, oscillating or slowly sinking Fly/BoatFly, speed pulsing, dig-packet AutoClicker suppression, spoofed ground flag for InventoryMove, uncapped ping allowance.
-- Fewer false positives: Jesus at shores and piers, flight/gamemode changes, fast-moving reach targets, vein-miner bursts (Nuker/FastPlace), team-fight KillAura, X-Ray in overgrown caves and dense veins, knockback in cobwebs/powder snow.
+- Fewer false positives: Jesus at shores and piers, flight/gamemode changes, fast-moving reach targets, vein-miner bursts (Nuker/FastPlace), team-fight KillAura, X-Ray in overgrown caves and dense veins, knockback in cobwebs/powder snow, riptide while gliding.
 - Violation levels now survive a relog; punishment commands run in order on the correct Folia thread.
 - PerformanceAnalyzer migration no longer imports Discord or silent-player settings into fresh installs; foreign keys from earlier imports are removed.
 - Discord alerts share one rate limit per webhook and retry on HTTP 429; fallback log is flushed periodically.
@@ -17,6 +21,7 @@ All notable changes to BSAntiCheat are documented in this file.
 - Timer check uses the client tick-end packet; lag detection uses a short window (per region on Folia).
 - Update notice shows clickable Modrinth and CurseForge links to operators on join.
 - Validation for all numeric config values; `clear --db` deletes by player UUID.
+- Console messages are English throughout; `/acsilent` category names come from the language files.
 - Various smaller thread-safety, memory and performance fixes.
 
 ### API

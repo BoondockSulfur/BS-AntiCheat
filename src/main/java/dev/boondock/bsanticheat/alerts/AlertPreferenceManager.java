@@ -206,20 +206,13 @@ public class AlertPreferenceManager {
      * Alert categories that can be individually muted.
      */
     public enum AlertCategory {
-        ALL("Alle Alerts", "All Alerts"),
-        XRAY("XRay-Erkennung", "XRay Detection"),
-        MOVEMENT("Movement-Checks", "Movement Checks");
+        ALL,
+        XRAY,
+        MOVEMENT;
 
-        private final String displayNameDe;
-        private final String displayNameEn;
-
-        AlertCategory(String displayNameDe, String displayNameEn) {
-            this.displayNameDe = displayNameDe;
-            this.displayNameEn = displayNameEn;
-        }
-
-        public String getDisplayName(String lang) {
-            return "de".equalsIgnoreCase(lang) ? displayNameDe : displayNameEn;
+        /** Language key of the category's display name. */
+        public String langKey() {
+            return "acsilent.category." + name().toLowerCase(java.util.Locale.ROOT);
         }
     }
 }

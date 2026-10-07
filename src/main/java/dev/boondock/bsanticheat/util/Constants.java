@@ -131,6 +131,49 @@ public final class Constants {
     // above that.
     public static final double RIPTIDE_MAX_SPEED = 75.0;
     public static final double OTHER_VEHICLE_MAX_SPEED = 20.0;
+    // Happy ghast: ~3.6 b/s ridden flight; the ceiling leaves room for sampling and latency
+    // and is scaled up by its flying_speed attribute when that is raised.
+    public static final double HAPPY_GHAST_MAX_SPEED = 8.0;
+    // Nautilus / zombie nautilus: ~6.5 b/s underwater cruising, plus a dash of ~12 blocks
+    // every 2 s. The dash is granted as a refilling credit on top of the cruising ceiling.
+    public static final double NAUTILUS_MAX_SPEED = 10.0;
+    public static final double NAUTILUS_DASH_BLOCKS = 18.0;
+    public static final long NAUTILUS_DASH_INTERVAL_MS = 2000L;
+    // Ridden land mounts: blocks per second per point of movement_speed (the same conversion
+    // that gives a player's 0.1 → 4.317 b/s), and the margin on top of it. Only ever raises
+    // the flat ceilings above, for mounts whose attribute was raised by items or plugins.
+    public static final double MOUNT_BPS_PER_SPEED_UNIT = 43.17;
+    public static final double MOUNT_ATTRIBUTE_MARGIN = 1.35;
+
+    // ==================== SPEAR LUNGE ====================
+    // Lunge enchantment: horizontal impulse per level in blocks per tick, stronger airborne.
+    public static final double LUNGE_IMPULSE_PER_LEVEL = 0.458;
+    public static final double LUNGE_AIR_FACTOR = 1.5;
+    // How long after the stab the per-sample speed cap is raised (15 ticks).
+    public static final long LUNGE_WINDOW_MS = 750L;
+    // Distance an impulse carries before air drag (0.91 per tick) has eaten it: 1/(1-0.91).
+    // Credited once per stab to the speed budget.
+    public static final double LUNGE_BUDGET_TICKS = 11.0;
+    // Stabs closer together than this count as one lunge: a floor against STAB packet spam,
+    // set below any spear use a player can repeat by hand.
+    public static final long LUNGE_MIN_SPACING_MS = 250L;
+
+    // ==================== NOFALL / SPRINT / MACE ====================
+    // NoFall: a landing counts when the measured fall exceeds safe_fall_distance by this
+    // much (vanilla deals floor(excess) damage, so 2 blocks means at least 2 damage).
+    public static final double NOFALL_MIN_EXTRA_DISTANCE = 2.0;
+    public static final int NOFALL_VIOLATIONS = 2;
+    // How long after a landing the fall damage event may still arrive.
+    public static final long NOFALL_RESOLVE_MS = 150L;
+    // Mid-air: consecutive samples whose vanilla fall distance lags far behind the measured one.
+    public static final int NOFALL_SPOOF_SAMPLES = 3;
+    // Sprint: how long a sprint vanilla would have ended must last before it counts.
+    public static final long SPRINT_MIN_DURATION_MS = 1500L;
+    public static final double SPRINT_OMNI_MAX_ANGLE = 100.0;
+    public static final int SPRINT_OMNI_VIOLATIONS = 10;
+    // Mace: claimed fall distance above the measured one, and suspicious smashes within 10 s.
+    public static final double MACE_MIN_EXCESS = 4.0;
+    public static final int MACE_VIOLATIONS = 3;
 
     // Elytra/Riptide: consecutive over-speed samples before flagging (speeds above are b/s)
     public static final int ELYTRA_VIOLATIONS = 3;
@@ -238,6 +281,40 @@ public final class Constants {
     // Grace after a teleport/join/world change: chunk loading stalls the CLIENT, which
     // then flushes its queued packets in one burst.
     public static final long PACKET_GRACE_MS = 5000L;
+    // PingSpoof: round trip used while spoofing is suspected and no keep-alive round trip
+    // is available. Ordinary connections stay well below it.
+    public static final double PINGSPOOF_RTT_CAP_MS = 200.0;
+    // First protocol with the play Ping/Pong packet pair (1.17); older clients reach it only
+    // through a translating proxy.
+    public static final int PROTOCOL_1_17 = 755;
+    public static final long PINGSPOOF_DIVERGENCE_MS = 500L;
+    public static final int PINGSPOOF_VIOLATIONS = 3;
+    // BadPackets (extended): consecutive duplicate hotbar changes within the window.
+    public static final int BADPACKETS_DUPLICATE_SLOT_COUNT = 3;
+    public static final long BADPACKETS_DUPLICATE_SLOT_WINDOW_MS = 2000L;
+    // BadPackets (extended): flight claims while flight is not allowed, within the window.
+    public static final int BADPACKETS_ABILITIES_COUNT = 3;
+    public static final long BADPACKETS_ABILITIES_WINDOW_MS = 10_000L;
+    // A claim is only judged once the abilities revoking flight have been on the wire longer
+    // than the round trip plus this margin (the client may not have had them yet).
+    public static final long BADPACKETS_ABILITIES_MARGIN_MS = 250L;
+    // Upper bound for the round trip used in that grace, so a slow or inflated round trip
+    // cannot keep a revocation "in flight" indefinitely.
+    public static final long BADPACKETS_ABILITIES_MAX_RTT_MS = 1500L;
+    // A PlayerToggleFlightEvent this close to a claim means the server processed the claim
+    // while flight was allowed (e.g. a double-jump plugin), so the claim was legitimate.
+    public static final long BADPACKETS_ABILITIES_TOGGLE_WINDOW_MS = 1000L;
+    // Delay before a claim is checked on the player's thread, so the server has handled the
+    // claim packet (and fired its toggle event) by then.
+    public static final long BADPACKETS_ABILITIES_CHECK_DELAY_TICKS = 2L;
+
+    // ==================== CRYSTAL / ANCHOR AURA ====================
+    public static final long CRYSTALAURA_MIN_BREAK_MS = 50L;
+    public static final int CRYSTALAURA_MAX_BREAKS_PER_SECOND = 10;
+    public static final double CRYSTALAURA_MAX_ANGLE = 90.0;
+    public static final int CRYSTALAURA_VIOLATIONS = 5;
+    public static final long ANCHORAURA_MIN_INTERVAL_MS = 50L;
+    public static final int ANCHORAURA_VIOLATIONS = 3;
 
     // ==================== CRASH PROTECTION ====================
     // Generous multiples of the vanilla limits (books: 100 pages / ~1024 chars per page)

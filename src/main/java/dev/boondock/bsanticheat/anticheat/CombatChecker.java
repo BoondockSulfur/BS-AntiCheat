@@ -7,6 +7,7 @@ import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.CheckMath;
 import dev.boondock.bsanticheat.util.Constants;
+import dev.boondock.bsanticheat.util.ItemCompat;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -47,6 +48,16 @@ public class CombatChecker implements Listener {
     private ViolationManager violationManager;
     private TransactionManager transactionManager;
     private MeleeTracker meleeTracker;
+    // Server-measured fall distance (shared with MovementChecker) and spear lunges, for the
+    // mace smash check.
+    private FallTracker fallTracker;
+    private LungeTracker lungeTracker;
+    private final Map<UUID, long[]> maceStreak = new ConcurrentHashMap<>();
+    // Vanilla smashes only when the attacker has fallen more than this.
+    private static final double SMASH_MIN_FALL = 1.5;
+    // A lunge this recent makes the attacker's motion something the fall measurement does
+    // not model.
+    private static final long MACE_LUNGE_GRACE_MS = 3000L;
 
     // Slack for latency/hitbox interpolation on top of the surface distance.
     private static final double HITBOX_ALLOWANCE = 0.3;
@@ -153,6 +164,14 @@ public class CombatChecker implements Listener {
         this.meleeTracker = meleeTracker;
     }
 
+    public void setFallTracker(FallTracker fallTracker) {
+        this.fallTracker = fallTracker;
+    }
+
+    public void setLungeTracker(LungeTracker lungeTracker) {
+        this.lungeTracker = lungeTracker;
+    }
+
     /** Suspicious-hit streak: increment within the window, restart when it lapsed. */
     private int bumpStreak(Map<UUID, long[]> map, UUID id) {
         return bumpStreak(map, id, System.currentTimeMillis(), 0L);
@@ -213,7 +232,7 @@ public class CombatChecker implements Listener {
         if (meleeTracker != null && !meleeTracker.isMeleeHit(attacker.getUniqueId(), victim.getEntityId(), now)) {
             if (config.debugMode()) {
                 plugin.getLogger().info("[COMBAT-DEBUG] " + attacker.getName()
-                        + ": Schaden ohne Angriffspaket (Plugin-Ability) -> nicht bewertet");
+                        + ": damage without an attack packet (plugin ability) -> not judged");
             }
             resetStreaks(attacker.getUniqueId());
             return;
@@ -221,6 +240,9 @@ public class CombatChecker implements Listener {
 
         boolean victimIsPlayer = victim instanceof Player;
         UUID attackerId = attacker.getUniqueId();
+
+        // --- Mace smash (OFF by default) ---
+        checkMaceSmash(attacker, attackerId, now);
 
         // --- Criticals (OFF by default — see config.yml) ---
         // Caveat, verified against the vanilla rules: the server only awards a critical
@@ -334,6 +356,14 @@ public class CombatChecker implements Listener {
         if (range != null) {
             configured = Math.max(configured, range.getValue() + Constants.REACH_ATTRIBUTE_SLACK);
         }
+        // Weapons with an attack_range component (the spear, MC 1.21.11+, reaches 4.5 plus a
+        // 0.125 hitbox margin) set their own melee reach. The item is read from the main hand
+        // NOW, at damage time: this event fires while the server processes the attack packet,
+        // after every hotbar change the client sent before it and before any sent after it —
+        // so it is exactly the item the attack was made with, and swapping to a long weapon
+        // afterwards cannot lend its reach to the hit.
+        ItemCompat.AttackRange weapon = ItemCompat.attackRange(attacker.getInventory().getItemInMainHand());
+        configured = itemReachLimit(configured, weapon);
         // Latency is an ADDITIVE error here, not a multiplicative one. pingSlack scales a
         // limit, which is right for a speed (blocks per tick x slack) and wrong for a
         // distance: what latency costs is however far the target travelled while the hit
@@ -347,7 +377,7 @@ public class CombatChecker implements Listener {
             reachStreak.remove(attackerId);
             if (config.debugMode()) {
                 plugin.getLogger().info(String.format(java.util.Locale.ROOT,
-                        "[REACH-DEBUG] %s uebersprungen: ping=%dms > %dms",
+                        "[REACH-DEBUG] %s skipped: ping=%dms > %dms",
                         attacker.getName(), ping, config.reachMaxPingMs()));
             }
             return;
@@ -372,8 +402,8 @@ public class CombatChecker implements Listener {
             // Logged from 80% of the limit, not only on the flag, so an alert can be judged
             // afterwards against the hits that led up to it.
             plugin.getLogger().info(String.format(java.util.Locale.ROOT,
-                    "[REACH-DEBUG] %s -> %s dist=%.2f max=%.2f (konfig=%.2f scale=%.2f "
-                            + "latenz=+%.2f ping=%dms verlauf=%b) streak=%d/%d",
+                    "[REACH-DEBUG] %s -> %s dist=%.2f max=%.2f (config=%.2f scale=%.2f "
+                            + "latency=+%.2f ping=%dms history=%b) streak=%d/%d",
                     attacker.getName(), victim.getType().name(), distance, maxReach,
                     configured, CheckMath.scale(attacker), latencyAllowance, ping, historyMode,
                     (int) reachStreak.getOrDefault(attackerId, new long[]{0, 0})[0],
@@ -388,6 +418,51 @@ public class CombatChecker implements Listener {
         } else {
             reachStreak.remove(attackerId);
         }
+    }
+
+    /**
+     * A mace smash computed from a fall the server did not see.
+     *
+     * <p>Smash damage grows with the attacker's fall distance, and vanilla builds that
+     * distance from the client's on-ground flag: a client claiming to be airborne while
+     * walking down stairs or hopping keeps adding to it. The server's own measurement
+     * ({@link FallTracker}) only counts descent with nothing underneath, so a claimed distance
+     * far above it is inflated. Only a measurement that is reliable since the last landing is
+     * compared — a wind charge, knockback, bounce or teleport since then makes it unreliable —
+     * and a recent spear lunge skips the check as well.
+     */
+    void checkMaceSmash(Player attacker, UUID id, long now) {
+        if (!config.maceDetectionEnabled() || fallTracker == null) return;
+        if (attacker.getInventory().getItemInMainHand().getType() != org.bukkit.Material.MACE) return;
+        double claimed = attacker.getFallDistance();
+        if (claimed <= SMASH_MIN_FALL) return;
+        FallTracker.State fall = fallTracker.state(id);
+        if (!fall.reliable()) return;
+        if (lungeTracker != null) {
+            LungeTracker.Lunge lunge = lungeTracker.lastLunge(id);
+            if (lunge != null && now - lunge.timeMs() < MACE_LUNGE_GRACE_MS) return;
+        }
+        if (attacker.isGliding() || attacker.isInsideVehicle() || attacker.isInWater()) return;
+        double excess = claimed - fall.distance();
+        if (excess < Math.max(config.maceMinExcess(), fall.distance() * 0.5)) return;
+        if (config.debugMode()) {
+            plugin.getLogger().info(String.format(java.util.Locale.ROOT,
+                    "[MACE-DEBUG] %s claimed=%.2f measured=%.2f", attacker.getName(), claimed, fall.distance()));
+        }
+        int c = bumpStreak(maceStreak, id, now, 0L);
+        if (c < config.maceViolations()) return;
+        maceStreak.remove(id);
+        handleViolation(attacker, "MACE", lang.format("alert.mace", claimed, fall.distance()), claimed);
+    }
+
+    /**
+     * The reach limit with a weapon's {@code attack_range}: its maximum reach plus the hitbox
+     * margin it adds to targets, with the same slack as the attribute. Never lowers the limit;
+     * the component's minimum reach is irrelevant to an upper bound. Package-private for tests.
+     */
+    static double itemReachLimit(double configured, ItemCompat.AttackRange weapon) {
+        if (weapon == null) return configured;
+        return Math.max(configured, weapon.maxReach() + weapon.hitboxMargin() + Constants.REACH_ATTRIBUTE_SLACK);
     }
 
     /**
@@ -624,6 +699,7 @@ public class CombatChecker implements Listener {
         reachStreak.remove(playerId);
         killAuraAngleStreak.remove(playerId);
         killAuraMultiStreak.remove(playerId);
+        maceStreak.remove(playerId);
     }
 
     private static final class TargetHit {

@@ -52,7 +52,8 @@ public final class PacketIntegration {
                                               LanguageManager lang, LuckPermsHook luckPerms, GeyserHook geyser,
                                               MovementAlertManager alerts, ViolationManager violations,
                                               MovementChecker movementChecker, VehicleChecker vehicleChecker,
-                                              VelocityChecker velocityChecker, CombatChecker combatChecker) {
+                                              VelocityChecker velocityChecker, CombatChecker combatChecker,
+                                              CrystalChecker crystalChecker, LungeTracker lungeTracker) {
         if (PacketEvents.getAPI() == null || !PacketEvents.getAPI().isInitialized()) {
             return null;
         }
@@ -63,6 +64,8 @@ public final class PacketIntegration {
         MeleeTracker melee = new MeleeTracker();
         checker.setMeleeTracker(melee);
         combatChecker.setMeleeTracker(melee);
+        // Spear jabs and the hotbar around them, for the movement checks.
+        checker.setLungeTracker(lungeTracker);
         checker.setLuckPerms(luckPerms);
         checker.setGeyser(geyser);
         checker.setAlertManager(alerts);
@@ -75,6 +78,17 @@ public final class PacketIntegration {
         vehicleChecker.setTransactionManager(transactions);
         velocityChecker.setTransactionManager(transactions);
         combatChecker.setTransactionManager(transactions);
+        crystalChecker.setTransactionManager(transactions);
+        transactions.setSpoofSink(checker::onSpoof);
+        // Ping replies of legacy clients (translated by a proxy) and Bedrock players (produced
+        // by Geyser) say nothing about the player, so their round trip is never distrusted.
+        transactions.setSpoofExemption(uuid -> {
+            org.bukkit.entity.Player p = Bukkit.getPlayer(uuid);
+            if (p == null) throw new IllegalStateException("player not online yet");
+            int protocol = Exemptions.clientProtocol(p);
+            if (protocol > 0 && protocol < dev.boondock.bsanticheat.util.Constants.PROTOCOL_1_17) return true;
+            return geyser != null && geyser.isBedrock(p);
+        });
 
         PacketIntegration integration = new PacketIntegration(plugin, checker, transactions);
 

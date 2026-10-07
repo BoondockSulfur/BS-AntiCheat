@@ -5,7 +5,7 @@
 
   <groupId>dev.boondock</groupId>
   <artifactId>bsanticheat</artifactId>
-  <version>1.0.7</version>
+  <version>1.1.0</version>
   <name>BSAntiCheat</name>
   <description>AntiCheat plugin for Paper 1.21.x with Movement and XRay detection</description>
 
@@ -110,7 +110,7 @@
     <dependency>
       <groupId>com.github.retrooper</groupId>
       <artifactId>packetevents-spigot</artifactId>
-      <version>2.12.1</version>
+      <version>2.14.0</version>
       <scope>provided</scope>
     </dependency>
     <dependency>

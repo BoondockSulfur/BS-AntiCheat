@@ -49,6 +49,10 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
     private InventoryChecker inventoryChecker;
     private VelocityChecker velocityChecker;
     private PistonTracker pistonTracker;
+    private CrystalChecker crystalChecker;
+    // Spear jabs with Lunge, recorded from the packet layer for the movement checks. Created
+    // here (plain Java, no PacketEvents types) so it exists with or without PacketEvents.
+    private LungeTracker lungeTracker;
     private ViolationManager violationManager;
     // Held as PacketIntegration, never as a PacketEvents type: naming one here would
     // make the JVM resolve it while linking THIS class, so the plugin would fail to
@@ -98,11 +102,19 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         vehicleChecker = new VehicleChecker(this, configAdapter, database, lang);
         inventoryChecker = new InventoryChecker(this, configAdapter, database, lang);
         velocityChecker = new VelocityChecker(this, configAdapter, database, lang);
+        crystalChecker = new CrystalChecker(this, configAdapter, database, lang);
+        lungeTracker = new LungeTracker();
 
         // Pistons displace players without any velocity packet, so the movement and
         // inventory checks need to know where one just fired.
         pistonTracker = new PistonTracker();
         movementChecker.setPistonTracker(pistonTracker);
+
+        // Lunges excuse speed in the movement checks and skip the mace check; the fall
+        // measurement is shared so the mace check compares against the same descent.
+        movementChecker.setLungeTracker(lungeTracker);
+        combatChecker.setLungeTracker(lungeTracker);
+        combatChecker.setFallTracker(movementChecker.fallTracker());
         inventoryChecker.setPistonTracker(pistonTracker);
 
         // Wire alert managers
@@ -113,6 +125,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         vehicleChecker.setAlertManager(movementAlertManager);
         inventoryChecker.setAlertManager(movementAlertManager);
         velocityChecker.setAlertManager(movementAlertManager);
+        crystalChecker.setAlertManager(movementAlertManager);
 
         // Set alert preference managers
         movementAlertManager.setPreferenceManager(alertPreferenceManager);
@@ -128,6 +141,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         vehicleChecker.setViolationManager(violationManager);
         inventoryChecker.setViolationManager(violationManager);
         velocityChecker.setViolationManager(violationManager);
+        crystalChecker.setViolationManager(violationManager);
 
         // LuckPerms integration (optional)
         luckPerms = LuckPermsHook.tryHook(this);
@@ -139,6 +153,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
             vehicleChecker.setLuckPerms(luckPerms);
             inventoryChecker.setLuckPerms(luckPerms);
             velocityChecker.setLuckPerms(luckPerms);
+            crystalChecker.setLuckPerms(luckPerms);
         }
 
         // Geyser/Floodgate: exempt Bedrock players from checks (they use different physics)
@@ -150,6 +165,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         vehicleChecker.setGeyser(geyser);
         inventoryChecker.setGeyser(geyser);
         velocityChecker.setGeyser(geyser);
+        crystalChecker.setGeyser(geyser);
 
         // ViaVersion: optional legacy-client exemption (shared statically via Exemptions).
         Exemptions.setViaVersion(ViaVersionHook.tryHook(this));
@@ -162,6 +178,7 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         Bukkit.getPluginManager().registerEvents(vehicleChecker, this);
         Bukkit.getPluginManager().registerEvents(inventoryChecker, this);
         Bukkit.getPluginManager().registerEvents(velocityChecker, this);
+        Bukkit.getPluginManager().registerEvents(crystalChecker, this);
         Bukkit.getPluginManager().registerEvents(pistonTracker, this);
         Bukkit.getPluginManager().registerEvents(this, this);
 
@@ -174,7 +191,8 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         try {
             packets = PacketIntegration.tryEnable(this, configAdapter, database, lang, luckPerms, geyser,
                     movementAlertManager, violationManager,
-                    movementChecker, vehicleChecker, velocityChecker, combatChecker);
+                    movementChecker, vehicleChecker, velocityChecker, combatChecker,
+                    crystalChecker, lungeTracker);
             if (packets != null) {
                 getLogger().info("[PacketEvents] hooked - packet checks + transaction latency active.");
             } else {
@@ -290,6 +308,8 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
         if (vehicleChecker != null) vehicleChecker.cleanup(playerId);
         if (inventoryChecker != null) inventoryChecker.cleanup(playerId);
         if (velocityChecker != null) velocityChecker.cleanup(playerId);
+        if (crystalChecker != null) crystalChecker.cleanup(playerId);
+        if (lungeTracker != null) lungeTracker.cleanup(playerId);
         if (packets != null) packets.cleanup(playerId);
         if (alertPreferenceManager != null) alertPreferenceManager.cleanup(playerId);
         if (violationManager != null) violationManager.cleanup(playerId);
@@ -318,4 +338,6 @@ public class BSAntiCheat extends JavaPlugin implements Listener {
     public XRayAlertManager xrayAlertManager() { return xrayAlertManager; }
     public MovementAlertManager movementAlertManager() { return movementAlertManager; }
     public AlertPreferenceManager alertPreferenceManager() { return alertPreferenceManager; }
+    /** Spear-lunge record for the movement checks; empty while PacketEvents is absent. */
+    public LungeTracker lungeTracker() { return lungeTracker; }
 }

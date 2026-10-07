@@ -116,6 +116,10 @@ acsilent:
   list_muted: "&7Muted: &f%categories%"
   list_none: "&7No categories muted."
   usage: "&eUsage: &f/acsilent [all|xray|movement|list]"
+  category:
+    all: "All alerts"
+    xray: "XRay detection"
+    movement: "Movement checks"
 
 # Movement type names (used inside speed alert messages)
 movetype:
@@ -170,6 +174,23 @@ alert:
   autoclicker_pattern: "AutoClicker: too consistent (SD %.1fms, %d CPS)"
   badpackets: "BadPackets: invalid rotation (pitch %.1f)"
   timer: "Timer: packets ahead of real time (balance %dms)"
+  badpackets_slot: "BadPackets: invalid hotbar slot %d"
+  badpackets_self_attack: "BadPackets: attacked its own entity"
+  badpackets_duplicate_slot: "BadPackets: same hotbar slot sent %d times in a row"
+  badpackets_abilities: "BadPackets: claimed flight while not allowed to fly (%d times)"
+  pingspoof_order: "PingSpoof: reply skipped %d older pings"
+  pingspoof_stall: "PingSpoof: %d pings withheld while later keep-alives were answered"
+  pingspoof_divergence: "PingSpoof: transaction round trip %.0fms above keep-alive"
+  crystalaura_fast: "CrystalAura: crystal broken %dms after spawning"
+  crystalaura_rate: "CrystalAura: %d crystals broken per second (max %d)"
+  crystalaura_angle: "CrystalAura: crystal broken %.0f deg off aim"
+  anchoraura: "AnchorAura: anchor detonated %dms after charging"
+  nofall_landing: "NoFall: landed after %.1f blocks without fall damage"
+  nofall_spoof: "NoFall: fall distance reset in mid-air (measured descent %.1f, reported fall distance %.1f)"
+  sprint_hunger: "Sprint: sprinting with food level %d"
+  sprint_blind: "Sprint: sprinting while blinded"
+  sprint_omni: "Sprint: sprinting %.0f deg away from the view direction"
+  mace: "Mace: smash from fall distance %.1f, measured %.1f"
   # XRay detector messages
   xray_threshold: "[XRay?] %s: threshold exceeded within %ds - %s"
   xray_ratio: "[XRay?] %s: suspicious ore/stone ratio: %.2f%% (%d valuable ores, %d stone) threshold: %.2f%% - %s"

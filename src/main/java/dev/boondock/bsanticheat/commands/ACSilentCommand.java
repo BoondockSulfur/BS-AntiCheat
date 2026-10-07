@@ -56,7 +56,8 @@ public class ACSilentCommand implements CommandExecutor, TabCompleter {
 
         if (sub.equals("reset")) {
             preferences.resetAll(player.getUniqueId());
-            player.sendMessage(lang.get("acsilent.toggled_off", "%category%", "ALL"));
+            player.sendMessage(lang.get("acsilent.toggled_off",
+                "%category%", lang.get(AlertCategory.ALL.langKey())));
             return true;
         }
 
@@ -70,7 +71,7 @@ public class ACSilentCommand implements CommandExecutor, TabCompleter {
 
         boolean silenced = preferences.toggleCategory(player.getUniqueId(), category);
         player.sendMessage(lang.get(silenced ? "acsilent.toggled_on" : "acsilent.toggled_off",
-            "%category%", category.getDisplayName(lang.getCurrentLanguage())));
+            "%category%", lang.get(category.langKey())));
         return true;
     }
 
@@ -81,10 +82,11 @@ public class ACSilentCommand implements CommandExecutor, TabCompleter {
         if (muted.isEmpty()) {
             player.sendMessage(lang.get("acsilent.list_none"));
         } else if (muted.contains(AlertCategory.ALL)) {
-            player.sendMessage(lang.get("acsilent.list_muted", "%categories%", "ALL"));
+            player.sendMessage(lang.get("acsilent.list_muted",
+                "%categories%", lang.get(AlertCategory.ALL.langKey())));
         } else {
             String cats = muted.stream()
-                .map(c -> c.getDisplayName(lang.getCurrentLanguage()))
+                .map(c -> lang.get(c.langKey()))
                 .collect(Collectors.joining(", "));
             player.sendMessage(lang.get("acsilent.list_muted", "%categories%", cats));
         }

@@ -7,6 +7,9 @@ import dev.boondock.bsanticheat.integration.LuckPermsHook;
 import dev.boondock.bsanticheat.lang.LanguageManager;
 import dev.boondock.bsanticheat.util.CheckMath;
 import dev.boondock.bsanticheat.util.Constants;
+import dev.boondock.bsanticheat.util.GameCompat;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
@@ -14,15 +17,18 @@ import org.bukkit.entity.Boat;
 import org.bukkit.entity.Camel;
 import org.bukkit.entity.Donkey;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.HappyGhast;
 import org.bukkit.entity.Horse;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Llama;
 import org.bukkit.entity.Minecart;
 import org.bukkit.entity.Mule;
 import org.bukkit.entity.Pig;
+import org.bukkit.entity.SkeletonHorse;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Strider;
 import org.bukkit.entity.Vehicle;
+import org.bukkit.entity.ZombieHorse;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -82,6 +88,8 @@ public class VehicleChecker implements Listener {
     // ridden horse, a plugin repositioning the boat), not movement. Vanilla vehicles stay
     // far below one block per tick; the elytra-class speeds do not apply to vehicles.
     private static final double VEHICLE_TELEPORT_DISTANCE = 8.0;
+    // Nautilus dash credit per rider: [0] = blocks available, [1] = last refill (ms).
+    private final Map<UUID, double[]> dashCredit = new ConcurrentHashMap<>();
 
     public VehicleChecker(Plugin plugin, PluginConfig config, DatabaseManager database, LanguageManager lang) {
         this.plugin = plugin;
@@ -178,6 +186,7 @@ public class VehicleChecker implements Listener {
         boolean iceMomentum = iceMult > 1.0;
 
         // --- Boat-Fly: boat stays airborne without falling ---
+        // Boats only: flying mounts (happy ghast) legitimately stay airborne.
         if (vehicle instanceof Boat) {
             double dy = to.getY() - from.getY();
             boolean airborne = !iceMomentum && isAirborne(to);
@@ -212,14 +221,22 @@ public class VehicleChecker implements Listener {
         long elapsed = now - sampleAt;
         if (elapsed < SPEED_SAMPLE_WINDOW_MS) return; // keep accumulating
 
-        double bps = sampleFrom.distance(to) / (elapsed / 1000.0);
+        double distance = sampleFrom.distance(to);
+        double bps = distance / (elapsed / 1000.0);
         speedSampleFrom.put(playerId, to.clone());
         speedSampleAt.put(playerId, now);
 
         double max = maxSpeedFor(vehicle, iceMult)
                 * dev.boondock.bsanticheat.util.CheckMath.pingSlack(effectivePing(player));
 
-        if (bps > max) {
+        boolean overSpeed = bps > max;
+        if (overSpeed && GameCompat.isNautilus(vehicle)) {
+            // The dash covers the excess while its credit lasts.
+            double excess = distance - max * (elapsed / 1000.0);
+            overSpeed = !drawDashCredit(playerId, excess, now);
+        }
+
+        if (overSpeed) {
             int c = consecutiveVehicleSpeed.merge(playerId, 1, Integer::sum);
             if (c >= config.vehicleSpeedViolations()) {
                 handleViolation(player, "VEHICLE_SPEED",
@@ -339,30 +356,107 @@ public class VehicleChecker implements Listener {
                 to, Constants.VEHICLE_ICE_SPEED_MULTIPLIER, Constants.VEHICLE_BLUE_ICE_SPEED_MULTIPLIER);
     }
 
+    /**
+     * Take {@code excess} blocks from the rider's nautilus dash credit, which refills at one
+     * dash ({@link Constants#NAUTILUS_DASH_BLOCKS}) per {@link Constants#NAUTILUS_DASH_INTERVAL_MS}
+     * and holds at most one dash.
+     *
+     * @return true when the credit covered the excess
+     */
+    boolean drawDashCredit(UUID playerId, double excess, long now) {
+        double cap = Constants.NAUTILUS_DASH_BLOCKS;
+        double[] c = dashCredit.computeIfAbsent(playerId, k -> new double[]{cap, now});
+        double refill = (now - c[1]) * cap / Constants.NAUTILUS_DASH_INTERVAL_MS;
+        c[0] = Math.min(cap, c[0] + Math.max(0.0, refill));
+        c[1] = now;
+        if (excess <= c[0]) {
+            c[0] -= Math.max(0.0, excess);
+            return true;
+        }
+        c[0] = 0.0;
+        return false;
+    }
+
     /** Per-type speed ceiling in blocks per second, with the (remembered) boat ice multiplier. */
-    private double maxSpeedFor(Vehicle vehicle, double iceMult) {
+    double maxSpeedFor(Vehicle vehicle, double iceMult) {
         // A Speed potion on the mount is legitimate and raises its ceiling; without this
         // a fast horse under Speed II blows past the flat limit.
         double potion = 1.0;
-        if (vehicle instanceof LivingEntity le && le.hasPotionEffect(PotionEffectType.SPEED)) {
-            var eff = le.getPotionEffect(PotionEffectType.SPEED);
-            if (eff != null) potion += Constants.SPEED_POTION_MULTIPLIER_PER_LEVEL * (eff.getAmplifier() + 1);
+        double cap = baseMaxSpeedFor(vehicle, iceMult);
+        if (vehicle instanceof LivingEntity le) {
+            if (le.hasPotionEffect(PotionEffectType.SPEED)) {
+                var eff = le.getPotionEffect(PotionEffectType.SPEED);
+                if (eff != null) potion += Constants.SPEED_POTION_MULTIPLIER_PER_LEVEL * (eff.getAmplifier() + 1);
+            }
+            // The mount's own speed attribute over its base value covers every modifier
+            // (potions, items, plugins); the larger of the two is used, never both.
+            Attribute speedAttr = vehicle instanceof HappyGhast ? Attribute.FLYING_SPEED : Attribute.MOVEMENT_SPEED;
+            cap *= Math.max(potion, modifierRatio(le, speedAttr));
+            // Land mounts that are steered: a raised movement_speed (plugin horses) lifts the
+            // flat ceiling. Never lowers it.
+            if (isSteeredLandMount(vehicle)) {
+                double attr = attributeValue(le, Attribute.MOVEMENT_SPEED);
+                cap = Math.max(cap, attr * Constants.MOUNT_BPS_PER_SPEED_UNIT * Constants.MOUNT_ATTRIBUTE_MARGIN);
+            }
+            return cap;
         }
-        return baseMaxSpeedFor(vehicle, iceMult) * potion;
+        return cap * potion;
     }
 
-    private double baseMaxSpeedFor(Vehicle vehicle, double iceMult) {
+    private static boolean isSteeredLandMount(Vehicle vehicle) {
+        return vehicle instanceof Horse || vehicle instanceof ZombieHorse || vehicle instanceof SkeletonHorse
+                || vehicle instanceof Donkey || vehicle instanceof Mule || vehicle instanceof Camel;
+    }
+
+    /** Attribute value over base value (≥ 1), or 1 when unavailable. */
+    private static double modifierRatio(LivingEntity entity, Attribute attribute) {
+        try {
+            AttributeInstance inst = entity.getAttribute(attribute);
+            if (inst == null || inst.getBaseValue() <= 0) return 1.0;
+            return Math.max(1.0, inst.getValue() / inst.getBaseValue());
+        } catch (Throwable t) {
+            return 1.0;
+        }
+    }
+
+    private static double attributeValue(LivingEntity entity, Attribute attribute) {
+        try {
+            AttributeInstance inst = entity.getAttribute(attribute);
+            return inst == null ? 0.0 : inst.getValue();
+        } catch (Throwable t) {
+            return 0.0;
+        }
+    }
+
+    double baseMaxSpeedFor(Vehicle vehicle, double iceMult) {
         if (vehicle instanceof Boat) {
             return Constants.BOAT_MAX_SPEED * iceMult;
         }
         if (vehicle instanceof Minecart) return Constants.MINECART_MAX_SPEED;
-        if (vehicle instanceof Horse) return Constants.HORSE_MAX_SPEED;
+        // Mounts newer than the compile API, by type name.
+        double byName = maxSpeedByTypeName(GameCompat.typeName(vehicle));
+        if (byName > 0) return byName;
+        if (vehicle instanceof Horse || vehicle instanceof ZombieHorse || vehicle instanceof SkeletonHorse) {
+            return Constants.HORSE_MAX_SPEED;
+        }
         if (vehicle instanceof Donkey || vehicle instanceof Mule) return Constants.DONKEY_MAX_SPEED;
         if (vehicle instanceof Llama) return Constants.LLAMA_MAX_SPEED;
         if (vehicle instanceof Camel) return Constants.CAMEL_MAX_SPEED;
         if (vehicle instanceof Pig) return Constants.PIG_MAX_SPEED;
         if (vehicle instanceof Strider) return Constants.STRIDER_MAX_SPEED;
         return Constants.OTHER_VEHICLE_MAX_SPEED;
+    }
+
+    /**
+     * Ceiling for mount types identified by name (happy ghast, nautilus, zombie nautilus),
+     * or 0 when the name is not one of them. Camel husks are Camels and handled by type.
+     */
+    static double maxSpeedByTypeName(String typeName) {
+        return switch (typeName) {
+            case GameCompat.HAPPY_GHAST -> Constants.HAPPY_GHAST_MAX_SPEED;
+            case GameCompat.NAUTILUS, GameCompat.ZOMBIE_NAUTILUS -> Constants.NAUTILUS_MAX_SPEED;
+            default -> 0.0;
+        };
     }
 
     private void handleViolation(Player player, String type, String details, double value, Location location) {
@@ -385,6 +479,7 @@ public class VehicleChecker implements Listener {
         consecutiveVehicleSpeed.remove(playerId);
         recentIce.remove(playerId);
         boatAir.remove(playerId);
+        dashCredit.remove(playerId);
         resetSpeedSample(playerId);
     }
 }

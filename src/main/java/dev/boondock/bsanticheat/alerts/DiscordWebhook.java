@@ -35,18 +35,8 @@ public class DiscordWebhook {
      * Alert types for BSAntiCheat webhook notifications.
      */
     public enum AlertType {
-        XRAY("XRay Detection"),
-        MOVEMENT("Movement Detection");
-
-        private final String displayName;
-
-        AlertType(String displayName) {
-            this.displayName = displayName;
-        }
-
-        public String getDisplayName() {
-            return displayName;
-        }
+        XRAY,
+        MOVEMENT
     }
 
     private boolean isValidDiscordWebhookUrl(String webhookUrl) {

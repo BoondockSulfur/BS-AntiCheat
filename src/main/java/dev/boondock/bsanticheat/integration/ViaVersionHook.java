@@ -41,9 +41,9 @@ public class ViaVersionHook {
     public static ViaVersionHook tryHook(Plugin plugin) {
         boolean present = Bukkit.getPluginManager().getPlugin("ViaVersion") != null;
         if (present) {
-            plugin.getLogger().info("ViaVersion erkannt - Client-Versionserkennung verfügbar.");
+            plugin.getLogger().info("ViaVersion found - client version detection available.");
         } else {
-            plugin.getLogger().info("Kein ViaVersion gefunden - Legacy-Client-Ausnahme inaktiv.");
+            plugin.getLogger().info("ViaVersion not found - legacy client exemption inactive.");
         }
         return new ViaVersionHook(plugin, present);
     }
