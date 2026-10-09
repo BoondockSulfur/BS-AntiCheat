@@ -4,6 +4,13 @@ All notable changes to BSAntiCheat are documented in this file.
 
 ---
 
+## [1.1.1] - 2026-10-09
+
+### Fixed
+- Timer no longer flags a connection that slows down and then catches up, even when every tick is only slightly late: late ticks are owed back by the backlog, and a backlog draining at network speed keeps its catch-up window open.
+- AutoClicker no longer reads a held button as 26 CPS while a packet backlog drains.
+- Fly/Speed no longer flag a player whose flight ended in mid-air (leaving creative, /fly off, a world forcing survival on join) until they land, at most 30 seconds.
+
 ## [1.1.0] - 2026-10-07
 
 ### Added

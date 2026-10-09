@@ -123,6 +123,13 @@ public class MovementChecker implements Listener {
     // takes around half a second to bleed below the walking cap, and falls from wherever
     // they were.
     private static final long FLIGHT_END_GRACE_MS = 2000;
+    // Flight that ends in mid-air (leaving creative/spectator, /fly off, a world forcing
+    // survival on join) leaves the player in the air for as long as the client takes to
+    // follow, and a client that missed the change keeps flying until it is resynced. Movement
+    // is not judged until the player lands, at most this long. Only players who could fly a
+    // moment ago get it, so it opens nothing for anyone else.
+    static final long FLIGHT_END_MAX_AIR_MS = 30_000;
+    private final Map<UUID, Long> flightEndedAirborne = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> consecutiveSpeedViolations = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> consecutiveFlyViolations = new ConcurrentHashMap<>();
     // Sustained-hover detection: consecutive airborne samples without falling
@@ -730,19 +737,45 @@ public class MovementChecker implements Listener {
      */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onToggleFlight(org.bukkit.event.player.PlayerToggleFlightEvent event) {
-        if (!event.isFlying()) grantFlightGrace(event.getPlayer().getUniqueId());
+        if (!event.isFlying()) {
+            grantFlightGrace(event.getPlayer().getUniqueId());
+            markFlightEnded(event.getPlayer());
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onGameModeChange(org.bukkit.event.player.PlayerGameModeChangeEvent event) {
         grantFlightGrace(event.getPlayer().getUniqueId());
+        if (endsFlight(event.getPlayer().getGameMode(), event.getNewGameMode())) {
+            markFlightEnded(event.getPlayer());
+        }
+    }
+
+    /** True when the change takes away the flight creative and spectator always have. */
+    static boolean endsFlight(GameMode from, GameMode to) {
+        boolean couldFly = from == GameMode.CREATIVE || from == GameMode.SPECTATOR;
+        boolean canFly = to == GameMode.CREATIVE || to == GameMode.SPECTATOR;
+        return couldFly && !canFly;
+    }
+
+    private void markFlightEnded(Player player) {
+        if (player.isOnGround()) return;
+        flightEndedAirborne.put(player.getUniqueId(), System.currentTimeMillis());
+    }
+
+    /** Whether the grace after flight ended in mid-air still holds, see {@link #FLIGHT_END_MAX_AIR_MS}. */
+    static boolean flightEndGraceHolds(long endedAt, boolean onGround, long now) {
+        return !onGround && now - endedAt < FLIGHT_END_MAX_AIR_MS;
     }
 
     /** Notice flight ending when no event announced it (allowFlight revoked mid-flight). */
     private void trackFlightState(Player player, UUID playerId) {
         boolean flying = player.isFlying();
         Boolean was = wasFlying.put(playerId, flying);
-        if (Boolean.TRUE.equals(was) && !flying) grantFlightGrace(playerId);
+        if (Boolean.TRUE.equals(was) && !flying) {
+            grantFlightGrace(playerId);
+            markFlightEnded(player);
+        }
     }
 
     private void grantFlightGrace(UUID playerId) {
@@ -1966,6 +1999,12 @@ public class MovementChecker implements Listener {
         Long lastJoin = recentJoin.get(playerId);
         if (lastJoin != null && (now - lastJoin) < JOIN_GRACE_MS) return true;
 
+        Long flightEnded = flightEndedAirborne.get(playerId);
+        if (flightEnded != null) {
+            if (flightEndGraceHolds(flightEnded, player.isOnGround(), now)) return true;
+            flightEndedAirborne.remove(playerId);
+        }
+
         // After gliding/riptiding the residual momentum would read as a Speed/Fly violation.
         Long graceUntil = momentumGraceUntil.get(playerId);
         if (graceUntil != null && now < graceUntil) return true;
@@ -2487,6 +2526,7 @@ public class MovementChecker implements Listener {
         recentTeleport.remove(playerId);
         recentJoin.remove(playerId);
         momentumGraceUntil.remove(playerId);
+        flightEndedAirborne.remove(playerId);
         recentSlime.remove(playerId);
         recentBounce.remove(playerId);
         lastFastDescent.remove(playerId);

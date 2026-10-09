@@ -112,7 +112,7 @@ asserted: until 1.0.3 a missing PacketEvents actually prevented the plugin from 
 
 ## Installation
 
-1. Drop `BSAntiCheat-1.1.0.jar` into `plugins/`.
+1. Drop `BSAntiCheat-1.1.1.jar` into `plugins/`.
 2. (Recommended) Install **PacketEvents** for the packet-level checks.
 3. Start the server, then edit `plugins/BSAntiCheat/config.yml` and run `/bsac reload`.
 
@@ -193,7 +193,7 @@ back to what the player was actually doing. If you find one, the alert text and
 ## Building
 
 ```bash
-mvn clean package    # → target/BSAntiCheat-1.1.0.jar
+mvn clean package    # → target/BSAntiCheat-1.1.1.jar
 mvn test             # 182 tests
 ```
 

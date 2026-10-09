@@ -4,6 +4,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -256,5 +257,95 @@ class TimerBalanceTest {
         assertEquals(0, c.flags);
         for (int i = 0; i < 400; i++) c.move(25);
         assertTrue(c.flags > 0);
+    }
+
+    // ==================== late delivery (live alerts 2026-10-08) ====================
+
+    @Test
+    @DisplayName("A connection that slows down and then catches up does not flag")
+    void slowLinkBacklogIsAbsorbed() {
+        // Ticks trickle in 200ms apart for six seconds, no single gap long enough to count
+        // as a stall, then the 90 delayed ticks arrive at once. Before, everything owed
+        // beyond the one-second credit floor was forgotten and the backlog read as a
+        // balance of several seconds (live: 4018ms).
+        Client c = new Client();
+        c.ticks(40, 50);
+        c.ticks(30, 200);
+        c.ticks(90, 1);
+        c.ticks(200, 50);
+        assertEquals(0, c.flags, "late delivery is not a hack");
+        assertTrue(c.st.balance <= LIMIT_CENTI);
+    }
+
+    @Test
+    @DisplayName("A connection that is only slightly late and then catches up does not flag")
+    void mildlyLateLinkIsAbsorbed() {
+        // Live 2026-10-09: ticks arriving 80ms apart instead of 50 — no gap of two ticks,
+        // yet the delay adds up past the credit floor, and the backlog then read as
+        // ~420ms ahead, four times within eight seconds.
+        Client c = new Client();
+        c.ticks(40, 50);
+        c.ticks(100, 80);
+        c.ticks(60, 1);
+        c.ticks(200, 50);
+        assertEquals(0, c.flags, "slight late delivery is not a hack");
+    }
+
+    @Test
+    @DisplayName("Ordinary jitter does not pay for a timer hack")
+    void jitterIsNotBanked() {
+        // A minute of play alternating 40/62ms gaps keeps touching the late threshold.
+        Client c = new Client();
+        for (int i = 0; i < 600; i++) {
+            c.tickEnd(40);
+            c.tickEnd(62);
+        }
+        c.ticks(400, 25);
+        assertTrue(c.flags > 0, "jitter must not bank credit for double speed");
+    }
+
+    @Test
+    @DisplayName("A backlog that drains for longer than the window does not flag")
+    void slowDrainIsAbsorbed() {
+        // Eight seconds of stall, then the backlog over about 1.3s at network speed.
+        Client c = new Client();
+        c.ticks(40, 50);
+        c.now += 8000;
+        c.tickEnd(0);
+        c.ticks(159, 8);
+        c.ticks(200, 50);
+        assertEquals(0, c.flags, "a long drain is still a catch-up");
+    }
+
+    @Test
+    @DisplayName("Late delivery does not pay for a timer hack afterwards")
+    void lateDeliveryIsNotBanked() {
+        Client c = new Client();
+        c.ticks(40, 50);
+        c.ticks(30, 200);
+        c.ticks(400, 25);  // 2x: too slow to count as backlog, so the window closes
+        assertTrue(c.flags > 0, "the debt must not cover sustained double speed");
+    }
+
+    @Test
+    @DisplayName("Drift leak alone opens no catch-up window")
+    void idleOpensNoWindow() {
+        Client c = new Client();
+        c.ticks(5000, 50);
+        assertFalse(c.st.catchingUp(c.now), "one tick per tick is not late delivery");
+    }
+
+    @Test
+    @DisplayName("Swing spacing is not judged while a backlog drains")
+    void catchingUpCoversTheBacklog() {
+        Client c = new Client();
+        c.ticks(40, 50);
+        c.now += 3000;
+        c.tickEnd(0);
+        assertTrue(c.st.catchingUp(c.now), "right after a stall the backlog is due");
+        c.ticks(59, 1);
+        assertTrue(c.st.catchingUp(c.now), "and while it drains");
+        c.ticks(60, 50);
+        assertFalse(c.st.catchingUp(c.now), "normal play afterwards is judged again");
     }
 }

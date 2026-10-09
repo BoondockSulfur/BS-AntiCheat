@@ -107,6 +107,14 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
     private static final long STALL_GAP_MS = 1000L;
     private static final long STALL_MAX_CREDIT_MS = 30_000L;
     private static final long STALL_CATCHUP_BASE_MS = 1000L;
+    // A connection that slows down without stopping delivers its ticks late, one gap at a
+    // time. A gap clearly longer than one tick counts as late: the real time it took beyond
+    // the credit floor is owed back by the backlog, exactly like a single long stall. Only
+    // the jitter margin is excluded, so the drift leak of a client on time banks nothing.
+    private static final long LATE_GAP_MS = TICK_MS + 10L;
+    // Backlog arrives at network speed. Claims this close together while the debt is still
+    // being paid keep the catch-up window open, however long the backlog takes to drain.
+    private static final long BACKLOG_GAP_MS = 10L;
     private static final int MAX_PENDING_TELEPORT_MOVES = 3;
     // AimSnap looks at three consecutive rotation packets, which should span ~2 ticks. This
     // bounds how far apart they may actually have arrived before the "flick" is just a player
@@ -1142,13 +1150,35 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
                 balance = Math.max(balance, normalFloor);
             }
             long raw = rawBalance(balance, elapsed);
-            if (raw < normalFloor && elapsed > STALL_GAP_MS) {
-                // A stall. Its backlog is about to arrive and will claim the stalled time, so
-                // the balance may briefly go as low as the stall actually took (capped).
+            if (raw < normalFloor && elapsed > lateGapMs()) {
+                // A stall, or a connection delivering late. Its backlog is about to arrive and
+                // will claim the time that passed, so the balance may briefly go as low as
+                // that time actually was (capped).
                 stallFloor = Math.min(stallFloor, Math.max(raw, -STALL_MAX_CREDIT_MS * 100L));
+                stallUntil = now + catchUpWindowMs;
+            } else if (now <= stallUntil && elapsed <= BACKLOG_GAP_MS && balance < normalFloor) {
+                // The backlog is still draining: the debt is real time that already passed,
+                // so paying it off never puts the client ahead of the clock.
                 stallUntil = now + catchUpWindowMs;
             }
             balance = Math.max(raw, Math.min(stallFloor, normalFloor));
+        }
+
+        /**
+         * In tick-end mode every tick is announced, so a gap clearly over one tick is already
+         * late delivery. Without tick-end, an idle client sends one movement packet per second,
+         * and only a gap longer than that is a stall.
+         */
+        private long lateGapMs() {
+            return tickEndMode ? LATE_GAP_MS : STALL_GAP_MS;
+        }
+
+        /**
+         * True while a backlog is being paid off or the balance is over the limit. Packets
+         * then arrive bunched, so their spacing says nothing about the player's input.
+         */
+        boolean catchingUp(long now) {
+            return now <= stallUntil || excursionStart != 0L;
         }
 
         /**
@@ -1237,6 +1267,13 @@ public class PacketChecker implements PacketListener, org.bukkit.event.Listener 
         if (isDropping(id)) return;
 
         long now = System.currentTimeMillis();
+        // A backlog delivers a second of swings in a few milliseconds and makes a held button
+        // read as 26 CPS. Its intervals are discarded instead of judged.
+        TimerState timer = timerState.get(id);
+        if (timer != null && timer.catchingUp(now)) {
+            clicks.remove(id);
+            return;
+        }
         ConcurrentLinkedDeque<Long> buf = clicks.computeIfAbsent(id, k -> new ConcurrentLinkedDeque<>());
 
         buf.addLast(now);
